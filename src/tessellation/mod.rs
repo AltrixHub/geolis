@@ -5,7 +5,7 @@ mod tessellate_solid;
 mod tessellate_stroke;
 mod tessellate_with_holes;
 
-pub use stroke_style::StrokeStyle;
+pub use stroke_style::{LineJoin, StrokeStyle};
 pub use tessellate_curve::TessellateCurve;
 pub use tessellate_face::TessellateFace;
 pub use tessellate_solid::TessellateSolid;

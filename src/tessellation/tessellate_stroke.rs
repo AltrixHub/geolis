@@ -1,18 +1,47 @@
 use crate::error::{Result, TessellationError};
 use crate::math::{Point2, Point3, Vector3};
 
-use super::stroke_style::StrokeStyle;
+use super::stroke_style::{LineJoin, StrokeStyle};
 use super::TriangleMesh;
 
-/// Maximum miter scale factor to prevent spikes at sharp angles.
-const MAX_MITER_SCALE: f64 = 2.0;
+/// When the miter scale exceeds this limit, switch to a bevel join.
+const BEVEL_THRESHOLD: f64 = 2.0;
 
 /// Up direction for the flat ribbon (Z+).
 const UP: Vector3 = Vector3::new(0.0, 0.0, 1.0);
 
+/// How a polyline vertex maps to mesh vertices at the join.
+enum JoinKind {
+    /// Miter join or endpoint — 2 mesh vertices (left, right).
+    Miter { dir: Vector3, scale: f64 },
+    /// Bevel join — 3 mesh vertices (1 shared inside + 2 split outside).
+    Bevel {
+        inside_dir: Vector3,
+        inside_scale: f64,
+        /// `true` when the inside of the bend is the right (−offset) side.
+        inside_is_right: bool,
+        outside_in_dir: Vector3,
+        outside_out_dir: Vector3,
+    },
+}
+
+/// Mesh vertex indices associated with a single polyline vertex.
+struct VertexSlot {
+    /// Left index for connecting to the *incoming* segment.
+    in_left: u32,
+    /// Right index for connecting to the *incoming* segment.
+    in_right: u32,
+    /// Left index for connecting to the *outgoing* segment.
+    out_left: u32,
+    /// Right index for connecting to the *outgoing* segment.
+    out_right: u32,
+}
+
 /// Generates a flat ribbon triangle mesh from a polyline and stroke style.
 ///
 /// The ribbon lies in the XY plane with normals pointing in the Z+ direction.
+/// At sharp angles (miter scale > [`BEVEL_THRESHOLD`]) a bevel join is used
+/// instead of a miter to prevent spikes.
 #[derive(Debug)]
 pub struct TessellateStroke {
     points: Vec<Point3>,
@@ -37,6 +66,7 @@ impl TessellateStroke {
     ///
     /// Returns an error if fewer than 2 points are provided, or if consecutive
     /// points are coincident (zero-length segment).
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
     pub fn execute(&self) -> Result<TriangleMesh> {
         let n = self.points.len();
         if n < 2 {
@@ -47,23 +77,17 @@ impl TessellateStroke {
         }
 
         let half_w = self.style.half_width();
+        let joins = self.compute_joins()?;
 
-        // Compute tangent directions at each vertex.
-        let tangents = self.compute_tangents()?;
-
-        // Compute offset directions and miter scales.
-        let offsets = self.compute_offsets(&tangents)?;
-
-        // Generate left/right vertices, normals, and UVs.
-        let vertex_count = n * 2;
-        let mut vertices = Vec::with_capacity(vertex_count);
-        let mut normals = Vec::with_capacity(vertex_count);
-        let mut uvs = Vec::with_capacity(vertex_count);
+        let mut vertices = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
+        let mut slots = Vec::with_capacity(n);
+        let mut bevel_tris: Vec<[u32; 3]> = Vec::new();
 
         // Compute cumulative arc lengths for UV V-coordinate.
         let arc_lengths = self.cumulative_arc_lengths();
         let total_length = arc_lengths[n - 1];
-        // Avoid division by zero for degenerate polylines.
         let inv_total = if total_length > f64::EPSILON {
             1.0 / total_length
         } else {
@@ -73,51 +97,102 @@ impl TessellateStroke {
         let normal = UP;
 
         for i in 0..n {
-            let (offset_dir, miter_scale) = offsets[i];
-            let offset = offset_dir * half_w * miter_scale;
-
-            // Left vertex (U=0)
-            let left = Point3::new(
-                self.points[i].x + offset.x,
-                self.points[i].y + offset.y,
-                self.points[i].z + offset.z,
-            );
-            // Right vertex (U=1)
-            let right = Point3::new(
-                self.points[i].x - offset.x,
-                self.points[i].y - offset.y,
-                self.points[i].z - offset.z,
-            );
-
+            let p = &self.points[i];
             let v = arc_lengths[i] * inv_total;
 
-            vertices.push(left);
-            vertices.push(right);
-            normals.push(normal);
-            normals.push(normal);
-            uvs.push(Point2::new(0.0, v));
-            uvs.push(Point2::new(1.0, v));
+            match &joins[i] {
+                JoinKind::Miter { dir, scale } => {
+                    let idx = vertices.len() as u32;
+                    let off = *dir * half_w * *scale;
+                    vertices.push(Point3::new(p.x + off.x, p.y + off.y, p.z + off.z));
+                    vertices.push(Point3::new(p.x - off.x, p.y - off.y, p.z - off.z));
+                    normals.extend_from_slice(&[normal, normal]);
+                    uvs.extend_from_slice(&[
+                        Point2::new(0.0, v),
+                        Point2::new(1.0, v),
+                    ]);
+                    slots.push(VertexSlot {
+                        in_left: idx,
+                        in_right: idx + 1,
+                        out_left: idx,
+                        out_right: idx + 1,
+                    });
+                }
+                JoinKind::Bevel {
+                    inside_dir,
+                    inside_scale,
+                    inside_is_right,
+                    outside_in_dir,
+                    outside_out_dir,
+                } => {
+                    let idx = vertices.len() as u32;
+                    let in_off = *inside_dir * half_w * *inside_scale;
+                    let off_in = *outside_in_dir * half_w;
+                    let off_out = *outside_out_dir * half_w;
+
+                    if *inside_is_right {
+                        // Left turn: inside = right (−offset), outside = left (+offset).
+                        let v_out_in = Point3::new(p.x + off_in.x, p.y + off_in.y, p.z + off_in.z);
+                        let v_in = Point3::new(p.x - in_off.x, p.y - in_off.y, p.z - in_off.z);
+                        let v_out_out = Point3::new(p.x + off_out.x, p.y + off_out.y, p.z + off_out.z);
+
+                        vertices.extend_from_slice(&[v_out_in, v_in, v_out_out]);
+                        normals.extend_from_slice(&[normal, normal, normal]);
+                        uvs.extend_from_slice(&[
+                            Point2::new(0.0, v),
+                            Point2::new(1.0, v),
+                            Point2::new(0.0, v),
+                        ]);
+
+                        slots.push(VertexSlot {
+                            in_left: idx,
+                            in_right: idx + 1,
+                            out_left: idx + 2,
+                            out_right: idx + 1,
+                        });
+                        // Bevel triangle: inside → outside_in → outside_out (CCW).
+                        bevel_tris.push([idx + 1, idx, idx + 2]);
+                    } else {
+                        // Right turn: inside = left (+offset), outside = right (−offset).
+                        let v_in = Point3::new(p.x + in_off.x, p.y + in_off.y, p.z + in_off.z);
+                        let v_out_in = Point3::new(p.x - off_in.x, p.y - off_in.y, p.z - off_in.z);
+                        let v_out_out = Point3::new(p.x - off_out.x, p.y - off_out.y, p.z - off_out.z);
+
+                        vertices.extend_from_slice(&[v_in, v_out_in, v_out_out]);
+                        normals.extend_from_slice(&[normal, normal, normal]);
+                        uvs.extend_from_slice(&[
+                            Point2::new(0.0, v),
+                            Point2::new(1.0, v),
+                            Point2::new(1.0, v),
+                        ]);
+
+                        slots.push(VertexSlot {
+                            in_left: idx,
+                            in_right: idx + 1,
+                            out_left: idx,
+                            out_right: idx + 2,
+                        });
+                        // Bevel triangle: inside → outside_out → outside_in (CCW).
+                        bevel_tris.push([idx, idx + 2, idx + 1]);
+                    }
+                }
+            }
         }
 
-        // Generate triangle indices.
+        // Generate segment quads.
         let segment_count = if self.closed { n } else { n - 1 };
-        let mut indices = Vec::with_capacity(segment_count * 2);
+        let mut indices = Vec::with_capacity(segment_count * 2 + bevel_tris.len());
 
         for i in 0..segment_count {
             let j = (i + 1) % n;
-            #[allow(clippy::cast_possible_truncation)]
-            let i0 = (i * 2) as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let i1 = (i * 2 + 1) as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let j0 = (j * 2) as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let j1 = (j * 2 + 1) as u32;
-
-            // Two triangles per quad segment.
-            indices.push([i0, j0, i1]);
-            indices.push([i1, j0, j1]);
+            let si = &slots[i];
+            let sj = &slots[j];
+            indices.push([si.out_left, sj.in_left, si.out_right]);
+            indices.push([si.out_right, sj.in_left, sj.in_right]);
         }
+
+        // Append bevel triangles.
+        indices.extend_from_slice(&bevel_tris);
 
         Ok(TriangleMesh {
             vertices,
@@ -127,31 +202,77 @@ impl TessellateStroke {
         })
     }
 
-    /// Computes tangent direction at each vertex.
-    fn compute_tangents(&self) -> Result<Vec<Vector3>> {
+    /// Determines the join kind (miter or bevel) at each polyline vertex.
+    fn compute_joins(&self) -> Result<Vec<JoinKind>> {
         let n = self.points.len();
-        let mut tangents = Vec::with_capacity(n);
+        let line_join = self.style.line_join();
+        let mut joins = Vec::with_capacity(n);
 
         for i in 0..n {
-            let tangent = if self.closed {
+            let is_interior = self.closed || (i > 0 && i < n - 1);
+
+            if is_interior {
                 let prev = if i == 0 { n - 1 } else { i - 1 };
                 let next = (i + 1) % n;
                 let d_prev = self.segment_direction(prev, i)?;
                 let d_next = self.segment_direction(i, next)?;
-                average_direction(d_prev, d_next)
-            } else if i == 0 {
-                self.segment_direction(0, 1)?
-            } else if i == n - 1 {
-                self.segment_direction(n - 2, n - 1)?
+
+                let cos_angle = d_prev.dot(&d_next);
+                let cos_half = f64::midpoint(1.0, cos_angle).sqrt();
+                let miter_scale = if cos_half > f64::EPSILON {
+                    1.0 / cos_half
+                } else {
+                    f64::MAX
+                };
+
+                let use_bevel = match line_join {
+                    LineJoin::Miter => false,
+                    LineJoin::Bevel => true,
+                    LineJoin::Auto => miter_scale > BEVEL_THRESHOLD,
+                };
+
+                if use_bevel {
+                    let turn_z = d_prev.cross(&d_next).z;
+                    let inside_is_right = turn_z > 0.0;
+
+                    let tangent = average_direction(d_prev, d_next);
+                    let inside_dir = normalize_perp(tangent)?;
+                    let inside_scale = miter_scale.min(BEVEL_THRESHOLD);
+
+                    let outside_in_dir = normalize_perp(d_prev)?;
+                    let outside_out_dir = normalize_perp(d_next)?;
+
+                    joins.push(JoinKind::Bevel {
+                        inside_dir,
+                        inside_scale,
+                        inside_is_right,
+                        outside_in_dir,
+                        outside_out_dir,
+                    });
+                } else {
+                    let tangent = average_direction(d_prev, d_next);
+                    let perp = normalize_perp(tangent)?;
+                    joins.push(JoinKind::Miter {
+                        dir: perp,
+                        scale: miter_scale.min(BEVEL_THRESHOLD),
+                    });
+                }
             } else {
-                let d_prev = self.segment_direction(i - 1, i)?;
-                let d_next = self.segment_direction(i, i + 1)?;
-                average_direction(d_prev, d_next)
-            };
-            tangents.push(tangent);
+                // Endpoint: perpendicular to the single adjacent segment.
+                let seg_dir = if i == 0 {
+                    self.segment_direction(0, 1)?
+                } else {
+                    self.segment_direction(n - 2, n - 1)?
+                };
+                let perp = normalize_perp(seg_dir)?;
+                joins.push(JoinKind::Miter {
+                    dir: perp,
+                    scale: 1.0,
+                });
+            }
         }
 
-        Ok(tangents)
+        Ok(joins)
     }
 
     /// Computes the normalized direction from point `a` to point `b`.
@@ -165,47 +286,6 @@ impl TessellateStroke {
             .into());
         }
         Ok(d / len)
-    }
-
-    /// Computes offset direction and miter scale at each vertex.
-    fn compute_offsets(&self, tangents: &[Vector3]) -> Result<Vec<(Vector3, f64)>> {
-        let n = self.points.len();
-        let mut offsets = Vec::with_capacity(n);
-
-        for (i, tangent) in tangents.iter().enumerate() {
-            let offset_dir = tangent.cross(&UP);
-            let offset_len = offset_dir.norm();
-            if offset_len < f64::EPSILON {
-                return Err(TessellationError::InvalidParameters(
-                    "tangent is parallel to the up direction (Z axis)".to_owned(),
-                )
-                .into());
-            }
-            let offset_dir = offset_dir / offset_len;
-
-            // Compute miter scale: 1 / cos(half_angle) between adjacent segments.
-            let miter_scale = if self.closed || (i > 0 && i < n - 1) {
-                let prev = if i == 0 { n - 1 } else { i - 1 };
-                let next = (i + 1) % n;
-                let d_prev = (self.points[i] - self.points[prev]).normalize();
-                let d_next = (self.points[next] - self.points[i]).normalize();
-                let cos_angle = d_prev.dot(&d_next);
-                // miter_scale = 1 / cos(half_angle)
-                // cos(half_angle) = sqrt((1 + cos_angle) / 2)
-                let cos_half = f64::midpoint(1.0, cos_angle).sqrt();
-                if cos_half > f64::EPSILON {
-                    (1.0 / cos_half).min(MAX_MITER_SCALE)
-                } else {
-                    MAX_MITER_SCALE
-                }
-            } else {
-                1.0
-            };
-
-            offsets.push((offset_dir, miter_scale));
-        }
-
-        Ok(offsets)
     }
 
     /// Returns cumulative arc lengths at each vertex.
@@ -233,6 +313,19 @@ fn average_direction(a: Vector3, b: Vector3) -> Vector3 {
     }
 }
 
+/// Returns the normalized perpendicular of `dir` in the XY plane (`dir × UP`).
+fn normalize_perp(dir: Vector3) -> Result<Vector3> {
+    let perp = dir.cross(&UP);
+    let len = perp.norm();
+    if len < f64::EPSILON {
+        return Err(TessellationError::InvalidParameters(
+            "tangent is parallel to the up direction (Z axis)".to_owned(),
+        )
+        .into());
+    }
+    Ok(perp / len)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
@@ -251,7 +344,7 @@ mod tests {
         let op = TessellateStroke::new(points, style(2.0), false);
         let mesh = op.execute().unwrap();
 
-        // 2 points -> 4 vertices, 2 triangles
+        // 2 endpoints -> 4 vertices, 2 triangles
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.indices.len(), 2);
 
@@ -265,6 +358,7 @@ mod tests {
 
     #[test]
     fn l_shape_three_points() {
+        // 90° turn: miter_scale = 1.414 < BEVEL_THRESHOLD → miter join
         let points = vec![
             Point3::new(0.0, 0.0, 0.0),
             Point3::new(5.0, 0.0, 0.0),
@@ -273,13 +367,14 @@ mod tests {
         let op = TessellateStroke::new(points, style(1.0), false);
         let mesh = op.execute().unwrap();
 
-        // 3 points -> 6 vertices, 4 triangles
+        // 2 endpoints + 1 miter -> 6 vertices, 4 triangles
         assert_eq!(mesh.vertices.len(), 6);
         assert_eq!(mesh.indices.len(), 4);
     }
 
     #[test]
-    fn closed_polyline() {
+    fn closed_triangle_uses_bevel() {
+        // Closed right triangle: two vertices exceed BEVEL_THRESHOLD.
         let points = vec![
             Point3::new(0.0, 0.0, 0.0),
             Point3::new(10.0, 0.0, 0.0),
@@ -288,9 +383,11 @@ mod tests {
         let op = TessellateStroke::new(points, style(1.0), true);
         let mesh = op.execute().unwrap();
 
-        // 3 points -> 6 vertices, 6 triangles (3 segments x 2)
-        assert_eq!(mesh.vertices.len(), 6);
-        assert_eq!(mesh.indices.len(), 6);
+        // Vertex 0 (0,0): bevel → 3, Vertex 1 (10,0): miter → 2,
+        // Vertex 2 (10,10): bevel → 3. Total: 8 vertices.
+        assert_eq!(mesh.vertices.len(), 8);
+        // 3 segment quads (6) + 2 bevel triangles = 8.
+        assert_eq!(mesh.indices.len(), 8);
     }
 
     #[test]
@@ -328,6 +425,23 @@ mod tests {
         // U: left=0, right=1
         assert!((mesh.uvs[0].x).abs() < 1e-10);
         assert!((mesh.uvs[1].x - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn hairpin_uses_bevel() {
+        // Near-reversal: miter_scale >> BEVEL_THRESHOLD → bevel
+        let points = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 4.0, 0.0),
+            Point3::new(0.2, 0.2, 0.0),
+        ];
+        let op = TessellateStroke::new(points, style(0.5), false);
+        let mesh = op.execute().unwrap();
+
+        // 2 endpoints (2 each) + 1 bevel (3) = 7 vertices
+        assert_eq!(mesh.vertices.len(), 7);
+        // 2 segment quads (4) + 1 bevel triangle = 5
+        assert_eq!(mesh.indices.len(), 5);
     }
 
     #[test]
