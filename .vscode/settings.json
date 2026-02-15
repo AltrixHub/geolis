@@ -1,0 +1,18 @@
+{
+  "cSpell.words": [
+    "Altrix",
+  ],
+  "html.validate.scripts": false,
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+  "files.watcherExclude": {
+    "**/target/**": true
+  },
+  "files.exclude": {
+    "**/target": true
+  },
+  "search.exclude": {
+    "**/target": true
+  }
+}

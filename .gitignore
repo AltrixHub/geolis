@@ -1,0 +1,4 @@
+.DS_Store
+/target
+.ai/instructions.md
+.ai/outputs/*
