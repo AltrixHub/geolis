@@ -62,6 +62,7 @@ cargo test --workspace                       # Tests
 | Command | Description |
 |---------|-------------|
 | `/dev-implement` | Implement features (includes quality checks) |
+| `/dev-viewer` | Rewrite test meshes and run viewer for visual debugging |
 | `/impl-verify` | Verify staged changes against implementation plan |
 | `/git-commit` | Generate commit message -> `.ai/outputs/git.md` |
 | `/git-pr` | Generate PR description -> `.ai/outputs/git.md` |

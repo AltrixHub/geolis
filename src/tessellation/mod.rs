@@ -1,11 +1,15 @@
+mod stroke_style;
 mod tessellate_curve;
 mod tessellate_face;
 mod tessellate_solid;
+mod tessellate_stroke;
 mod tessellate_with_holes;
 
+pub use stroke_style::StrokeStyle;
 pub use tessellate_curve::TessellateCurve;
 pub use tessellate_face::TessellateFace;
 pub use tessellate_solid::TessellateSolid;
+pub use tessellate_stroke::TessellateStroke;
 pub use tessellate_with_holes::TessellateWithHoles;
 
 use crate::math::{Point2, Point3, Vector3};
