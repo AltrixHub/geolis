@@ -1,4 +1,7 @@
 pub mod basic_strokes;
+pub mod offset_intersection;
+pub mod offset_intersection_test;
+pub mod polyline_offset;
 pub mod stroke_joins;
 
 use std::sync::Arc;
@@ -10,7 +13,13 @@ use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
 /// All available pattern names.
-pub const PATTERNS: &[&str] = &["stroke_joins", "basic_strokes"];
+pub const PATTERNS: &[&str] = &[
+    "stroke_joins",
+    "basic_strokes",
+    "polyline_offset",
+    "offset_intersection",
+    "offset_intersection_test",
+];
 
 /// Register meshes for the named pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
@@ -21,6 +30,18 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "basic_strokes" => {
             basic_strokes::register(storage);
+            true
+        }
+        "polyline_offset" => {
+            polyline_offset::register(storage);
+            true
+        }
+        "offset_intersection" => {
+            offset_intersection::register(storage);
+            true
+        }
+        "offset_intersection_test" => {
+            offset_intersection_test::register(storage);
             true
         }
         _ => false,
@@ -36,12 +57,7 @@ pub fn into_raw_mesh_2d(mesh: TriangleMesh, color: Color) -> RawMesh2D {
         .vertices
         .iter()
         .zip(mesh.uvs.iter())
-        .map(|(pos, uv)| {
-            RawVertex2D::new(
-                [pos.x as f32, pos.y as f32],
-                [uv.x as f32, uv.y as f32],
-            )
-        })
+        .map(|(pos, uv)| RawVertex2D::new([pos.x as f32, pos.y as f32], [uv.x as f32, uv.y as f32]))
         .collect();
 
     let indices: Vec<u32> = mesh
