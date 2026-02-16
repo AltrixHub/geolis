@@ -19,8 +19,8 @@ revion_macro = { path = "../revion/crates/revion_macro" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
-name = "viewer"
-path = "examples/viewer/main.rs"
+name = "debug"
+path = "examples/debug/main.rs"
 
 [lints.clippy]
 all = {level = "warn", priority = -1}

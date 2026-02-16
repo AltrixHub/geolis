@@ -917,7 +917,7 @@ mod tests {
         assert_point_near(&result[3], &Point3::new(-1.0, 11.0, 0.0), 1e-9, "corner 3");
     }
 
-    // ── Failing pattern tests (from viewer) ────────────────────────
+    // ── Failing pattern tests (from debug viewer) ──────────────────
 
     /// Helper: assert no point diverges beyond `max_dist` from origin.
     fn assert_bounded(result: &[Point3], origin: &Point3, max_dist: f64, label: &str) {
@@ -1133,8 +1133,8 @@ mod tests {
     // Inward bar-collapse threshold: d > 0.5 (bar height=1, so 2d > 1).
     // When bar collapses, only the stem rectangle survives.
     //
-    // Hand-computed expected vertices verified visually in the viewer
-    // (examples/viewer/patterns/offset_intersection.rs).
+    // Hand-computed expected vertices verified visually in the debug viewer
+    // (examples/debug/patterns/offset_intersection.rs).
 
     /// T-shape CCW vertices at origin.
     fn t_shape_points() -> Vec<Point3> {

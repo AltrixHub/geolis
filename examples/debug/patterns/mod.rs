@@ -1,6 +1,5 @@
 pub mod basic_strokes;
 pub mod offset_intersection;
-pub mod offset_intersection_test;
 pub mod polyline_offset;
 pub mod stroke_joins;
 
@@ -18,7 +17,6 @@ pub const PATTERNS: &[&str] = &[
     "basic_strokes",
     "polyline_offset",
     "offset_intersection",
-    "offset_intersection_test",
 ];
 
 /// Register meshes for the named pattern. Returns `true` if found.
@@ -38,10 +36,6 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "offset_intersection" => {
             offset_intersection::register(storage);
-            true
-        }
-        "offset_intersection_test" => {
-            offset_intersection_test::register(storage);
             true
         }
         _ => false,
