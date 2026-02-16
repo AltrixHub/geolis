@@ -9,7 +9,11 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::register_stroke;
+use super::{register_label, register_stroke};
+
+/// Label size and color.
+const LABEL_SIZE: f64 = 0.8;
+const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 
 /// Stroke width for offset result polylines.
 const STROKE_WIDTH: f64 = 0.04;
@@ -21,7 +25,8 @@ const BASE_STROKE_WIDTH: f64 = 0.015;
 pub fn register(storage: &MeshStorage) {
     // ── Left column: Open polylines ─────────────────────────────────
 
-    // Straight line
+    // Case 1: Straight line
+    register_label(storage, -14.5, 10.0, "1", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -32,7 +37,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.4, -0.4],
     );
 
-    // L-shape (90 degree)
+    // Case 2: L-shape (90 degree)
+    register_label(storage, -14.5, 8.5, "2", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -44,7 +50,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.4, -0.4],
     );
 
-    // U-shape (two 90 degree turns)
+    // Case 3: U-shape (two 90 degree turns)
+    register_label(storage, -14.5, 5.5, "3", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -57,7 +64,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.4, -0.4],
     );
 
-    // Zigzag (sharp turns)
+    // Case 4: Zigzag (sharp turns)
+    register_label(storage, -14.5, 2.0, "4", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -71,7 +79,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.3, -0.3],
     );
 
-    // Hairpin (near-180 degree turn)
+    // Case 5: Hairpin (near-180 degree turn)
+    register_label(storage, -14.5, 0.0, "5", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -83,7 +92,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.2, -0.2],
     );
 
-    // Staircase (right angles)
+    // Case 6: Staircase (right angles)
+    register_label(storage, -14.5, -1.5, "6", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -98,7 +108,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.3, -0.3],
     );
 
-    // S-curve
+    // Case 7: S-curve
+    register_label(storage, -14.5, -4.5, "7", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -112,7 +123,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.35, -0.35],
     );
 
-    // Cross / plus — 4 arms from center (180-degree reversals)
+    // Case 8: Cross / plus — 4 arms from center (180-degree reversals)
+    register_label(storage, -14.5, -7.0, "8", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -128,7 +140,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.3, -0.3],
     );
 
-    // T-junction — stem meets crossbar (reversal at junction)
+    // Case 9: T-junction — stem meets crossbar (reversal at junction)
+    register_label(storage, -6.5, -7.5, "9", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -142,7 +155,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.25, -0.25],
     );
 
-    // W-shape (multiple acute angles)
+    // Case 10: W-shape (multiple acute angles)
+    register_label(storage, -14.5, -9.5, "10", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -158,7 +172,8 @@ pub fn register(storage: &MeshStorage) {
 
     // ── Right column: Closed polygons ───────────────────────────────
 
-    // Closed square
+    // Case 11: Closed square
+    register_label(storage, -0.5, 11.5, "11", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -171,7 +186,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.5, -0.5],
     );
 
-    // Closed triangle
+    // Case 12: Closed triangle
+    register_label(storage, 5.5, 11.5, "12", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -183,7 +199,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.5, -0.5],
     );
 
-    // Closed cross / plus outline (12 vertices, 8 concave corners)
+    // Case 13: Closed cross / plus outline (12 vertices, 8 concave corners)
+    register_label(storage, 0.5, 6.5, "13", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -204,7 +221,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.15, -0.15, 0.3, -0.3],
     );
 
-    // Closed T-shape outline (8 vertices, concave)
+    // Case 14: Closed T-shape outline (8 vertices, concave)
+    register_label(storage, 6.5, 6.5, "14", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -221,7 +239,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.2, -0.2],
     );
 
-    // Closed L-shape (concave)
+    // Case 15: Closed L-shape (concave)
+    register_label(storage, -0.5, 2.0, "15", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -236,7 +255,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.25, -0.25],
     );
 
-    // Closed diamond
+    // Case 16: Closed diamond
+    register_label(storage, 5.5, 2.5, "16", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -249,7 +269,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.4, -0.4],
     );
 
-    // Closed arrow / chevron (concave, thin at tips — use small offset)
+    // Case 17: Closed arrow / chevron (concave, thin at tips — use small offset)
+    register_label(storage, -0.5, -2.0, "17", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -262,7 +283,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.1, -0.1],
     );
 
-    // Closed narrow rectangle (wall section, multi-offset)
+    // Case 18: Closed narrow rectangle (wall section, multi-offset)
+    register_label(storage, 5.5, -3.0, "18", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -275,7 +297,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.1, -0.1, 0.2, -0.2],
     );
 
-    // Closed H-shape outline (concave, 12 vertices)
+    // Case 19: Closed H-shape outline (concave, 12 vertices)
+    register_label(storage, -0.5, -5.0, "19", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[
@@ -296,7 +319,8 @@ pub fn register(storage: &MeshStorage) {
         &[0.15, -0.15],
     );
 
-    // Closed star (5-pointed, sharp angles)
+    // Case 20: Closed star (5-pointed, sharp angles)
+    register_label(storage, 5.5, -4.5, "20", LABEL_SIZE, LABEL_COLOR);
     register_offset_pair(
         storage,
         &[

@@ -5,7 +5,11 @@ use geolis::tessellation::{LineJoin, StrokeStyle};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::register_stroke;
+use super::{register_label, register_stroke};
+
+/// Label size and color.
+const LABEL_SIZE: f64 = 0.8;
+const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 
 /// Register stroke-join comparison meshes.
 #[allow(clippy::too_many_lines)]
@@ -98,6 +102,12 @@ pub fn register(storage: &MeshStorage) {
             ],
         ),
     ];
+
+    // Case labels (one per shape row, to the left of the Miter column)
+    let label_y: &[f64] = &[0.5, 4.5, 8.5, 14.0];
+    for (i, &ly) in label_y.iter().enumerate() {
+        register_label(storage, -10.0, ly, &format!("{}", i + 1), LABEL_SIZE, LABEL_COLOR);
+    }
 
     for &(x_off, join, ref colors) in columns {
         for (idx, &(points, width, closed)) in shapes.iter().enumerate() {

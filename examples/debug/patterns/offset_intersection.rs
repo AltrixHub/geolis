@@ -16,33 +16,44 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::register_stroke;
+use super::{register_label, register_stroke};
 
 /// Stroke width for original polygons.
 const BASE_WIDTH: f64 = 0.015;
 /// Stroke width for offset results.
 const OFFSET_WIDTH: f64 = 0.04;
+/// Label size and color.
+const LABEL_SIZE: f64 = 1.2;
+const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 
 /// Register offset test meshes.
 pub fn register(storage: &MeshStorage) {
     // ── T-shape cases ────────────────────────────────────────────────
     let t = t_shape_points();
 
+    register_label(storage, -14.0, 12.5, "1", LABEL_SIZE, LABEL_COLOR);
     register_closed_offsets(storage, &t, -12.0, 6.0, &[0.3, -0.3]);
+    register_label(storage, 0.0, 12.5, "2", LABEL_SIZE, LABEL_COLOR);
     register_closed_offsets(storage, &t, 2.0, 6.0, &[0.6, -0.6]);
+    register_label(storage, -14.0, 3.5, "3", LABEL_SIZE, LABEL_COLOR);
     register_closed_offsets(storage, &t, -12.0, -3.0, &[0.8, -0.8]);
+    register_label(storage, 0.0, 3.5, "4", LABEL_SIZE, LABEL_COLOR);
     register_closed_offsets(storage, &t, 2.0, -3.0, &[1.5, -1.5]);
 
     // ── Closed cross-shape cases ──────────────────────────────────────
     let c = cross_shape_points();
 
+    register_label(storage, -14.0, -5.5, "5", LABEL_SIZE, LABEL_COLOR);
     register_closed_offsets(storage, &c, -12.0, -16.0, &[0.5, -0.5]);
+    register_label(storage, 0.0, -5.5, "6", LABEL_SIZE, LABEL_COLOR);
     register_closed_offsets(storage, &c, 2.0, -16.0, &[1.5, -1.5]);
 
     // ── Open cross with 180-degree reversals ──────────────────────────
     let oc = open_cross_points();
 
+    register_label(storage, -14.0, -28.0, "7", LABEL_SIZE, LABEL_COLOR);
     register_open_offsets(storage, &oc, -12.0, -30.0, &[0.3, -0.3]);
+    register_label(storage, 0.0, -28.0, "8", LABEL_SIZE, LABEL_COLOR);
     register_open_offsets(storage, &oc, 2.0, -30.0, &[0.5, -0.5]);
 }
 

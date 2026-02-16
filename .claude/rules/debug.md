@@ -20,6 +20,7 @@ cargo run --example debug -- --test offset_intersection
 - Hardcode hand-computed vertex coordinates in `test/`
 - Visually confirm correctness in the viewer
 - Color convention: Gray = original shape, Green = expected inward, Blue = expected outward
+- **Label every case** with a sequential number using `register_label` (see [Case Labels](#case-labels))
 
 ### Step 2: Create test cases from ground truth and iterate on the algorithm
 
@@ -134,6 +135,59 @@ cargo run --example debug -- foo
 | `offset_intersection` | default | Offset self-intersection algorithm results |
 | `offset_intersection` | `--test` | Hand-computed ground truth for offset self-intersection |
 
+### Case Labels
+
+Every pattern that renders multiple test cases **must** label each case with a sequential number using `register_label`. This makes it easy to reference specific cases in conversation (e.g. "case 5 is wrong").
+
+#### Rules
+
+1. **Number every case sequentially** starting from 1, across the entire pattern file
+2. **Use the same numbering** in both `patterns/` (algorithm output) and `test/` (ground truth) for the same pattern
+3. **Position labels above-left** of each shape group — typically `(bx - 2, by + shape_height + 0.5)` or a consistent offset that doesn't overlap with the shape
+4. **Use yellow color** `Color::rgb(255, 220, 80)` for labels — distinct from Gray/Green/Blue shape colors
+5. **Label size** ~1.0–1.5 world units (adjust to shape scale)
+6. **Define constants** at the top of the pattern file:
+
+```rust
+const LABEL_SIZE: f64 = 1.2;
+const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
+```
+
+#### Example
+
+```rust
+use super::{register_label, register_stroke};
+
+const LABEL_SIZE: f64 = 1.2;
+const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
+
+pub fn register(storage: &MeshStorage) {
+    // Case 1
+    register_label(storage, -14.0, 12.5, "1", LABEL_SIZE, LABEL_COLOR);
+    register_shape(storage, -12.0, 6.0, /* ... */);
+
+    // Case 2
+    register_label(storage, 0.0, 12.5, "2", LABEL_SIZE, LABEL_COLOR);
+    register_shape(storage, 2.0, 6.0, /* ... */);
+}
+```
+
+#### `register_label` API
+
+```rust
+register_label(storage, x, y, text, size, color)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `storage` | `&MeshStorage` to register meshes into |
+| `x`, `y` | World-space position (bottom-left of first digit) |
+| `text` | Digits `0`–`9` only (rendered as 7-segment display) |
+| `size` | Height of each digit in world units |
+| `color` | Label color |
+
+Defined in `patterns/mod.rs`, re-exported in `test/mod.rs`.
+
 ### Adding a New Pattern
 
 1. Create `examples/debug/patterns/new_pattern.rs`:
@@ -141,9 +195,14 @@ cargo run --example debug -- foo
 ```rust
 use revion_ui::MeshStorage;
 
-use super::register_stroke; // or other shared utilities
+use super::{register_label, register_stroke}; // always import register_label
+
+const LABEL_SIZE: f64 = 1.2;
+const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 
 pub fn register(storage: &MeshStorage) {
+    // Case 1
+    register_label(storage, -14.0, 12.5, "1", LABEL_SIZE, LABEL_COLOR);
     // Register meshes here
 }
 ```
@@ -174,9 +233,14 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
 ```rust
 use revion_ui::MeshStorage;
 
-use super::register_stroke; // re-exported from patterns
+use super::{register_label, register_stroke}; // re-exported from patterns
+
+const LABEL_SIZE: f64 = 1.2;
+const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 
 pub fn register(storage: &MeshStorage) {
+    // Case 1 — use same numbering as the corresponding patterns/ file
+    register_label(storage, -14.0, 12.5, "1", LABEL_SIZE, LABEL_COLOR);
     // Register hardcoded expected meshes here
 }
 ```
@@ -204,6 +268,7 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
 | `into_raw_mesh_2d(mesh, color)` | Convert Geolis `TriangleMesh` -> Revion `RawMesh2D` (XY projection) |
 | `into_raw_mesh_3d(mesh, color)` | Convert Geolis `TriangleMesh` -> Revion `RawMesh3D` |
 | `register_stroke(storage, points, style, closed, color)` | Tessellate + register both 2D and 3D |
+| `register_label(storage, x, y, text, size, color)` | Render digit string as 7-segment mesh (2D + 3D) |
 
 Test patterns access these via re-export in `test/mod.rs`.
 
