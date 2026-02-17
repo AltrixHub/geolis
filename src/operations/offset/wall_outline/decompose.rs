@@ -19,10 +19,12 @@ pub fn decompose(pline: &Pline) -> Vec<UniqueSegment> {
     }
 
     // Collect all raw segments from the pline path.
+    let seg_count = pline.segment_count();
     let mut raw_segments: Vec<((f64, f64), (f64, f64))> = Vec::new();
-    for i in 0..verts.len() - 1 {
+    for i in 0..seg_count {
         let a = (verts[i].x, verts[i].y);
-        let b = (verts[i + 1].x, verts[i + 1].y);
+        let next_i = if pline.closed { (i + 1) % verts.len() } else { i + 1 };
+        let b = (verts[next_i].x, verts[next_i].y);
         let dx = b.0 - a.0;
         let dy = b.1 - a.1;
         if dx * dx + dy * dy < TOLERANCE * TOLERANCE {
@@ -225,6 +227,21 @@ mod tests {
         };
         let result = decompose(&pline);
         assert_eq!(result.len(), 2, "expected 2 unique segments, got {}", result.len());
+    }
+
+    #[test]
+    fn closed_square_decompose() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(10.0, 0.0),
+                PlineVertex::line(10.0, 10.0),
+                PlineVertex::line(0.0, 10.0),
+            ],
+            closed: true,
+        };
+        let result = decompose(&pline);
+        assert_eq!(result.len(), 4, "expected 4 unique segments, got {}", result.len());
     }
 
     #[test]

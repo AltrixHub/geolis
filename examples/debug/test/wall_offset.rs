@@ -78,6 +78,53 @@ fn angled_cross() -> Vec<(f64, f64)> {
     ]
 }
 
+fn square_room() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+}
+
+fn rectangle_room() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (12.0, 0.0), (12.0, 8.0), (0.0, 8.0)]
+}
+
+fn l_room() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (5.0, 0.0), (5.0, 3.0),
+        (3.0, 3.0), (3.0, 5.0), (0.0, 5.0),
+    ]
+}
+
+fn room_with_corridor() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (5.0, 0.0), (5.0, -5.0), (5.0, 0.0),
+        (10.0, 0.0), (10.0, 10.0), (0.0, 10.0),
+    ]
+}
+
+fn room_with_partition() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0),
+        (10.0, 5.0), (10.0, 10.0), (0.0, 10.0),
+    ]
+}
+
+fn room_with_diagonal_wall() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 7.5),
+        (15.0, 10.0), (-5.0, 0.0),
+        (0.0, 2.5), (0.0, 10.0), (10.0, 10.0),
+        (10.0, 7.5), (0.0, 2.5),
+    ]
+}
+
+fn room_with_penetrating_wall() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (13.0, 5.0),
+        (10.0, 5.0), (0.0, 5.0), (10.0, 5.0),
+        (10.0, 10.0), (0.0, 10.0), (0.0, 5.0),
+        (-3.0, 5.0), (0.0, 5.0),
+    ]
+}
+
 // ── Expected outlines (hand-computed) ───────────────────────────────
 
 /// Case 1: Single line d=0.3 → 4-vertex rectangle.
@@ -193,6 +240,131 @@ fn case_10_outer() -> Vec<(f64, f64)> {
     ]
 }
 
+/// Case 11: Square room d=0.3 → outer boundary (CW, miter corners).
+fn case_11_outer() -> Vec<(f64, f64)> {
+    vec![(-0.3, -0.3), (10.3, -0.3), (10.3, 10.3), (-0.3, 10.3)]
+}
+
+/// Case 11: Square room d=0.3 → inner boundary.
+fn case_11_inner() -> Vec<(f64, f64)> {
+    vec![(0.3, 0.3), (9.7, 0.3), (9.7, 9.7), (0.3, 9.7)]
+}
+
+/// Case 12: Rectangle room (12×8) d=0.3 → outer boundary.
+fn case_12_outer() -> Vec<(f64, f64)> {
+    vec![(-0.3, -0.3), (12.3, -0.3), (12.3, 8.3), (-0.3, 8.3)]
+}
+
+/// Case 12: Rectangle room d=0.3 → inner boundary.
+fn case_12_inner() -> Vec<(f64, f64)> {
+    vec![(0.3, 0.3), (11.7, 0.3), (11.7, 7.7), (0.3, 7.7)]
+}
+
+/// Case 13: L-room d=0.3 → outer boundary.
+fn case_13_outer() -> Vec<(f64, f64)> {
+    vec![
+        (-0.3, -0.3), (5.3, -0.3), (5.3, 3.3),
+        (3.3, 3.3), (3.3, 5.3), (-0.3, 5.3),
+    ]
+}
+
+/// Case 13: L-room d=0.3 → inner boundary.
+fn case_13_inner() -> Vec<(f64, f64)> {
+    vec![
+        (0.3, 0.3), (4.7, 0.3), (4.7, 2.7),
+        (2.7, 2.7), (2.7, 4.7), (0.3, 4.7),
+    ]
+}
+
+/// Case 14: Room + corridor d=0.3 → 8-vertex outer.
+fn case_14_outer() -> Vec<(f64, f64)> {
+    vec![
+        (4.7, -5.0), (5.3, -5.0), (5.3, -0.3), (10.3, -0.3),
+        (10.3, 10.3), (-0.3, 10.3), (-0.3, -0.3), (4.7, -0.3),
+    ]
+}
+
+/// Case 14: Room + corridor d=0.3 → 4-vertex inner room.
+fn case_14_inner() -> Vec<(f64, f64)> {
+    vec![(0.3, 0.3), (0.3, 9.7), (9.7, 9.7), (9.7, 0.3)]
+}
+
+/// Case 15: Room + partition d=0.3 → 4-vertex outer.
+fn case_15_outer() -> Vec<(f64, f64)> {
+    vec![(-0.3, -0.3), (10.3, -0.3), (10.3, 10.3), (-0.3, 10.3)]
+}
+
+/// Case 15: Room + partition d=0.3 → bottom room.
+fn case_15_inner_bottom() -> Vec<(f64, f64)> {
+    vec![(0.3, 0.3), (0.3, 4.7), (9.7, 4.7), (9.7, 0.3)]
+}
+
+/// Case 15: Room + partition d=0.3 → top room.
+fn case_15_inner_top() -> Vec<(f64, f64)> {
+    vec![(0.3, 5.3), (0.3, 9.7), (9.7, 9.7), (9.7, 5.3)]
+}
+
+/// Case 17: Room + diagonal wall d=0.3 → 12-vertex outer.
+/// Diagonal from (-5,0) to (15,10), slope 1/2, direction (2,1)/sqrt(5).
+/// At vertical wall x=X, diagonal offset y = 2.5 + X/2 ± d*sqrt(5)/2.
+fn case_17_outer() -> Vec<(f64, f64)> {
+    let dn = 0.3 / 5.0_f64.sqrt();
+    let ds = 0.3 * 5.0_f64.sqrt() / 2.0; // d*sqrt(5)/2, y-shift at vertical wall
+    vec![
+        (-0.3, -0.3), (10.3, -0.3),
+        (10.3, 2.5 + 10.3 / 2.0 - ds),  // right wall meets diagonal right side
+        (15.0 + dn, 10.0 - 2.0 * dn),   // dead end cap right-bottom
+        (15.0 - dn, 10.0 + 2.0 * dn),   // dead end cap right-top
+        (10.3, 2.5 + 10.3 / 2.0 + ds),  // right wall meets diagonal left side
+        (10.3, 10.3), (-0.3, 10.3),
+        (-0.3, 2.5 - 0.3 / 2.0 + ds),   // left wall meets diagonal left side
+        (-5.0 - dn, 2.0 * dn),           // dead end cap left-top
+        (-5.0 + dn, -2.0 * dn),          // dead end cap left-bottom
+        (-0.3, 2.5 - 0.3 / 2.0 - ds),   // left wall meets diagonal right side
+    ]
+}
+
+/// Case 17: Room + diagonal wall d=0.3 → bottom-right inner room.
+fn case_17_inner_bottom() -> Vec<(f64, f64)> {
+    let ds = 0.3 * 5.0_f64.sqrt() / 2.0;
+    vec![
+        (0.3, 0.3),
+        (0.3, 2.5 + 0.3 / 2.0 - ds),
+        (9.7, 2.5 + 9.7 / 2.0 - ds),
+        (9.7, 0.3),
+    ]
+}
+
+/// Case 17: Room + diagonal wall d=0.3 → top-left inner room.
+fn case_17_inner_top() -> Vec<(f64, f64)> {
+    let ds = 0.3 * 5.0_f64.sqrt() / 2.0;
+    vec![
+        (0.3, 2.5 + 0.3 / 2.0 + ds),
+        (0.3, 9.7),
+        (9.7, 9.7),
+        (9.7, 2.5 + 9.7 / 2.0 + ds),
+    ]
+}
+
+/// Case 16: Room + penetrating wall d=0.3 → 12-vertex outer.
+fn case_16_outer() -> Vec<(f64, f64)> {
+    vec![
+        (-0.3, -0.3), (10.3, -0.3), (10.3, 4.7), (13.0, 4.7),
+        (13.0, 5.3), (10.3, 5.3), (10.3, 10.3), (-0.3, 10.3),
+        (-0.3, 5.3), (-3.0, 5.3), (-3.0, 4.7), (-0.3, 4.7),
+    ]
+}
+
+/// Case 16: Room + penetrating wall d=0.3 → bottom inner room.
+fn case_16_inner_bottom() -> Vec<(f64, f64)> {
+    vec![(0.3, 0.3), (0.3, 4.7), (9.7, 4.7), (9.7, 0.3)]
+}
+
+/// Case 16: Room + penetrating wall d=0.3 → top inner room.
+fn case_16_inner_top() -> Vec<(f64, f64)> {
+    vec![(0.3, 5.3), (0.3, 9.7), (9.7, 9.7), (9.7, 5.3)]
+}
+
 // ── Drawing helper ──────────────────────────────────────────────────
 
 fn draw_ground_truth(
@@ -200,6 +372,7 @@ fn draw_ground_truth(
     centerline: &[(f64, f64)],
     outer: &[(f64, f64)],
     holes: &[&[(f64, f64)]],
+    closed: bool,
     bx: f64,
     by: f64,
 ) {
@@ -209,7 +382,7 @@ fn draw_ground_truth(
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
     if let Ok(s) = StrokeStyle::new(0.05) {
-        register_stroke(storage, &cl, s, false, GRAY);
+        register_stroke(storage, &cl, s, closed, GRAY);
     }
 
     // Expected outer boundary in green.
@@ -240,23 +413,41 @@ fn draw_ground_truth(
 pub fn register(storage: &MeshStorage) {
     let c5_hole = case_5_hole();
     let c6_hole = case_6_hole();
+    let c11_inner = case_11_inner();
+    let c12_inner = case_12_inner();
+    let c13_inner = case_13_inner();
+    let c14_inner = case_14_inner();
+    let c15_bottom = case_15_inner_bottom();
+    let c15_top = case_15_inner_top();
+    let c16_bottom = case_16_inner_bottom();
+    let c16_top = case_16_inner_top();
+    let c17_bottom = case_17_inner_bottom();
+    let c17_top = case_17_inner_top();
 
-    // (centerline, outer, holes, bx, by, lx, ly)
-    let cases: Vec<(Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<&[(f64, f64)]>, f64, f64, f64, f64)> =
+    // (centerline, outer, holes, closed, bx, by, lx, ly)
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<&[(f64, f64)]>, bool, f64, f64, f64, f64)> =
         vec![
-            (single_line(), case_1_outer(), vec![], 0.0, 0.0, -1.5, 1.5),
-            (l_shape(), case_2_outer(), vec![], 10.0, 0.0, 8.5, 6.0),
-            (t_shape(), case_3_outer(), vec![], 22.0, 0.0, 20.5, 4.5),
-            (cross_shape(), case_4_outer(), vec![], 36.0, 0.0, 34.5, 11.5),
-            (double_cross(), case_5_outer(), vec![&c5_hole], 0.0, -16.0, -1.5, -4.5),
-            (double_cross(), case_6_outer(), vec![&c6_hole], 16.0, -16.0, 14.5, -4.5),
-            (y_fork(), case_7_outer(), vec![], 32.0, -16.0, 30.5, -4.5),
-            (h_shape(), case_8_outer(), vec![], 0.0, -32.0, -1.5, -20.5),
-            (e_shape(), case_9_outer(), vec![], 16.0, -32.0, 14.5, -22.5),
-            (angled_cross(), case_10_outer(), vec![], 32.0, -32.0, 30.5, -20.5),
+            (single_line(), case_1_outer(), vec![], false, 0.0, 0.0, -1.5, 1.5),
+            (l_shape(), case_2_outer(), vec![], false, 10.0, 0.0, 8.5, 6.0),
+            (t_shape(), case_3_outer(), vec![], false, 22.0, 0.0, 20.5, 4.5),
+            (cross_shape(), case_4_outer(), vec![], false, 36.0, 0.0, 34.5, 11.5),
+            (double_cross(), case_5_outer(), vec![&c5_hole], false, 0.0, -16.0, -1.5, -4.5),
+            (double_cross(), case_6_outer(), vec![&c6_hole], false, 16.0, -16.0, 14.5, -4.5),
+            (y_fork(), case_7_outer(), vec![], false, 32.0, -16.0, 30.5, -4.5),
+            (h_shape(), case_8_outer(), vec![], false, 0.0, -32.0, -1.5, -20.5),
+            (e_shape(), case_9_outer(), vec![], false, 16.0, -32.0, 14.5, -22.5),
+            (angled_cross(), case_10_outer(), vec![], false, 32.0, -32.0, 30.5, -20.5),
+            (square_room(), case_11_outer(), vec![&c11_inner], true, 0.0, -48.0, -1.5, -36.5),
+            (rectangle_room(), case_12_outer(), vec![&c12_inner], true, 16.0, -48.0, 14.5, -36.5),
+            (l_room(), case_13_outer(), vec![&c13_inner], true, 32.0, -48.0, 30.5, -41.5),
+            (room_with_corridor(), case_14_outer(), vec![&c14_inner], true, 0.0, -64.0, -1.5, -52.5),
+            (room_with_partition(), case_15_outer(), vec![&c15_bottom, &c15_top], true, 16.0, -64.0, 14.5, -52.5),
+            (room_with_penetrating_wall(), case_16_outer(), vec![&c16_bottom, &c16_top], true, 32.0, -64.0, 30.5, -52.5),
+            (room_with_diagonal_wall(), case_17_outer(), vec![&c17_bottom, &c17_top], true, 48.0, -64.0, 46.5, -52.5),
         ];
 
-    for (i, (cl, outer, holes, bx, by, lx, ly)) in cases.iter().enumerate() {
+    for (i, (cl, outer, holes, closed, bx, by, lx, ly)) in cases.iter().enumerate() {
         register_label(
             storage,
             *lx,
@@ -265,6 +456,6 @@ pub fn register(storage: &MeshStorage) {
             LABEL_SIZE,
             LABEL_COLOR,
         );
-        draw_ground_truth(storage, cl, outer, holes, *bx, *by);
+        draw_ground_truth(storage, cl, outer, holes, *closed, *bx, *by);
     }
 }

@@ -80,12 +80,64 @@ fn angled_cross() -> Vec<(f64, f64)> {
     ]
 }
 
+fn square_room() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+}
+
+fn rectangle_room() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (12.0, 0.0), (12.0, 8.0), (0.0, 8.0)]
+}
+
+fn l_room() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (5.0, 0.0), (5.0, 3.0),
+        (3.0, 3.0), (3.0, 5.0), (0.0, 5.0),
+    ]
+}
+
+/// Closed square room with corridor extending from bottom at x=5.
+fn room_with_corridor() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (5.0, 0.0), (5.0, -5.0), (5.0, 0.0),
+        (10.0, 0.0), (10.0, 10.0), (0.0, 10.0),
+    ]
+}
+
+/// Closed square room divided by horizontal partition at y=5.
+fn room_with_partition() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0),
+        (10.0, 5.0), (10.0, 10.0), (0.0, 10.0),
+    ]
+}
+
+/// Closed room with a diagonal wall from (-5,0) to (15,10) as a single line.
+fn room_with_diagonal_wall() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 7.5),
+        (15.0, 10.0), (-5.0, 0.0),
+        (0.0, 2.5), (0.0, 10.0), (10.0, 10.0),
+        (10.0, 7.5), (0.0, 2.5),
+    ]
+}
+
+/// Closed room with a wall penetrating through both sides at y=5.
+fn room_with_penetrating_wall() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (13.0, 5.0),
+        (10.0, 5.0), (0.0, 5.0), (10.0, 5.0),
+        (10.0, 10.0), (0.0, 10.0), (0.0, 5.0),
+        (-3.0, 5.0), (0.0, 5.0),
+    ]
+}
+
 // ── Drawing helper ──────────────────────────────────────────────────
 
 fn draw_case(
     storage: &MeshStorage,
     pts: &[(f64, f64)],
     half_w: f64,
+    closed: bool,
     bx: f64,
     by: f64,
 ) {
@@ -95,13 +147,13 @@ fn draw_case(
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
     if let Ok(s) = StrokeStyle::new(0.05) {
-        register_stroke(storage, &center, s, false, GRAY);
+        register_stroke(storage, &center, s, closed, GRAY);
     }
 
     // Algorithm output.
     let pline = Pline {
         vertices: pts.iter().map(|&(x, y)| PlineVertex::line(x, y)).collect(),
-        closed: false,
+        closed,
     };
     let wall = WallOutline2D::new(pline, half_w);
     if let Ok(outlines) = wall.execute() {
@@ -124,21 +176,28 @@ fn draw_case(
 /// Register `wall_offset` pattern meshes.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
 pub fn register(storage: &MeshStorage) {
-    // (centerline, half_width, base_x, base_y, label_x, label_y)
-    let cases: Vec<(Vec<(f64, f64)>, f64, f64, f64, f64, f64)> = vec![
-        (single_line(), 0.3, 0.0, 0.0, -1.5, 1.5),
-        (l_shape(), 0.3, 10.0, 0.0, 8.5, 6.0),
-        (t_shape(), 0.3, 22.0, 0.0, 20.5, 4.5),
-        (cross_shape(), 0.3, 36.0, 0.0, 34.5, 11.5),
-        (double_cross(), 0.3, 0.0, -16.0, -1.5, -4.5),
-        (double_cross(), 0.8, 16.0, -16.0, 14.5, -4.5),
-        (y_fork(), 0.5, 32.0, -16.0, 30.5, -4.5),
-        (h_shape(), 0.3, 0.0, -32.0, -1.5, -20.5),
-        (e_shape(), 0.3, 16.0, -32.0, 14.5, -22.5),
-        (angled_cross(), 0.3, 32.0, -32.0, 30.5, -20.5),
+    // (centerline, half_width, closed, base_x, base_y, label_x, label_y)
+    let cases: Vec<(Vec<(f64, f64)>, f64, bool, f64, f64, f64, f64)> = vec![
+        (single_line(), 0.3, false, 0.0, 0.0, -1.5, 1.5),
+        (l_shape(), 0.3, false, 10.0, 0.0, 8.5, 6.0),
+        (t_shape(), 0.3, false, 22.0, 0.0, 20.5, 4.5),
+        (cross_shape(), 0.3, false, 36.0, 0.0, 34.5, 11.5),
+        (double_cross(), 0.3, false, 0.0, -16.0, -1.5, -4.5),
+        (double_cross(), 0.8, false, 16.0, -16.0, 14.5, -4.5),
+        (y_fork(), 0.5, false, 32.0, -16.0, 30.5, -4.5),
+        (h_shape(), 0.3, false, 0.0, -32.0, -1.5, -20.5),
+        (e_shape(), 0.3, false, 16.0, -32.0, 14.5, -22.5),
+        (angled_cross(), 0.3, false, 32.0, -32.0, 30.5, -20.5),
+        (square_room(), 0.3, true, 0.0, -48.0, -1.5, -36.5),
+        (rectangle_room(), 0.3, true, 16.0, -48.0, 14.5, -36.5),
+        (l_room(), 0.3, true, 32.0, -48.0, 30.5, -41.5),
+        (room_with_corridor(), 0.3, true, 0.0, -64.0, -1.5, -52.5),
+        (room_with_partition(), 0.3, true, 16.0, -64.0, 14.5, -52.5),
+        (room_with_penetrating_wall(), 0.3, true, 32.0, -64.0, 30.5, -52.5),
+        (room_with_diagonal_wall(), 0.3, true, 48.0, -64.0, 46.5, -52.5),
     ];
 
-    for (i, (pts, hw, bx, by, lx, ly)) in cases.iter().enumerate() {
+    for (i, (pts, hw, closed, bx, by, lx, ly)) in cases.iter().enumerate() {
         register_label(
             storage,
             *lx,
@@ -147,6 +206,6 @@ pub fn register(storage: &MeshStorage) {
             LABEL_SIZE,
             LABEL_COLOR,
         );
-        draw_case(storage, pts, *hw, *bx, *by);
+        draw_case(storage, pts, *hw, *closed, *bx, *by);
     }
 }

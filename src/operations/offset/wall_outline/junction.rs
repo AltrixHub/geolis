@@ -15,6 +15,7 @@ pub struct Node {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Junction,
+    Interior,
     DeadEnd,
 }
 
@@ -67,7 +68,13 @@ pub fn build_network(segments: &[UniqueSegment]) -> Network {
         for &jp in &junction_points {
             let t = project_on_segment(seg, jp);
             if t > TOLERANCE * 10.0 && t < 1.0 - TOLERANCE * 10.0 {
-                splits.push(t);
+                // Verify the junction point is actually on the segment
+                // (not just a parameter match with large perpendicular distance).
+                let foot = (seg.start.0 + dx * t, seg.start.1 + dy * t);
+                let dist_sq = (foot.0 - jp.0).powi(2) + (foot.1 - jp.1).powi(2);
+                if dist_sq < TOLERANCE * 100.0 {
+                    splits.push(t);
+                }
             }
         }
 
@@ -107,19 +114,27 @@ pub fn build_network(segments: &[UniqueSegment]) -> Network {
         });
     }
 
-    // Step 3: Classify nodes as junction or dead end.
+    // Step 3: Compute valence (number of connected sub-segments) for each node.
+    let mut valence = vec![0_usize; all_nodes.len()];
+    for ss in &sub_segments {
+        valence[ss.start_node] += 1;
+        valence[ss.end_node] += 1;
+    }
+
+    // Step 4: Classify nodes by junction status and valence.
     let nodes: Vec<Node> = all_nodes
         .iter()
-        .map(|&p| {
+        .enumerate()
+        .map(|(i, &p)| {
             let is_junction = point_is_junction(&junction_points, p);
-            Node {
-                point: p,
-                kind: if is_junction {
-                    NodeKind::Junction
-                } else {
-                    NodeKind::DeadEnd
-                },
-            }
+            let kind = if is_junction || valence[i] >= 3 {
+                NodeKind::Junction
+            } else if valence[i] == 2 {
+                NodeKind::Interior
+            } else {
+                NodeKind::DeadEnd
+            };
+            Node { point: p, kind }
         })
         .collect();
 
@@ -198,6 +213,25 @@ mod tests {
 
         // 12 sub-segments: 4 segments × 3 sub-segments each.
         assert_eq!(net.sub_segments.len(), 12, "expected 12 sub-segments, got {}", net.sub_segments.len());
+    }
+
+    #[test]
+    fn closed_square_no_dead_ends() {
+        // 4-segment closed square: corners are junctions (shared endpoints),
+        // no dead ends.
+        let segments = vec![
+            UniqueSegment { start: (0.0, 0.0), end: (10.0, 0.0) },
+            UniqueSegment { start: (10.0, 0.0), end: (10.0, 10.0) },
+            UniqueSegment { start: (10.0, 10.0), end: (0.0, 10.0) },
+            UniqueSegment { start: (0.0, 10.0), end: (0.0, 0.0) },
+        ];
+        let net = build_network(&segments);
+
+        assert_eq!(net.nodes.len(), 4, "expected 4 nodes, got {}", net.nodes.len());
+        assert_eq!(net.sub_segments.len(), 4, "expected 4 sub-segments, got {}", net.sub_segments.len());
+
+        let dead_end_count = net.nodes.iter().filter(|n| n.kind == NodeKind::DeadEnd).count();
+        assert_eq!(dead_end_count, 0, "closed square should have no dead ends, got {dead_end_count}");
     }
 
     #[test]

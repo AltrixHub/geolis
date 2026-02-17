@@ -15,7 +15,7 @@ pub fn trace_boundaries(edges: &[OffsetEdge]) -> Vec<Pline> {
         return Vec::new();
     }
 
-    let tol_sq = TOLERANCE * 1e6;
+    let tol_sq = TOLERANCE * 1e4;
     let mut points: Vec<(f64, f64)> = Vec::new();
     let mut edge_list: Vec<(usize, usize)> = Vec::new();
 

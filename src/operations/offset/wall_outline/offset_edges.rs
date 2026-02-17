@@ -160,7 +160,7 @@ fn resolve_all_endpoints(
         .collect();
 
     for (node_idx, node) in network.nodes.iter().enumerate() {
-        if node.kind != NodeKind::Junction {
+        if node.kind == NodeKind::DeadEnd {
             continue;
         }
 
@@ -291,6 +291,21 @@ mod tests {
         let edges = build(&net, 0.3);
         // 1 sub-seg → 2 side edges + 2 cap edges = 4.
         assert_eq!(edges.len(), 4, "expected 4 edges, got {}", edges.len());
+    }
+
+    #[test]
+    fn closed_square_no_caps() {
+        // 4-segment closed square: all corners are junctions, no dead ends.
+        let segments = vec![
+            UniqueSegment { start: (0.0, 0.0), end: (10.0, 0.0) },
+            UniqueSegment { start: (10.0, 0.0), end: (10.0, 10.0) },
+            UniqueSegment { start: (10.0, 10.0), end: (0.0, 10.0) },
+            UniqueSegment { start: (0.0, 10.0), end: (0.0, 0.0) },
+        ];
+        let net = junction::build_network(&segments);
+        let edges = build(&net, 0.3);
+        // 4 sub-segments × 2 side edges = 8. No cap edges (no dead ends).
+        assert_eq!(edges.len(), 8, "expected 8 edges (no caps), got {}", edges.len());
     }
 
     #[test]
