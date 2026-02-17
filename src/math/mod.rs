@@ -1,3 +1,8 @@
+pub mod arc_2d;
+pub mod distance_2d;
+pub mod intersect_2d;
+pub mod polygon_2d;
+
 /// 2D point type.
 pub type Point2 = nalgebra::Point2<f64>;
 

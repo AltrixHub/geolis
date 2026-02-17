@@ -3,18 +3,18 @@
 //! Each module here draws hand-computed correct geometry (NOT algorithm output).
 //! Compare these visually against algorithm-generated patterns in `patterns/`.
 
-pub mod offset_intersection;
+pub mod wall_offset;
 
 use revion_ui::MeshStorage;
 
 /// All available test pattern names.
-pub const PATTERNS: &[&str] = &["offset_intersection"];
+pub const PATTERNS: &[&str] = &["wall_offset"];
 
 /// Register meshes for the named test pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
     match name {
-        "offset_intersection" => {
-            offset_intersection::register(storage);
+        "wall_offset" => {
+            wall_offset::register(storage);
             true
         }
         _ => false,
@@ -22,4 +22,5 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
 }
 
 // Re-export shared utilities from patterns for child modules.
+#[allow(unused_imports)]
 pub use super::patterns::{register_label, register_stroke};

@@ -1,7 +1,5 @@
-pub mod basic_strokes;
-pub mod offset_intersection;
-pub mod polyline_offset;
 pub mod stroke_joins;
+pub mod wall_offset;
 
 use std::sync::Arc;
 
@@ -12,12 +10,7 @@ use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
 /// All available pattern names.
-pub const PATTERNS: &[&str] = &[
-    "stroke_joins",
-    "basic_strokes",
-    "polyline_offset",
-    "offset_intersection",
-];
+pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset"];
 
 /// Register meshes for the named pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
@@ -26,16 +19,8 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
             stroke_joins::register(storage);
             true
         }
-        "basic_strokes" => {
-            basic_strokes::register(storage);
-            true
-        }
-        "polyline_offset" => {
-            polyline_offset::register(storage);
-            true
-        }
-        "offset_intersection" => {
-            offset_intersection::register(storage);
+        "wall_offset" => {
+            wall_offset::register(storage);
             true
         }
         _ => false,
@@ -110,14 +95,7 @@ pub fn register_stroke(
 /// `text` may contain digits `0`–`9`; other characters are skipped.
 /// `size` controls the height of each digit character.
 #[allow(clippy::cast_possible_truncation, clippy::many_single_char_names)]
-pub fn register_label(
-    storage: &MeshStorage,
-    x: f64,
-    y: f64,
-    text: &str,
-    size: f64,
-    color: Color,
-) {
+pub fn register_label(storage: &MeshStorage, x: f64, y: f64, text: &str, size: f64, color: Color) {
     let digit_w = size * 0.6;
     let digit_h = size;
     let thickness = size * 0.12;
@@ -151,10 +129,26 @@ pub fn register_label(
 
             let nrm = [0.0_f32, 0.0, 1.0];
             let uv = [0.0_f32, 0.0];
-            verts_3d.push(RawVertex3D { position: [min[0], min[1], 0.0], normal: nrm, uv });
-            verts_3d.push(RawVertex3D { position: [max[0], min[1], 0.0], normal: nrm, uv });
-            verts_3d.push(RawVertex3D { position: [max[0], max[1], 0.0], normal: nrm, uv });
-            verts_3d.push(RawVertex3D { position: [min[0], max[1], 0.0], normal: nrm, uv });
+            verts_3d.push(RawVertex3D {
+                position: [min[0], min[1], 0.0],
+                normal: nrm,
+                uv,
+            });
+            verts_3d.push(RawVertex3D {
+                position: [max[0], min[1], 0.0],
+                normal: nrm,
+                uv,
+            });
+            verts_3d.push(RawVertex3D {
+                position: [max[0], max[1], 0.0],
+                normal: nrm,
+                uv,
+            });
+            verts_3d.push(RawVertex3D {
+                position: [min[0], max[1], 0.0],
+                normal: nrm,
+                uv,
+            });
 
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -199,13 +193,13 @@ fn segment_rect(
 ) -> (f64, f64, f64, f64) {
     let half = height * 0.5;
     match seg {
-        0 => (x, y + height - thick, width, thick),   // a: top
+        0 => (x, y + height - thick, width, thick),      // a: top
         1 => (x + width - thick, y + half, thick, half), // b: top-right
-        2 => (x + width - thick, y, thick, half),     // c: bottom-right
-        3 => (x, y, width, thick),                     // d: bottom
-        4 => (x, y, thick, half),                      // e: bottom-left
-        5 => (x, y + half, thick, half),               // f: top-left
-        6 => (x, y + half - thick * 0.5, width, thick), // g: middle
+        2 => (x + width - thick, y, thick, half),        // c: bottom-right
+        3 => (x, y, width, thick),                       // d: bottom
+        4 => (x, y, thick, half),                        // e: bottom-left
+        5 => (x, y + half, thick, half),                 // f: top-left
+        6 => (x, y + half - thick * 0.5, width, thick),  // g: middle
         _ => (0.0, 0.0, 0.0, 0.0),
     }
 }

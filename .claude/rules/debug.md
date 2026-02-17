@@ -22,11 +22,17 @@ cargo run --example debug -- --test offset_intersection
 - Color convention: Gray = original shape, Green = expected inward, Blue = expected outward
 - **Label every case** with a sequential number using `register_label` (see [Case Labels](#case-labels))
 
-### Step 2: Create test cases from ground truth and iterate on the algorithm
+### Step 2: Create test cases and algorithm output pattern from ground truth
 
-Translate the verified ground truth from Step 1 into `#[test]` cases and fix the algorithm until tests pass.
+From the verified ground truth, create **three things**:
+
+1. **`#[test]` cases** — automated tests comparing algorithm output against expected values
+2. **`patterns/` cases** — the same input shapes rendered through the actual algorithm for visual comparison
+
+This ensures every ground truth case is testable (`cargo test`) and visually comparable (`cargo run --example debug`).
 
 ```rust
+// 1. Unit test (in src/ or integration tests)
 #[test]
 fn test_t_shape_inward_offset() {
     let result = PolylineOffset2D::new(t_shape(), 0.3, true).execute().unwrap();
@@ -35,8 +41,34 @@ fn test_t_shape_inward_offset() {
 }
 ```
 
+```rust
+// 2. Algorithm output pattern (in patterns/*.rs)
+// Uses the SAME input shapes as test/, but runs them through the algorithm
+pub fn register(storage: &MeshStorage) {
+    let points = t_shape_points();
+    register_stroke(storage, &points, style, true, GRAY);
+
+    let result = PolylineOffset2D::new(points, 0.3, true).execute().unwrap();
+    register_stroke(storage, &result, style, true, GREEN);
+}
+```
+
+- **Case numbering must match** between `test/` and `patterns/` for the same pattern name
 - Verify algorithm correctness automatically with `cargo test`
 - Iterate on the algorithm until all tests pass
+
+> **ABSOLUTE RULE: Never modify ground truth to match the algorithm.**
+>
+> Ground truth data (Step 1) and test expected values (Step 2) are the **specification**.
+> When tests fail, the algorithm is wrong — not the test data.
+>
+> - **NEVER** change hardcoded expected coordinates in `test/` or `#[test]` to make tests pass
+> - **NEVER** relax tolerance values to paper over algorithm inaccuracy
+> - **ALWAYS** fix the algorithm in `src/` to produce the correct output
+>
+> The only acceptable reason to change ground truth is if the original hand calculation was wrong,
+> confirmed by re-deriving from first principles. In that case, update both the `test/` visualization
+> and the `#[test]` expected values together, with a clear explanation of the calculation error.
 
 ### Step 3: Visualize algorithm output in default mode
 
