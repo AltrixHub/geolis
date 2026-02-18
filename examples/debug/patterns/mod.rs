@@ -1,3 +1,4 @@
+pub mod face_creation;
 pub mod stroke_joins;
 pub mod wall_offset;
 
@@ -10,7 +11,7 @@ use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
 /// All available pattern names.
-pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset"];
+pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset", "face_creation"];
 
 /// Register meshes for the named pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
@@ -21,6 +22,10 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "wall_offset" => {
             wall_offset::register(storage);
+            true
+        }
+        "face_creation" => {
+            face_creation::register(storage);
             true
         }
         _ => false,
@@ -88,6 +93,18 @@ pub fn register_stroke(
     if let Ok(mesh) = op.execute() {
         storage.upsert_3d(RawMesh3DId::new(), Arc::new(into_raw_mesh_3d(mesh, color)));
     }
+}
+
+/// Register a face mesh (2D + 3D) from a `TriangleMesh`.
+pub fn register_face(storage: &MeshStorage, mesh: TriangleMesh, color: Color) {
+    storage.upsert_2d(
+        RawMesh2DId::new(),
+        Arc::new(into_raw_mesh_2d(mesh.clone(), color)),
+    );
+    storage.upsert_3d(
+        RawMesh3DId::new(),
+        Arc::new(into_raw_mesh_3d(mesh, color)),
+    );
 }
 
 /// Register a numeric label as a 7-segment display mesh at `(x, y)`.
