@@ -261,4 +261,230 @@ mod tests {
         let result = wall.execute().unwrap();
         assert!(!result.is_empty(), "expected at least 1 boundary");
     }
+
+    // ── Spoke / bilateral buffer tests (migrated from PlineOffset2D) ──
+
+    /// Checks that every expected point appears somewhere in the result vertices.
+    fn assert_vertices_match(result: &[PlineVertex], expected: &[(f64, f64)], tol: f64) {
+        assert_eq!(
+            result.len(),
+            expected.len(),
+            "vertex count mismatch: got {}, expected {}",
+            result.len(),
+            expected.len()
+        );
+        for &(ex, ey) in expected {
+            let found = result
+                .iter()
+                .any(|v| (v.x - ex).abs() < tol && (v.y - ey).abs() < tol);
+            assert!(
+                found,
+                "expected vertex ({ex:.4}, {ey:.4}) not found in result"
+            );
+        }
+    }
+
+    /// Open cross: 4 arms from center with 180° reversals.
+    fn open_cross_pline() -> Pline {
+        Pline {
+            vertices: vec![
+                PlineVertex::line(-1.5, 0.0),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(0.0, 1.5),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(1.5, 0.0),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(0.0, -1.5),
+            ],
+            closed: false,
+        }
+    }
+
+    /// Expected cross outline at distance d (12 vertices).
+    fn open_cross_expected(d: f64) -> Vec<(f64, f64)> {
+        vec![
+            (-1.5, -d),
+            (-1.5, d),
+            (-d, d),
+            (-d, 1.5),
+            (d, 1.5),
+            (d, d),
+            (1.5, d),
+            (1.5, -d),
+            (d, -d),
+            (d, -1.5),
+            (-d, -1.5),
+            (-d, -d),
+        ]
+    }
+
+    #[test]
+    fn open_cross_d03() {
+        let wall = WallOutline2D::new(open_cross_pline(), 0.3);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 closed polygon");
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        assert_vertices_match(&poly.vertices, &open_cross_expected(0.3), 0.05);
+    }
+
+    #[test]
+    fn open_cross_d05() {
+        let wall = WallOutline2D::new(open_cross_pline(), 0.5);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 closed polygon");
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        assert_vertices_match(&poly.vertices, &open_cross_expected(0.5), 0.05);
+    }
+
+    /// X-cross: 2 diagonal lines crossing at center with 180° reversals.
+    fn x_cross_pline() -> Pline {
+        Pline {
+            vertices: vec![
+                PlineVertex::line(-3.0, -3.0),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(3.0, 3.0),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(-3.0, 3.0),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(3.0, -3.0),
+            ],
+            closed: false,
+        }
+    }
+
+    /// Expected X-cross outline at distance d (12 vertices).
+    fn x_cross_expected(a: f64, d: f64) -> Vec<(f64, f64)> {
+        let s2 = std::f64::consts::SQRT_2;
+        let h = d * s2 / 2.0;
+        let d2 = d * s2;
+        vec![
+            (-a - h, -a + h),
+            (-a + h, -a - h),
+            (0.0, -d2),
+            (a - h, -a - h),
+            (a + h, -a + h),
+            (d2, 0.0),
+            (a + h, a - h),
+            (a - h, a + h),
+            (0.0, d2),
+            (-a + h, a + h),
+            (-a - h, a - h),
+            (-d2, 0.0),
+        ]
+    }
+
+    #[test]
+    fn x_cross_d05() {
+        let wall = WallOutline2D::new(x_cross_pline(), 0.5);
+        let result = wall.execute().unwrap();
+        let expected = x_cross_expected(3.0, 0.5);
+        assert_eq!(result.len(), 1, "expected 1 closed polygon");
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Fork (Y-shape): stem + 2 branches with reversal at junction.
+    fn fork_pline() -> Pline {
+        Pline {
+            vertices: vec![
+                PlineVertex::line(5.0, 0.0),
+                PlineVertex::line(5.0, 4.0),
+                PlineVertex::line(0.0, 9.0),
+                PlineVertex::line(5.0, 4.0),
+                PlineVertex::line(10.0, 9.0),
+            ],
+            closed: false,
+        }
+    }
+
+    /// Expected fork outline at distance d (9 vertices).
+    fn fork_expected(d: f64) -> Vec<(f64, f64)> {
+        let s2 = std::f64::consts::SQRT_2;
+        let h = d * s2 / 2.0;
+        let jy = 4.0 + d * (1.0 - s2);
+        vec![
+            (5.0 - d, 0.0),
+            (5.0 + d, 0.0),
+            (5.0 + d, jy),
+            (10.0 + h, 9.0 - h),
+            (10.0 - h, 9.0 + h),
+            (5.0, 4.0 + d * s2),
+            (h, 9.0 + h),
+            (-h, 9.0 - h),
+            (5.0 - d, jy),
+        ]
+    }
+
+    #[test]
+    fn fork_d05() {
+        let wall = WallOutline2D::new(fork_pline(), 0.5);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 closed polygon");
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        assert_vertices_match(&poly.vertices, &fork_expected(0.5), 0.05);
+    }
+
+    /// Expected double-cross outline at distance d (28 vertices).
+    fn double_cross_expected(d: f64) -> Vec<(f64, f64)> {
+        vec![
+            (3.0 - d, 0.0),
+            (3.0 + d, 0.0),
+            (3.0 + d, 3.0 - d),
+            (7.0 - d, 3.0 - d),
+            (7.0 - d, 0.0),
+            (7.0 + d, 0.0),
+            (7.0 + d, 3.0 - d),
+            (10.0, 3.0 - d),
+            (10.0, 3.0 + d),
+            (7.0 + d, 3.0 + d),
+            (7.0 + d, 7.0 - d),
+            (10.0, 7.0 - d),
+            (10.0, 7.0 + d),
+            (7.0 + d, 7.0 + d),
+            (7.0 + d, 10.0),
+            (7.0 - d, 10.0),
+            (7.0 - d, 7.0 + d),
+            (3.0 + d, 7.0 + d),
+            (3.0 + d, 10.0),
+            (3.0 - d, 10.0),
+            (3.0 - d, 7.0 + d),
+            (0.0, 7.0 + d),
+            (0.0, 7.0 - d),
+            (3.0 - d, 7.0 - d),
+            (3.0 - d, 3.0 + d),
+            (0.0, 3.0 + d),
+            (0.0, 3.0 - d),
+            (3.0 - d, 3.0 - d),
+        ]
+    }
+
+    #[test]
+    fn double_cross_d03() {
+        let wall = WallOutline2D::new(double_cross_pline(), 0.3);
+        let result = wall.execute().unwrap();
+        assert!(!result.is_empty(), "expected at least 1 polygon");
+        let outer = result
+            .iter()
+            .max_by_key(|p| p.vertices.len())
+            .unwrap();
+        assert!(outer.closed, "outer boundary should be closed");
+        assert_vertices_match(&outer.vertices, &double_cross_expected(0.3), 0.05);
+    }
+
+    #[test]
+    fn double_cross_d08() {
+        let wall = WallOutline2D::new(double_cross_pline(), 0.8);
+        let result = wall.execute().unwrap();
+        assert!(!result.is_empty(), "expected at least 1 polygon");
+        let outer = result
+            .iter()
+            .max_by_key(|p| p.vertices.len())
+            .unwrap();
+        assert!(outer.closed, "outer boundary should be closed");
+        assert_vertices_match(&outer.vertices, &double_cross_expected(0.8), 0.05);
+    }
 }
