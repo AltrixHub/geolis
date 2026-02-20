@@ -4,25 +4,25 @@ use crate::topology::{SolidId, TopologyStore};
 use super::engine::boolean_execute;
 use super::select::BooleanOp;
 
-/// Computes the boolean subtraction of one solid from another.
-pub struct Subtract {
+/// Computes the boolean intersection of two solids.
+pub struct Intersect {
     solid_a: SolidId,
     solid_b: SolidId,
 }
 
-impl Subtract {
-    /// Creates a new `Subtract` operation (A - B).
+impl Intersect {
+    /// Creates a new `Intersect` operation.
     #[must_use]
     pub fn new(solid_a: SolidId, solid_b: SolidId) -> Self {
         Self { solid_a, solid_b }
     }
 
-    /// Executes the subtraction, creating the result solid in the topology store.
+    /// Executes the intersection, creating the result solid in the topology store.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the solids don't overlap or the operation fails.
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
-        boolean_execute(store, self.solid_a, self.solid_b, BooleanOp::Subtract)
+        boolean_execute(store, self.solid_a, self.solid_b, BooleanOp::Intersect)
     }
 }

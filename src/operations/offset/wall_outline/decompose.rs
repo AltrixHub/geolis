@@ -8,19 +8,15 @@ pub struct UniqueSegment {
     pub end: (f64, f64),
 }
 
-/// Decomposes a Pline into unique non-overlapping line segments.
-///
-/// Walks the Pline, groups collinear segments by their supporting line,
-/// and merges overlapping extents into a minimal set of unique segments.
-pub fn decompose(pline: &Pline) -> Vec<UniqueSegment> {
+/// Collects raw segments from a single Pline.
+fn collect_raw_segments(pline: &Pline) -> Vec<((f64, f64), (f64, f64))> {
     let verts = &pline.vertices;
     if verts.len() < 2 {
         return Vec::new();
     }
 
-    // Collect all raw segments from the pline path.
     let seg_count = pline.segment_count();
-    let mut raw_segments: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    let mut raw_segments = Vec::new();
     for i in 0..seg_count {
         let a = (verts[i].x, verts[i].y);
         let next_i = if pline.closed { (i + 1) % verts.len() } else { i + 1 };
@@ -32,15 +28,18 @@ pub fn decompose(pline: &Pline) -> Vec<UniqueSegment> {
         }
         raw_segments.push((a, b));
     }
+    raw_segments
+}
 
+/// Groups raw segments by supporting line and merges overlapping extents.
+fn merge_to_unique_segments(raw_segments: &[((f64, f64), (f64, f64))]) -> Vec<UniqueSegment> {
     if raw_segments.is_empty() {
         return Vec::new();
     }
 
-    // Group by supporting line and merge overlapping extents.
     let mut groups: Vec<SupportingLine> = Vec::new();
 
-    for &(a, b) in &raw_segments {
+    for &(a, b) in raw_segments {
         let key = supporting_line_key(a, b);
         let (t_a, t_b) = project_extent(&key, a, b);
         let t_min = t_a.min(t_b);
@@ -49,7 +48,6 @@ pub fn decompose(pline: &Pline) -> Vec<UniqueSegment> {
         let mut merged = false;
         for g in &mut groups {
             if same_supporting_line(&g.key, &key) {
-                // Merge extent.
                 g.intervals.push((t_min, t_max));
                 merged = true;
                 break;
@@ -63,7 +61,6 @@ pub fn decompose(pline: &Pline) -> Vec<UniqueSegment> {
         }
     }
 
-    // Merge overlapping intervals within each group, then output unique segments.
     let mut result = Vec::new();
     for g in &mut groups {
         let merged = merge_intervals(&mut g.intervals);
@@ -75,6 +72,18 @@ pub fn decompose(pline: &Pline) -> Vec<UniqueSegment> {
     }
 
     result
+}
+
+/// Decomposes multiple Plines into unique non-overlapping line segments.
+///
+/// Walks each Pline, groups collinear segments by their supporting line,
+/// and merges overlapping extents into a minimal set of unique segments.
+pub fn decompose(plines: &[&Pline]) -> Vec<UniqueSegment> {
+    let mut raw = Vec::new();
+    for pline in plines {
+        raw.extend(collect_raw_segments(pline));
+    }
+    merge_to_unique_segments(&raw)
 }
 
 /// Supporting line representation: a point on the line + normalized direction.
@@ -195,7 +204,8 @@ mod tests {
 
     #[test]
     fn double_cross_decompose_4_segments() {
-        let result = decompose(&double_cross_pline());
+        let pline = double_cross_pline();
+        let result = decompose(&[&pline]);
         assert_eq!(result.len(), 4, "expected 4 unique segments, got {}", result.len());
     }
 
@@ -208,7 +218,7 @@ mod tests {
             ],
             closed: false,
         };
-        let result = decompose(&pline);
+        let result = decompose(&[&pline]);
         assert_eq!(result.len(), 1);
         assert!((result[0].start.0).abs() < 1e-6);
         assert!((result[0].end.0 - 5.0).abs() < 1e-6);
@@ -225,7 +235,7 @@ mod tests {
             ],
             closed: false,
         };
-        let result = decompose(&pline);
+        let result = decompose(&[&pline]);
         assert_eq!(result.len(), 2, "expected 2 unique segments, got {}", result.len());
     }
 
@@ -240,7 +250,7 @@ mod tests {
             ],
             closed: true,
         };
-        let result = decompose(&pline);
+        let result = decompose(&[&pline]);
         assert_eq!(result.len(), 4, "expected 4 unique segments, got {}", result.len());
     }
 
@@ -255,7 +265,7 @@ mod tests {
             ],
             closed: false,
         };
-        let result = decompose(&pline);
+        let result = decompose(&[&pline]);
         assert_eq!(result.len(), 1, "overlapping collinear should merge");
         // Should cover (0,0) to (10,0).
         let s = &result[0];

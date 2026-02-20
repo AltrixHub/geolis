@@ -218,7 +218,7 @@ fn draw_case(
         vertices: pts.iter().map(|&(x, y)| PlineVertex::line(x, y)).collect(),
         closed,
     };
-    let wall = WallOutline2D::new(pline, half_w);
+    let wall = WallOutline2D::new(vec![pline], half_w);
     if let Ok(outlines) = wall.execute() {
         for (i, ol) in outlines.iter().enumerate() {
             let p: Vec<Point3> = ol

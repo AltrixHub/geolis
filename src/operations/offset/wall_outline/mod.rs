@@ -6,32 +6,38 @@ mod trace;
 use crate::error::{OperationError, Result};
 use crate::geometry::pline::Pline;
 
-/// Generates wall outlines from a centerline network.
+/// Generates wall outlines from one or more centerline polylines.
 ///
-/// Given a `Pline` representing wall centerlines (potentially with
+/// Given a collection of `Pline`s representing wall centerlines (potentially with
 /// self-intersecting paths), produces closed outline polygons at the
-/// specified half-width distance.
+/// specified half-width distance. When multiple polylines are provided,
+/// their segments are merged into a single network so that intersections
+/// between separate walls are properly trimmed.
 #[derive(Debug)]
 pub struct WallOutline2D {
-    pline: Pline,
+    plines: Vec<Pline>,
     half_width: f64,
 }
 
 impl WallOutline2D {
-    /// Creates a new wall outline operation.
+    /// Creates a new wall outline operation from one or more centerline polylines.
     #[must_use]
-    pub fn new(pline: Pline, half_width: f64) -> Self {
-        Self { pline, half_width }
+    pub fn new(plines: Vec<Pline>, half_width: f64) -> Self {
+        Self { plines, half_width }
     }
 
     /// Executes the wall outline generation.
     ///
     /// # Errors
     ///
-    /// Returns `OperationError::InvalidInput` if the polyline has fewer than
+    /// Returns `OperationError::InvalidInput` if no polyline has at least
     /// 2 vertices, or `OperationError::Failed` if no outline can be generated.
     pub fn execute(&self) -> Result<Vec<Pline>> {
-        if self.pline.vertices.len() < 2 {
+        let valid: Vec<&Pline> = self.plines.iter()
+            .filter(|p| p.vertices.len() >= 2)
+            .collect();
+
+        if valid.is_empty() {
             return Err(OperationError::InvalidInput(
                 "at least 2 vertices required for wall outline".to_owned(),
             )
@@ -39,14 +45,14 @@ impl WallOutline2D {
         }
 
         if self.half_width.abs() < crate::math::TOLERANCE {
-            return Ok(vec![self.pline.clone()]);
+            return Ok(self.plines.clone());
         }
 
-        // Step 1: Decompose into unique segments.
-        let segments = decompose::decompose(&self.pline);
+        // Step 1: Decompose all polylines into unique segments.
+        let segments = decompose::decompose(&valid);
         if segments.is_empty() {
             return Err(
-                OperationError::Failed("no valid segments in pline".to_owned()).into(),
+                OperationError::Failed("no valid segments in plines".to_owned()).into(),
             );
         }
 
@@ -123,7 +129,7 @@ mod tests {
 
     #[test]
     fn closed_square_wall_outline() {
-        let wall = WallOutline2D::new(closed_square_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![closed_square_pline()], 0.3);
         let result = wall.execute().unwrap();
         // Expect 2 closed boundaries: outer and inner.
         assert_eq!(result.len(), 2, "expected 2 boundaries, got {}", result.len());
@@ -132,7 +138,7 @@ mod tests {
 
     #[test]
     fn closed_l_room_wall_outline() {
-        let wall = WallOutline2D::new(closed_l_room_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![closed_l_room_pline()], 0.3);
         let result = wall.execute().unwrap();
         // Expect 2 closed boundaries: outer and inner.
         assert_eq!(result.len(), 2, "expected 2 boundaries, got {}", result.len());
@@ -175,7 +181,7 @@ mod tests {
 
     #[test]
     fn closed_room_with_corridor() {
-        let wall = WallOutline2D::new(closed_room_with_corridor_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![closed_room_with_corridor_pline()], 0.3);
         let result = wall.execute().unwrap();
         // Expect 2 boundaries: outer (room+corridor) + inner (room).
         assert_eq!(result.len(), 2, "expected 2 boundaries, got {}", result.len());
@@ -184,7 +190,7 @@ mod tests {
 
     #[test]
     fn closed_room_with_partition() {
-        let wall = WallOutline2D::new(closed_room_with_partition_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![closed_room_with_partition_pline()], 0.3);
         let result = wall.execute().unwrap();
         // Expect 3 boundaries: outer + 2 inner rooms.
         assert_eq!(result.len(), 3, "expected 3 boundaries, got {}", result.len());
@@ -218,7 +224,7 @@ mod tests {
 
     #[test]
     fn closed_room_with_penetrating_wall() {
-        let wall = WallOutline2D::new(closed_room_with_penetrating_wall_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![closed_room_with_penetrating_wall_pline()], 0.3);
         let result = wall.execute().unwrap();
         // Expect 3 boundaries: outer (room+extensions) + 2 inner (top/bottom rooms).
         assert_eq!(result.len(), 3, "expected 3 boundaries, got {}", result.len());
@@ -248,7 +254,7 @@ mod tests {
 
     #[test]
     fn closed_room_with_diagonal_wall() {
-        let wall = WallOutline2D::new(closed_room_with_diagonal_wall_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![closed_room_with_diagonal_wall_pline()], 0.3);
         let result = wall.execute().unwrap();
         // Expect 3 boundaries: outer (room+diagonal extensions) + 2 inner rooms.
         assert_eq!(result.len(), 3, "expected 3 boundaries, got {}", result.len());
@@ -257,7 +263,7 @@ mod tests {
 
     #[test]
     fn debug_double_cross_wall_outline() {
-        let wall = WallOutline2D::new(double_cross_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![double_cross_pline()], 0.3);
         let result = wall.execute().unwrap();
         assert!(!result.is_empty(), "expected at least 1 boundary");
     }
@@ -320,7 +326,7 @@ mod tests {
 
     #[test]
     fn open_cross_d03() {
-        let wall = WallOutline2D::new(open_cross_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![open_cross_pline()], 0.3);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 closed polygon");
         let poly = &result[0];
@@ -330,7 +336,7 @@ mod tests {
 
     #[test]
     fn open_cross_d05() {
-        let wall = WallOutline2D::new(open_cross_pline(), 0.5);
+        let wall = WallOutline2D::new(vec![open_cross_pline()], 0.5);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 closed polygon");
         let poly = &result[0];
@@ -377,7 +383,7 @@ mod tests {
 
     #[test]
     fn x_cross_d05() {
-        let wall = WallOutline2D::new(x_cross_pline(), 0.5);
+        let wall = WallOutline2D::new(vec![x_cross_pline()], 0.5);
         let result = wall.execute().unwrap();
         let expected = x_cross_expected(3.0, 0.5);
         assert_eq!(result.len(), 1, "expected 1 closed polygon");
@@ -420,7 +426,7 @@ mod tests {
 
     #[test]
     fn fork_d05() {
-        let wall = WallOutline2D::new(fork_pline(), 0.5);
+        let wall = WallOutline2D::new(vec![fork_pline()], 0.5);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 closed polygon");
         let poly = &result[0];
@@ -464,7 +470,7 @@ mod tests {
 
     #[test]
     fn double_cross_d03() {
-        let wall = WallOutline2D::new(double_cross_pline(), 0.3);
+        let wall = WallOutline2D::new(vec![double_cross_pline()], 0.3);
         let result = wall.execute().unwrap();
         assert!(!result.is_empty(), "expected at least 1 polygon");
         let outer = result
@@ -477,7 +483,7 @@ mod tests {
 
     #[test]
     fn double_cross_d08() {
-        let wall = WallOutline2D::new(double_cross_pline(), 0.8);
+        let wall = WallOutline2D::new(vec![double_cross_pline()], 0.8);
         let result = wall.execute().unwrap();
         assert!(!result.is_empty(), "expected at least 1 polygon");
         let outer = result
@@ -503,7 +509,7 @@ mod tests {
             ],
             closed: false,
         };
-        let wall = WallOutline2D::new(pline, 1.0);
+        let wall = WallOutline2D::new(vec![pline], 1.0);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -528,7 +534,7 @@ mod tests {
             ],
             closed: false,
         };
-        let wall = WallOutline2D::new(pline, 1.0);
+        let wall = WallOutline2D::new(vec![pline], 1.0);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -554,7 +560,7 @@ mod tests {
             ],
             closed: false,
         };
-        let wall = WallOutline2D::new(pline, 2.0);
+        let wall = WallOutline2D::new(vec![pline], 2.0);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -575,7 +581,7 @@ mod tests {
             ],
             closed: false,
         };
-        let wall = WallOutline2D::new(pline, 2.5);
+        let wall = WallOutline2D::new(vec![pline], 2.5);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -600,7 +606,7 @@ mod tests {
             ],
             closed: false,
         };
-        let wall = WallOutline2D::new(pline, 1.0);
+        let wall = WallOutline2D::new(vec![pline], 1.0);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -628,7 +634,7 @@ mod tests {
         let d = 0.3;
         let ds = d / std::f64::consts::SQRT_2;
         let dm = d * (std::f64::consts::SQRT_2 - 1.0);
-        let wall = WallOutline2D::new(pline, d);
+        let wall = WallOutline2D::new(vec![pline], d);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -655,7 +661,7 @@ mod tests {
         let d = 0.3;
         let ds = d / std::f64::consts::SQRT_2;
         let s2 = std::f64::consts::SQRT_2;
-        let wall = WallOutline2D::new(pline, d);
+        let wall = WallOutline2D::new(vec![pline], d);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -686,7 +692,7 @@ mod tests {
         let ds = d / std::f64::consts::SQRT_2;
         let dm = d * (std::f64::consts::SQRT_2 - 1.0);
         let s2 = std::f64::consts::SQRT_2;
-        let wall = WallOutline2D::new(pline, d);
+        let wall = WallOutline2D::new(vec![pline], d);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
         let poly = &result[0];
@@ -718,7 +724,7 @@ mod tests {
         let d = 0.3;
         let ds = d / std::f64::consts::SQRT_2;
         let dm = d * (std::f64::consts::SQRT_2 - 1.0);
-        let wall = WallOutline2D::new(pline, d);
+        let wall = WallOutline2D::new(vec![pline], d);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 2, "expected 2 boundaries, got {}", result.len());
 
@@ -759,7 +765,7 @@ mod tests {
         let ds = d / std::f64::consts::SQRT_2;
         let dm = d * (std::f64::consts::SQRT_2 - 1.0);
         let s2 = std::f64::consts::SQRT_2;
-        let wall = WallOutline2D::new(pline, d);
+        let wall = WallOutline2D::new(vec![pline], d);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 3, "expected 3 boundaries, got {}", result.len());
 
@@ -795,7 +801,7 @@ mod tests {
         let ds = d / std::f64::consts::SQRT_2;
         let dm = d * (std::f64::consts::SQRT_2 - 1.0);
         let s2 = std::f64::consts::SQRT_2;
-        let wall = WallOutline2D::new(pline, d);
+        let wall = WallOutline2D::new(vec![pline], d);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 2, "expected 2 boundaries, got {}", result.len());
 
@@ -839,7 +845,7 @@ mod tests {
         let ds = d / std::f64::consts::SQRT_2;
         let dm = d * (std::f64::consts::SQRT_2 - 1.0);
         let s2 = std::f64::consts::SQRT_2;
-        let wall = WallOutline2D::new(pline, d);
+        let wall = WallOutline2D::new(vec![pline], d);
         let result = wall.execute().unwrap();
         assert_eq!(result.len(), 3, "expected 3 boundaries, got {}", result.len());
 
