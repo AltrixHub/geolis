@@ -487,4 +487,373 @@ mod tests {
         assert!(outer.closed, "outer boundary should be closed");
         assert_vertices_match(&outer.vertices, &double_cross_expected(0.8), 0.05);
     }
+
+    // ── Vertex-intersection stress tests (cases 18–22) ──
+
+    /// Case 18: T-shape, arm shorter than d (concave notch).
+    /// Arm length 0.5, d=1.0 — arm cap below spine wall, concave notch.
+    #[test]
+    fn t_very_short_arm_d10() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 3.0),
+                PlineVertex::line(8.0, 3.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(4.0, 3.5),
+            ],
+            closed: false,
+        };
+        let wall = WallOutline2D::new(pline, 1.0);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![
+            (0.0, 2.0), (4.0, 2.0), (8.0, 2.0), (8.0, 4.0),
+            (5.0, 4.0), (5.0, 3.5), (3.0, 3.5), (3.0, 4.0), (0.0, 4.0),
+        ];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Case 19: T-shape, arm = 2d (baseline comparison).
+    /// Arm length 2, d=1.0 — clean T-shape outline.
+    #[test]
+    fn t_arm_2d_d10() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 3.0),
+                PlineVertex::line(8.0, 3.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(4.0, 5.0),
+            ],
+            closed: false,
+        };
+        let wall = WallOutline2D::new(pline, 1.0);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![
+            (0.0, 2.0), (4.0, 2.0), (8.0, 2.0), (8.0, 4.0),
+            (5.0, 4.0), (5.0, 5.0), (3.0, 5.0), (3.0, 4.0), (0.0, 4.0),
+        ];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Case 20: Cross, arm length = d — degenerates to square.
+    /// Arm length 2, d=2.0 — all arm side edges degenerate.
+    #[test]
+    fn cross_short_d20() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(4.0, 2.0),
+                PlineVertex::line(4.0, 6.0),
+                PlineVertex::line(4.0, 4.0),
+                PlineVertex::line(2.0, 4.0),
+                PlineVertex::line(6.0, 4.0),
+            ],
+            closed: false,
+        };
+        let wall = WallOutline2D::new(pline, 2.0);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0)];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Case 21: L-shape, d > horizontal leg → miter extends past original.
+    /// horizontal leg=2, d=2.5 → miter pushes far past original vertex.
+    #[test]
+    fn l_large_d_d25() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(2.0, 0.0),
+                PlineVertex::line(2.0, 4.0),
+            ],
+            closed: false,
+        };
+        let wall = WallOutline2D::new(pline, 2.5);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![
+            (0.0, -2.5), (4.5, -2.5), (4.5, 4.0),
+            (-0.5, 4.0), (-0.5, 2.5), (0.0, 2.5),
+        ];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Case 22: T-shape, arm = d (exact degeneration boundary).
+    /// Arm length 1, d=1.0 — arm side edges degenerate to zero length.
+    #[test]
+    fn t_arm_eq_d_d10() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 3.0),
+                PlineVertex::line(8.0, 3.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(4.0, 4.0),
+            ],
+            closed: false,
+        };
+        let wall = WallOutline2D::new(pline, 1.0);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![
+            (0.0, 2.0), (4.0, 2.0), (8.0, 2.0), (8.0, 4.0),
+            (5.0, 4.0), (3.0, 4.0), (0.0, 4.0),
+        ];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    // ── Diagonal / non-orthogonal junction tests (cases 23–27) ──
+
+    /// Case 23: Open L-shape at 45°, d=0.3 — non-orthogonal miter.
+    #[test]
+    fn l_shape_45_d03() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(5.0, 0.0),
+                PlineVertex::line(8.0, 3.0),
+            ],
+            closed: false,
+        };
+        let d = 0.3;
+        let ds = d / std::f64::consts::SQRT_2;
+        let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+        let wall = WallOutline2D::new(pline, d);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![
+            (0.0, -d), (5.0 + dm, -d), (8.0 + ds, 3.0 - ds),
+            (8.0 - ds, 3.0 + ds), (5.0 - dm, d), (0.0, d),
+        ];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Case 24: Open T with 45° upward branch, d=0.3.
+    #[test]
+    fn t_diagonal_branch_d03() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 3.0),
+                PlineVertex::line(10.0, 3.0),
+                PlineVertex::line(5.0, 3.0),
+                PlineVertex::line(7.0, 5.0),
+            ],
+            closed: false,
+        };
+        let d = 0.3;
+        let ds = d / std::f64::consts::SQRT_2;
+        let s2 = std::f64::consts::SQRT_2;
+        let wall = WallOutline2D::new(pline, d);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![
+            (0.0, 3.0 - d), (5.0, 3.0 - d), (10.0, 3.0 - d),
+            (10.0, 3.0 + d), (5.0 + d * (1.0 + s2), 3.0 + d),
+            (7.0 + ds, 5.0 - ds), (7.0 - ds, 5.0 + ds),
+            (5.0 + d * (1.0 - s2), 3.0 + d), (0.0, 3.0 + d),
+        ];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Case 25: Open Y-junction (L-shape + diagonal), d=0.3.
+    #[test]
+    fn y_mixed_junction_d03() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(5.0, 0.0),
+                PlineVertex::line(5.0, 5.0),
+                PlineVertex::line(5.0, 0.0),
+                PlineVertex::line(8.0, 3.0),
+            ],
+            closed: false,
+        };
+        let d = 0.3;
+        let ds = d / std::f64::consts::SQRT_2;
+        let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+        let s2 = std::f64::consts::SQRT_2;
+        let wall = WallOutline2D::new(pline, d);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 1, "expected 1 boundary, got {}", result.len());
+        let poly = &result[0];
+        assert!(poly.closed, "result should be closed");
+        let expected = vec![
+            (0.0, -d), (5.0 + dm, -d),
+            (8.0 + ds, 3.0 - ds), (8.0 - ds, 3.0 + ds),
+            (5.0 + d, d * (1.0 + s2)),
+            (5.0 + d, 5.0), (5.0 - d, 5.0),
+            (5.0 - d, d), (0.0, d),
+        ];
+        assert_vertices_match(&poly.vertices, &expected, 0.05);
+    }
+
+    /// Case 26: Closed room + diagonal stub from corner, d=0.3.
+    #[test]
+    fn room_corner_stub_d03() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(-3.0, -3.0),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(8.0, 0.0),
+                PlineVertex::line(8.0, 8.0),
+                PlineVertex::line(0.0, 8.0),
+            ],
+            closed: true,
+        };
+        let d = 0.3;
+        let ds = d / std::f64::consts::SQRT_2;
+        let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+        let wall = WallOutline2D::new(pline, d);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 2, "expected 2 boundaries, got {}", result.len());
+
+        let outer = result.iter().max_by_key(|p| p.vertices.len()).unwrap();
+        let outer_expected = vec![
+            (8.0 + d, -d), (8.0 + d, 8.0 + d), (-d, 8.0 + d),
+            (-d, dm),
+            (-3.0 - ds, -3.0 + ds), (-3.0 + ds, -3.0 - ds),
+            (dm, -d),
+        ];
+        assert_vertices_match(&outer.vertices, &outer_expected, 0.05);
+
+        let inner = result.iter().min_by_key(|p| p.vertices.len()).unwrap();
+        let inner_expected = vec![
+            (d, d), (8.0 - d, d), (8.0 - d, 8.0 - d), (d, 8.0 - d),
+        ];
+        assert_vertices_match(&inner.vertices, &inner_expected, 0.05);
+    }
+
+    /// Case 27: Closed room + diagonal partition through corner, d=0.3.
+    #[test]
+    fn room_corner_diagonal_d03() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(10.0, 0.0),
+                PlineVertex::line(10.0, 8.0),
+                PlineVertex::line(8.0, 8.0),
+                PlineVertex::line(11.0, 11.0),
+                PlineVertex::line(-3.0, -3.0),
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(0.0, 8.0),
+                PlineVertex::line(8.0, 8.0),
+            ],
+            closed: true,
+        };
+        let d = 0.3;
+        let ds = d / std::f64::consts::SQRT_2;
+        let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+        let s2 = std::f64::consts::SQRT_2;
+        let wall = WallOutline2D::new(pline, d);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 3, "expected 3 boundaries, got {}", result.len());
+
+        let outer = result.iter().max_by_key(|p| p.vertices.len()).unwrap();
+        let outer_expected = vec![
+            (10.0 + d, -d), (10.0 + d, 8.0 + d),
+            (8.0 + d * (1.0 + s2), 8.0 + d),
+            (11.0 + ds, 11.0 - ds), (11.0 - ds, 11.0 + ds),
+            (8.0 + d * (1.0 - s2), 8.0 + d),
+            (-d, 8.0 + d), (-d, dm),
+            (-3.0 - ds, -3.0 + ds), (-3.0 + ds, -3.0 - ds),
+            (dm, -d),
+        ];
+        assert_vertices_match(&outer.vertices, &outer_expected, 0.05);
+    }
+
+    /// Case 28: Closed room + diagonal stub near corner, junction at (0, 0.5).
+    #[test]
+    fn room_near_corner_stub_d03() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.5),
+                PlineVertex::line(-3.0, -2.5),
+                PlineVertex::line(0.0, 0.5),
+                PlineVertex::line(0.0, 8.0),
+                PlineVertex::line(8.0, 8.0),
+                PlineVertex::line(8.0, 0.0),
+                PlineVertex::line(0.0, 0.0),
+            ],
+            closed: true,
+        };
+        let d = 0.3;
+        let ds = d / std::f64::consts::SQRT_2;
+        let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+        let s2 = std::f64::consts::SQRT_2;
+        let wall = WallOutline2D::new(pline, d);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 2, "expected 2 boundaries, got {}", result.len());
+
+        let outer = result.iter().max_by_key(|p| p.vertices.len()).unwrap();
+        let outer_expected = vec![
+            (8.0 + d, -d), (8.0 + d, 8.0 + d), (-d, 8.0 + d),
+            (-d, 0.5 + dm),
+            (-3.0 - ds, -2.5 + ds), (-3.0 + ds, -2.5 - ds),
+            (-d, 0.5 - d * (1.0 + s2)),
+            (-d, -d),
+        ];
+        assert_vertices_match(&outer.vertices, &outer_expected, 0.05);
+
+        // Inner boundary includes a collinear junction corner at (d, 0.5).
+        let inner = result.iter().min_by_key(|p| p.vertices.len()).unwrap();
+        let inner_expected = vec![
+            (d, d), (d, 0.5), (d, 8.0 - d), (8.0 - d, 8.0 - d), (8.0 - d, d),
+        ];
+        assert_vertices_match(&inner.vertices, &inner_expected, 0.05);
+    }
+
+    /// Case 29: Closed room + diagonal partition near corner, junctions at (0, 0.5) and (7.5, 8).
+    #[test]
+    fn room_near_corner_diagonal_d03() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(10.0, 0.0),
+                PlineVertex::line(10.0, 8.0),
+                PlineVertex::line(7.5, 8.0),
+                PlineVertex::line(10.5, 11.0),
+                PlineVertex::line(-3.0, -2.5),
+                PlineVertex::line(0.0, 0.5),
+                PlineVertex::line(0.0, 8.0),
+                PlineVertex::line(7.5, 8.0),
+                PlineVertex::line(0.0, 0.5),
+            ],
+            closed: true,
+        };
+        let d = 0.3;
+        let ds = d / std::f64::consts::SQRT_2;
+        let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+        let s2 = std::f64::consts::SQRT_2;
+        let wall = WallOutline2D::new(pline, d);
+        let result = wall.execute().unwrap();
+        assert_eq!(result.len(), 3, "expected 3 boundaries, got {}", result.len());
+
+        let outer = result.iter().max_by_key(|p| p.vertices.len()).unwrap();
+        let outer_expected = vec![
+            (10.0 + d, -d), (10.0 + d, 8.0 + d),
+            (7.5 + d * (1.0 + s2), 8.0 + d),
+            (10.5 + ds, 11.0 - ds), (10.5 - ds, 11.0 + ds),
+            (7.5 + d * (1.0 - s2), 8.0 + d),
+            (-d, 8.0 + d), (-d, 0.5 + dm),
+            (-3.0 - ds, -2.5 + ds), (-3.0 + ds, -2.5 - ds),
+            (-d, 0.5 - d * (1.0 + s2)),
+            (-d, -d),
+        ];
+        assert_vertices_match(&outer.vertices, &outer_expected, 0.05);
+    }
 }

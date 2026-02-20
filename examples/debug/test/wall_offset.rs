@@ -125,6 +125,76 @@ fn room_with_penetrating_wall() -> Vec<(f64, f64)> {
     ]
 }
 
+fn t_very_short_arm() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (8.0, 3.0), (4.0, 3.0), (4.0, 3.5)]
+}
+
+fn t_arm_2d() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (8.0, 3.0), (4.0, 3.0), (4.0, 5.0)]
+}
+
+fn cross_short() -> Vec<(f64, f64)> {
+    vec![(4.0, 2.0), (4.0, 6.0), (4.0, 4.0), (2.0, 4.0), (6.0, 4.0)]
+}
+
+fn l_large_d() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (2.0, 0.0), (2.0, 4.0)]
+}
+
+fn t_arm_eq_d() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (8.0, 3.0), (4.0, 3.0), (4.0, 4.0)]
+}
+
+/// Case 23: Open L-shape at 45° angle.
+fn l_shape_45() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (5.0, 0.0), (8.0, 3.0)]
+}
+
+/// Case 24: Open T-shape with 45° upward-right branch.
+fn t_diagonal_branch() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (10.0, 3.0), (5.0, 3.0), (7.0, 5.0)]
+}
+
+/// Case 25: Open Y-junction: L-shape + diagonal from corner.
+fn y_mixed_junction() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (5.0, 0.0), (8.0, 3.0)]
+}
+
+/// Case 26: Closed room with diagonal stub from corner (0,0).
+fn room_with_corner_stub() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (-3.0, -3.0), (0.0, 0.0),
+        (8.0, 0.0), (8.0, 8.0), (0.0, 8.0),
+    ]
+}
+
+/// Case 27: Closed room with diagonal partition through corner (0,0).
+fn room_with_corner_diagonal() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (8.0, 8.0),
+        (11.0, 11.0), (-3.0, -3.0),
+        (0.0, 0.0), (0.0, 8.0), (8.0, 8.0),
+    ]
+}
+
+/// Case 28: Closed room + diagonal stub near corner, junction at (0, 0.5).
+fn room_with_near_corner_stub() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.5), (-3.0, -2.5), (0.0, 0.5),
+        (0.0, 8.0), (8.0, 8.0), (8.0, 0.0), (0.0, 0.0),
+    ]
+}
+
+/// Case 29: Closed room + diagonal partition near corner, junctions at (0, 0.5) and (7.5, 8).
+fn room_with_near_corner_diagonal() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (7.5, 8.0),
+        (10.5, 11.0), (-3.0, -2.5),
+        (0.0, 0.5), (0.0, 8.0), (7.5, 8.0),
+        (0.0, 0.5),
+    ]
+}
+
 // ── Expected outlines (hand-computed) ───────────────────────────────
 
 /// Case 1: Single line d=0.3 → 4-vertex rectangle.
@@ -365,6 +435,214 @@ fn case_16_inner_top() -> Vec<(f64, f64)> {
     vec![(0.3, 5.3), (0.3, 9.7), (9.7, 9.7), (9.7, 5.3)]
 }
 
+/// Case 18: T-shape, arm shorter than d → concave notch.
+/// d=1.0, arm length 0.5 (half of d). Cap at y=3.5 below spine wall y=4.
+fn case_18_outer() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 2.0), (4.0, 2.0), (8.0, 2.0), (8.0, 4.0),
+        (5.0, 4.0), (5.0, 3.5), (3.0, 3.5), (3.0, 4.0), (0.0, 4.0),
+    ]
+}
+
+/// Case 19: T-shape, arm = 2d → clean T outline.
+/// d=1.0, arm length 2 (tip extends d beyond spine wall).
+fn case_19_outer() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 2.0), (4.0, 2.0), (8.0, 2.0), (8.0, 4.0),
+        (5.0, 4.0), (5.0, 5.0), (3.0, 5.0), (3.0, 4.0), (0.0, 4.0),
+    ]
+}
+
+/// Case 20: Cross, arm length = d — degenerates to square.
+/// d=2.0, arm length 2. All junction corners reach arm tips.
+fn case_20_outer() -> Vec<(f64, f64)> {
+    vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0)]
+}
+
+/// Case 21: L-shape, d > horizontal leg → miter extends past original.
+/// d=2.5, horizontal leg = 2. Miter at (2,0) pushes to (4.5,-2.5).
+fn case_21_outer() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, -2.5), (4.5, -2.5), (4.5, 4.0),
+        (-0.5, 4.0), (-0.5, 2.5), (0.0, 2.5),
+    ]
+}
+
+/// Case 22: T-shape, arm = d → exact degeneration boundary.
+/// d=1.0, arm length 1. Arm side edges degenerate, cap on spine wall.
+fn case_22_outer() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 2.0), (4.0, 2.0), (8.0, 2.0), (8.0, 4.0),
+        (5.0, 4.0), (3.0, 4.0), (0.0, 4.0),
+    ]
+}
+
+/// Helper constants for diagonal offset at d=0.3.
+/// `ds` = d/sqrt(2), `dm` = d*(sqrt(2)-1).
+fn diag_offsets(d: f64) -> (f64, f64) {
+    let ds = d / std::f64::consts::SQRT_2;
+    let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+    (ds, dm)
+}
+
+/// Case 23: Open L at 45°, d=0.3 → 6-vertex outline.
+fn case_23_outer() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let (ds, dm) = diag_offsets(d);
+    vec![
+        (0.0, -d), (5.0 + dm, -d), (8.0 + ds, 3.0 - ds),
+        (8.0 - ds, 3.0 + ds), (5.0 - dm, d), (0.0, d),
+    ]
+}
+
+/// Case 24: Open T with 45° upward branch, d=0.3 → 9-vertex outline.
+fn case_24_outer() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let (ds, _dm) = diag_offsets(d);
+    let s2 = std::f64::consts::SQRT_2;
+    vec![
+        (0.0, 3.0 - d), (5.0, 3.0 - d), (10.0, 3.0 - d),
+        (10.0, 3.0 + d), (5.0 + d * (1.0 + s2), 3.0 + d),
+        (7.0 + ds, 5.0 - ds), (7.0 - ds, 5.0 + ds),
+        (5.0 + d * (1.0 - s2), 3.0 + d), (0.0, 3.0 + d),
+    ]
+}
+
+/// Case 25: Open Y-junction (2 orthogonal + 1 diagonal), d=0.3 → 9 vertices.
+fn case_25_outer() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let (ds, dm) = diag_offsets(d);
+    let s2 = std::f64::consts::SQRT_2;
+    vec![
+        (0.0, -d), (5.0 + dm, -d),
+        (8.0 + ds, 3.0 - ds), (8.0 - ds, 3.0 + ds),
+        (5.0 + d, d * (1.0 + s2)),
+        (5.0 + d, 5.0), (5.0 - d, 5.0),
+        (5.0 - d, d), (0.0, d),
+    ]
+}
+
+/// Case 26: Closed room + diagonal stub from corner, d=0.3 → 7 outer.
+fn case_26_outer() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let (ds, dm) = diag_offsets(d);
+    vec![
+        (8.0 + d, -d), (8.0 + d, 8.0 + d), (-d, 8.0 + d),
+        (-d, dm),
+        (-3.0 - ds, -3.0 + ds), (-3.0 + ds, -3.0 - ds),
+        (dm, -d),
+    ]
+}
+
+/// Case 26: inner room boundary → 4 vertices.
+fn case_26_inner() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    vec![(d, d), (8.0 - d, d), (8.0 - d, 8.0 - d), (d, 8.0 - d)]
+}
+
+/// Case 27: Closed room + diagonal partition through corner, d=0.3 → 11 outer.
+fn case_27_outer() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let (ds, dm) = diag_offsets(d);
+    let s2 = std::f64::consts::SQRT_2;
+    vec![
+        (10.0 + d, -d), (10.0 + d, 8.0 + d),
+        (8.0 + d * (1.0 + s2), 8.0 + d),
+        (11.0 + ds, 11.0 - ds), (11.0 - ds, 11.0 + ds),
+        (8.0 + d * (1.0 - s2), 8.0 + d),
+        (-d, 8.0 + d), (-d, dm),
+        (-3.0 - ds, -3.0 + ds), (-3.0 + ds, -3.0 - ds),
+        (dm, -d),
+    ]
+}
+
+/// Case 27: inner bottom-right triangle → 4 vertices.
+fn case_27_inner_br() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let s2 = std::f64::consts::SQRT_2;
+    let dm = d * (s2 - 1.0);
+    vec![
+        (d * (1.0 + s2), d),
+        (10.0 - d, d),
+        (10.0 - d, 8.0 - d),
+        (8.0 + dm, 8.0 - d),
+    ]
+}
+
+/// Case 27: inner top-left triangle → 3 vertices.
+fn case_27_inner_tl() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let s2 = std::f64::consts::SQRT_2;
+    vec![
+        (d, d * (1.0 + s2)),
+        (d, 8.0 - d),
+        (8.0 - d * (1.0 + s2), 8.0 - d),
+    ]
+}
+
+/// Case 28: Closed room + near-corner stub, d=0.3 → 8 outer vertices.
+/// Junction at (0, 0.5) on left wall, diagonal stub to (-3, -2.5).
+fn case_28_outer() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let (ds, dm) = diag_offsets(d);
+    let s2 = std::f64::consts::SQRT_2;
+    vec![
+        (8.0 + d, -d), (8.0 + d, 8.0 + d), (-d, 8.0 + d),
+        (-d, 0.5 + dm),
+        (-3.0 - ds, -2.5 + ds), (-3.0 + ds, -2.5 - ds),
+        (-d, 0.5 - d * (1.0 + s2)),
+        (-d, -d),
+    ]
+}
+
+/// Case 28: inner room boundary → 5 vertices (includes collinear junction corner).
+fn case_28_inner() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    vec![(d, d), (d, 0.5), (d, 8.0 - d), (8.0 - d, 8.0 - d), (8.0 - d, d)]
+}
+
+/// Case 29: Closed room + near-corner diagonal, d=0.3 → 12 outer vertices.
+/// Junctions at (0, 0.5) and (7.5, 8), diagonal y=x+0.5.
+fn case_29_outer() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let (ds, dm) = diag_offsets(d);
+    let s2 = std::f64::consts::SQRT_2;
+    vec![
+        (10.0 + d, -d), (10.0 + d, 8.0 + d),
+        (7.5 + d * (1.0 + s2), 8.0 + d),
+        (10.5 + ds, 11.0 - ds), (10.5 - ds, 11.0 + ds),
+        (7.5 + d * (1.0 - s2), 8.0 + d),
+        (-d, 8.0 + d), (-d, 0.5 + dm),
+        (-3.0 - ds, -2.5 + ds), (-3.0 + ds, -2.5 - ds),
+        (-d, 0.5 - d * (1.0 + s2)),
+        (-d, -d),
+    ]
+}
+
+/// Case 29: inner bottom-right region → 5 vertices.
+fn case_29_inner_br() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let dm = d * (std::f64::consts::SQRT_2 - 1.0);
+    vec![
+        (d, d),
+        (d, 0.5 - dm),
+        (7.5 + dm, 8.0 - d),
+        (10.0 - d, 8.0 - d),
+        (10.0 - d, d),
+    ]
+}
+
+/// Case 29: inner top-left region → 3 vertices.
+fn case_29_inner_tl() -> Vec<(f64, f64)> {
+    let d = 0.3;
+    let s2 = std::f64::consts::SQRT_2;
+    vec![
+        (d, 0.5 + d * (1.0 + s2)),
+        (d, 8.0 - d),
+        (7.5 - d * (1.0 + s2), 8.0 - d),
+    ]
+}
+
 // ── Drawing helper ──────────────────────────────────────────────────
 
 fn draw_ground_truth(
@@ -423,6 +701,12 @@ pub fn register(storage: &MeshStorage) {
     let c16_top = case_16_inner_top();
     let c17_bottom = case_17_inner_bottom();
     let c17_top = case_17_inner_top();
+    let c26_inner = case_26_inner();
+    let c27_br = case_27_inner_br();
+    let c27_tl = case_27_inner_tl();
+    let c28_inner = case_28_inner();
+    let c29_br = case_29_inner_br();
+    let c29_tl = case_29_inner_tl();
 
     // (centerline, outer, holes, closed, bx, by, lx, ly)
     #[allow(clippy::type_complexity)]
@@ -445,6 +729,18 @@ pub fn register(storage: &MeshStorage) {
             (room_with_partition(), case_15_outer(), vec![&c15_bottom, &c15_top], true, 16.0, -64.0, 14.5, -52.5),
             (room_with_penetrating_wall(), case_16_outer(), vec![&c16_bottom, &c16_top], true, 32.0, -64.0, 30.5, -52.5),
             (room_with_diagonal_wall(), case_17_outer(), vec![&c17_bottom, &c17_top], true, 48.0, -64.0, 46.5, -52.5),
+            (t_very_short_arm(), case_18_outer(), vec![], false, 0.0, -80.0, -1.5, -74.5),
+            (t_arm_2d(), case_19_outer(), vec![], false, 16.0, -80.0, 14.5, -73.5),
+            (cross_short(), case_20_outer(), vec![], false, 32.0, -80.0, 30.5, -72.5),
+            (l_large_d(), case_21_outer(), vec![], false, 48.0, -80.0, 46.5, -74.5),
+            (t_arm_eq_d(), case_22_outer(), vec![], false, 64.0, -80.0, 62.5, -74.5),
+            (l_shape_45(), case_23_outer(), vec![], false, 0.0, -96.0, -1.5, -92.0),
+            (t_diagonal_branch(), case_24_outer(), vec![], false, 16.0, -96.0, 14.5, -90.0),
+            (y_mixed_junction(), case_25_outer(), vec![], false, 32.0, -96.0, 30.5, -90.0),
+            (room_with_corner_stub(), case_26_outer(), vec![&c26_inner], true, 48.0, -96.0, 46.5, -85.0),
+            (room_with_corner_diagonal(), case_27_outer(), vec![&c27_br, &c27_tl], true, 68.0, -96.0, 66.5, -82.0),
+            (room_with_near_corner_stub(), case_28_outer(), vec![&c28_inner], true, 0.0, -112.0, -1.5, -100.5),
+            (room_with_near_corner_diagonal(), case_29_outer(), vec![&c29_br, &c29_tl], true, 20.0, -112.0, 18.5, -98.0),
         ];
 
     for (i, (cl, outer, holes, closed, bx, by, lx, ly)) in cases.iter().enumerate() {

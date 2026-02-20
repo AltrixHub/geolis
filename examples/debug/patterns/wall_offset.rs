@@ -131,6 +131,69 @@ fn room_with_penetrating_wall() -> Vec<(f64, f64)> {
     ]
 }
 
+fn t_very_short_arm() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (8.0, 3.0), (4.0, 3.0), (4.0, 3.5)]
+}
+
+fn t_arm_2d() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (8.0, 3.0), (4.0, 3.0), (4.0, 5.0)]
+}
+
+fn cross_short() -> Vec<(f64, f64)> {
+    vec![(4.0, 2.0), (4.0, 6.0), (4.0, 4.0), (2.0, 4.0), (6.0, 4.0)]
+}
+
+fn l_large_d() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (2.0, 0.0), (2.0, 4.0)]
+}
+
+fn t_arm_eq_d() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (8.0, 3.0), (4.0, 3.0), (4.0, 4.0)]
+}
+
+fn l_shape_45() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (5.0, 0.0), (8.0, 3.0)]
+}
+
+fn t_diagonal_branch() -> Vec<(f64, f64)> {
+    vec![(0.0, 3.0), (10.0, 3.0), (5.0, 3.0), (7.0, 5.0)]
+}
+
+fn y_mixed_junction() -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (5.0, 0.0), (8.0, 3.0)]
+}
+
+fn room_with_corner_stub() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (-3.0, -3.0), (0.0, 0.0),
+        (8.0, 0.0), (8.0, 8.0), (0.0, 8.0),
+    ]
+}
+
+fn room_with_corner_diagonal() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (8.0, 8.0),
+        (11.0, 11.0), (-3.0, -3.0),
+        (0.0, 0.0), (0.0, 8.0), (8.0, 8.0),
+    ]
+}
+
+fn room_with_near_corner_stub() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.5), (-3.0, -2.5), (0.0, 0.5),
+        (0.0, 8.0), (8.0, 8.0), (8.0, 0.0), (0.0, 0.0),
+    ]
+}
+
+fn room_with_near_corner_diagonal() -> Vec<(f64, f64)> {
+    vec![
+        (0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (7.5, 8.0),
+        (10.5, 11.0), (-3.0, -2.5),
+        (0.0, 0.5), (0.0, 8.0), (7.5, 8.0),
+        (0.0, 0.5),
+    ]
+}
+
 // ── Drawing helper ──────────────────────────────────────────────────
 
 fn draw_case(
@@ -195,6 +258,18 @@ pub fn register(storage: &MeshStorage) {
         (room_with_partition(), 0.3, true, 16.0, -64.0, 14.5, -52.5),
         (room_with_penetrating_wall(), 0.3, true, 32.0, -64.0, 30.5, -52.5),
         (room_with_diagonal_wall(), 0.3, true, 48.0, -64.0, 46.5, -52.5),
+        (t_very_short_arm(), 1.0, false, 0.0, -80.0, -1.5, -74.5),
+        (t_arm_2d(), 1.0, false, 16.0, -80.0, 14.5, -73.5),
+        (cross_short(), 2.0, false, 32.0, -80.0, 30.5, -72.5),
+        (l_large_d(), 2.5, false, 48.0, -80.0, 46.5, -74.5),
+        (t_arm_eq_d(), 1.0, false, 64.0, -80.0, 62.5, -74.5),
+        (l_shape_45(), 0.3, false, 0.0, -96.0, -1.5, -92.0),
+        (t_diagonal_branch(), 0.3, false, 16.0, -96.0, 14.5, -90.0),
+        (y_mixed_junction(), 0.3, false, 32.0, -96.0, 30.5, -90.0),
+        (room_with_corner_stub(), 0.3, true, 48.0, -96.0, 46.5, -85.0),
+        (room_with_corner_diagonal(), 0.3, true, 68.0, -96.0, 66.5, -82.0),
+        (room_with_near_corner_stub(), 0.3, true, 0.0, -112.0, -1.5, -100.5),
+        (room_with_near_corner_diagonal(), 0.3, true, 20.0, -112.0, 18.5, -98.0),
     ];
 
     for (i, (pts, hw, closed, bx, by, lx, ly)) in cases.iter().enumerate() {

@@ -141,10 +141,9 @@ fn insert_constraint_loop(
     points: &[SpadePoint2<f64>],
 ) -> Result<()> {
     if points.len() < 3 {
-        return Err(TessellationError::Failed(
-            "constraint loop needs at least 3 points".into(),
-        )
-        .into());
+        return Err(
+            TessellationError::Failed("constraint loop needs at least 3 points".into()).into(),
+        );
     }
 
     let mut handles = Vec::with_capacity(points.len());
@@ -188,8 +187,7 @@ fn classify_interior_faces(
                 if depth_map.contains_key(&idx) {
                     continue;
                 }
-                let depth =
-                    u32::from(cdt.is_constraint_edge(edge.as_undirected().fix()));
+                let depth = u32::from(cdt.is_constraint_edge(edge.as_undirected().fix()));
                 depth_map.insert(idx, depth);
                 if depth % 2 == 1 {
                     interior.insert(idx);
@@ -209,12 +207,11 @@ fn classify_interior_faces(
                 if depth_map.contains_key(&n_idx) {
                     continue;
                 }
-                let new_depth =
-                    if cdt.is_constraint_edge(edge.as_undirected().fix()) {
-                        depth + 1
-                    } else {
-                        depth
-                    };
+                let new_depth = if cdt.is_constraint_edge(edge.as_undirected().fix()) {
+                    depth + 1
+                } else {
+                    depth
+                };
                 depth_map.insert(n_idx, new_depth);
                 if new_depth % 2 == 1 {
                     interior.insert(n_idx);
@@ -328,7 +325,10 @@ mod tests {
                 + mesh.vertices[tri[2] as usize].y)
                 / 3.0;
             let in_hole = cx > 3.0 && cx < 7.0 && cy > 3.0 && cy < 7.0;
-            assert!(!in_hole, "triangle centroid ({cx}, {cy}) is inside the hole");
+            assert!(
+                !in_hole,
+                "triangle centroid ({cx}, {cy}) is inside the hole"
+            );
         }
     }
 
