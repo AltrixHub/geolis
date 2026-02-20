@@ -1,3 +1,4 @@
+pub mod extrude;
 pub mod face_creation;
 pub mod stroke_joins;
 pub mod wall_offset;
@@ -11,7 +12,7 @@ use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
 /// All available pattern names.
-pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset", "face_creation"];
+pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset", "face_creation", "extrude"];
 
 /// Register meshes for the named pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
@@ -26,6 +27,10 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "face_creation" => {
             face_creation::register(storage);
+            true
+        }
+        "extrude" => {
+            extrude::register(storage);
             true
         }
         _ => false,

@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::topology::{ShellId, SolidId, TopologyStore};
+use crate::topology::{ShellId, SolidData, SolidId, TopologyStore};
 
 /// Creates a solid from shells.
 pub struct MakeSolid {
@@ -21,9 +21,19 @@ impl MakeSolid {
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
-    pub fn execute(&self, _store: &mut TopologyStore) -> Result<SolidId> {
-        let _ = (self.outer_shell, &self.inner_shells);
-        todo!()
+    /// Returns [`TopologyError::EntityNotFound`] if any shell ID is invalid.
+    pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
+        // Validate that all shells exist
+        let _ = store.shell(self.outer_shell)?;
+        for &shell_id in &self.inner_shells {
+            let _ = store.shell(shell_id)?;
+        }
+
+        let solid_id = store.add_solid(SolidData {
+            outer_shell: self.outer_shell,
+            inner_shells: self.inner_shells.clone(),
+        });
+
+        Ok(solid_id)
     }
 }

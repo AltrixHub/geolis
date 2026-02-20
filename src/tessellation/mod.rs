@@ -54,3 +54,80 @@ pub struct TriangleMesh {
     /// Triangle indices (each triple defines a triangle).
     pub indices: Vec<[u32; 3]>,
 }
+
+impl TriangleMesh {
+    /// Merges another mesh into this one, offsetting indices appropriately.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn merge(&mut self, other: &Self) {
+        let offset = self.vertices.len() as u32;
+        self.vertices.extend_from_slice(&other.vertices);
+        self.normals.extend_from_slice(&other.normals);
+        self.uvs.extend_from_slice(&other.uvs);
+        for tri in &other.indices {
+            self.indices
+                .push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn make_triangle_mesh(base_vertex: f64, base_index: u32) -> TriangleMesh {
+        TriangleMesh {
+            vertices: vec![
+                Point3::new(base_vertex, 0.0, 0.0),
+                Point3::new(base_vertex + 1.0, 0.0, 0.0),
+                Point3::new(base_vertex, 1.0, 0.0),
+            ],
+            normals: vec![
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            uvs: vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 0.0),
+                Point2::new(0.0, 1.0),
+            ],
+            indices: vec![[base_index, base_index + 1, base_index + 2]],
+        }
+    }
+
+    #[test]
+    fn merge_offsets_indices() {
+        let mut a = make_triangle_mesh(0.0, 0);
+        let b = make_triangle_mesh(2.0, 0);
+        a.merge(&b);
+
+        assert_eq!(a.vertices.len(), 6);
+        assert_eq!(a.normals.len(), 6);
+        assert_eq!(a.uvs.len(), 6);
+        assert_eq!(a.indices.len(), 2);
+        assert_eq!(a.indices[0], [0, 1, 2]);
+        assert_eq!(a.indices[1], [3, 4, 5]); // offset by 3
+    }
+
+    #[test]
+    fn merge_into_empty() {
+        let mut a = TriangleMesh::default();
+        let b = make_triangle_mesh(0.0, 0);
+        a.merge(&b);
+
+        assert_eq!(a.vertices.len(), 3);
+        assert_eq!(a.indices.len(), 1);
+        assert_eq!(a.indices[0], [0, 1, 2]); // offset 0
+    }
+
+    #[test]
+    fn merge_empty_into_existing() {
+        let mut a = make_triangle_mesh(0.0, 0);
+        let b = TriangleMesh::default();
+        a.merge(&b);
+
+        assert_eq!(a.vertices.len(), 3);
+        assert_eq!(a.indices.len(), 1);
+    }
+}

@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::topology::{SolidId, TopologyStore};
 
-use super::{TessellationParams, TriangleMesh};
+use super::{TessellateFace, TessellationParams, TriangleMesh};
 
 /// Tessellates all faces of a solid into a combined triangle mesh.
 pub struct TessellateSolid {
@@ -20,9 +20,17 @@ impl TessellateSolid {
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
-    pub fn execute(&self, _store: &TopologyStore) -> Result<TriangleMesh> {
-        let _ = (self.solid, self.params);
-        todo!()
+    /// Returns an error if the solid or any of its faces cannot be tessellated.
+    pub fn execute(&self, store: &TopologyStore) -> Result<TriangleMesh> {
+        let solid = store.solid(self.solid)?;
+        let shell = store.shell(solid.outer_shell)?;
+
+        let mut combined = TriangleMesh::default();
+        for &face_id in &shell.faces {
+            let face_mesh = TessellateFace::new(face_id, self.params).execute(store)?;
+            combined.merge(&face_mesh);
+        }
+
+        Ok(combined)
     }
 }
