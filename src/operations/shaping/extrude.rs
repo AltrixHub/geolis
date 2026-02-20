@@ -1,7 +1,11 @@
 use crate::error::{OperationError, Result};
+use crate::geometry::curve::Line;
 use crate::math::{Point3, Vector3, TOLERANCE};
-use crate::operations::creation::{MakeFace, MakeSolid, MakeWire};
-use crate::topology::{FaceId, ShellData, SolidId, TopologyStore};
+use crate::operations::creation::{MakeFace, MakeSolid};
+use crate::topology::{
+    EdgeCurve, EdgeData, EdgeId, FaceId, OrientedEdge, ShellData, SolidId, TopologyStore,
+    VertexData, VertexId, WireData, WireId,
+};
 
 /// Extrudes a face along a direction vector to create a solid.
 pub struct Extrude {
@@ -17,6 +21,10 @@ impl Extrude {
     }
 
     /// Executes the extrusion, creating the solid in the topology store.
+    ///
+    /// Builds a proper `BRep` solid where adjacent faces share edges via
+    /// `OrientedEdge`. For an n-sided polygon this produces 2n vertices,
+    /// 3n edges, and n+2 faces.
     ///
     /// # Errors
     ///
@@ -48,8 +56,8 @@ impl Extrude {
 
         // Ensure base_points are ordered so their Newell normal aligns with the
         // extrude direction. Then:
-        //   - bottom face = reversed base → normal ≈ -direction (outward below)
-        //   - top face = translated base → normal ≈ +direction (outward above)
+        //   - bottom face = reversed winding → normal ≈ -direction (outward below)
+        //   - top face = same winding translated → normal ≈ +direction (outward above)
         //   - side quads naturally face outward
         let base_points = if normal.dot(&self.direction) > 0.0 {
             base_points
@@ -57,42 +65,99 @@ impl Extrude {
             base_points.into_iter().rev().collect()
         };
 
-        // Bottom face: points in reversed order → normal ≈ -direction (outward below)
-        let bottom_points: Vec<Point3> = base_points.iter().rev().copied().collect();
-        let bottom_face = make_planar_face(store, &bottom_points)?;
-
-        // Top face: base points translated by direction → normal ≈ +direction (outward above)
-        let top_points: Vec<Point3> = base_points
-            .iter()
-            .map(|p| Point3::new(p.x + self.direction.x, p.y + self.direction.y, p.z + self.direction.z))
-            .collect();
-        let top_face = make_planar_face(store, &top_points)?;
-
-        // Side faces: each edge of the base polygon creates a quad
         let n = base_points.len();
-        let mut all_faces = Vec::with_capacity(n + 2);
-        all_faces.push(bottom_face);
-        all_faces.push(top_face);
 
+        // --- Create 2n vertices ---
+        let bottom_verts: Vec<VertexId> = base_points
+            .iter()
+            .map(|p| store.add_vertex(VertexData::new(*p)))
+            .collect();
+        let top_points: Vec<Point3> = base_points.iter().map(|p| p + self.direction).collect();
+        let top_verts: Vec<VertexId> = top_points
+            .iter()
+            .map(|p| store.add_vertex(VertexData::new(*p)))
+            .collect();
+
+        // --- Create 3n edges ---
+        // be[i]: bottom[i] → bottom[(i+1)%n]
+        let mut bottom_edges = Vec::with_capacity(n);
         for i in 0..n {
             let j = (i + 1) % n;
-            let quad = vec![
+            bottom_edges.push(create_line_edge(
+                store,
+                bottom_verts[i],
+                bottom_verts[j],
                 base_points[i],
                 base_points[j],
-                top_points[j],
+            )?);
+        }
+
+        // te[i]: top[i] → top[(i+1)%n]
+        let mut top_edges = Vec::with_capacity(n);
+        for i in 0..n {
+            let j = (i + 1) % n;
+            top_edges.push(create_line_edge(
+                store,
+                top_verts[i],
+                top_verts[j],
                 top_points[i],
+                top_points[j],
+            )?);
+        }
+
+        // ve[i]: bottom[i] → top[i]
+        let mut vert_edges = Vec::with_capacity(n);
+        for i in 0..n {
+            vert_edges.push(create_line_edge(
+                store,
+                bottom_verts[i],
+                top_verts[i],
+                base_points[i],
+                top_points[i],
+            )?);
+        }
+
+        // --- Build wires and faces ---
+        let mut all_faces = Vec::with_capacity(n + 2);
+
+        // Bottom face: reversed winding → normal ≈ -direction
+        // Wire: be[n-1]↓, be[n-2]↓, ..., be[0]↓
+        let bottom_wire_edges: Vec<OrientedEdge> = (0..n)
+            .rev()
+            .map(|i| OrientedEdge::new(bottom_edges[i], false))
+            .collect();
+        let bottom_wire = create_closed_wire(store, bottom_wire_edges);
+        let bottom_face = MakeFace::new(bottom_wire, vec![]).execute(store)?;
+        all_faces.push(bottom_face);
+
+        // Top face: same winding → normal ≈ +direction
+        // Wire: te[0]↑, te[1]↑, ..., te[n-1]↑
+        let top_wire_edges: Vec<OrientedEdge> = (0..n)
+            .map(|i| OrientedEdge::new(top_edges[i], true))
+            .collect();
+        let top_wire = create_closed_wire(store, top_wire_edges);
+        let top_face = MakeFace::new(top_wire, vec![]).execute(store)?;
+        all_faces.push(top_face);
+
+        // Side faces: be[i]↑, ve[j]↑, te[i]↓, ve[i]↓  where j = (i+1)%n
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let side_wire_edges = vec![
+                OrientedEdge::new(bottom_edges[i], true),
+                OrientedEdge::new(vert_edges[j], true),
+                OrientedEdge::new(top_edges[i], false),
+                OrientedEdge::new(vert_edges[i], false),
             ];
-            let side_face = make_planar_face(store, &quad)?;
+            let side_wire = create_closed_wire(store, side_wire_edges);
+            let side_face = MakeFace::new(side_wire, vec![]).execute(store)?;
             all_faces.push(side_face);
         }
 
-        // Create shell (closed)
+        // Create shell (closed) and solid
         let shell_id = store.add_shell(ShellData {
             faces: all_faces,
             is_closed: true,
         });
-
-        // Create solid
         MakeSolid::new(shell_id, vec![]).execute(store)
     }
 }
@@ -132,16 +197,41 @@ fn newell_normal(points: &[Point3]) -> Result<Vector3> {
     Ok(normal / len)
 }
 
-/// Creates a planar face from a closed loop of points using `MakeWire` + `MakeFace`.
-fn make_planar_face(store: &mut TopologyStore, points: &[Point3]) -> Result<FaceId> {
-    let wire = MakeWire::new(points.to_vec(), true).execute(store)?;
-    MakeFace::new(wire, vec![]).execute(store)
+/// Creates a line edge between two existing vertices.
+fn create_line_edge(
+    store: &mut TopologyStore,
+    start: VertexId,
+    end: VertexId,
+    start_point: Point3,
+    end_point: Point3,
+) -> Result<EdgeId> {
+    let direction = end_point - start_point;
+    let t_end = direction.norm();
+    let line = Line::new(start_point, direction)?;
+    Ok(store.add_edge(EdgeData {
+        start,
+        end,
+        curve: EdgeCurve::Line(line),
+        t_start: 0.0,
+        t_end,
+    }))
+}
+
+/// Creates a closed wire from a sequence of oriented edges.
+fn create_closed_wire(store: &mut TopologyStore, edges: Vec<OrientedEdge>) -> WireId {
+    store.add_wire(WireData {
+        edges,
+        is_closed: true,
+    })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
     use super::*;
+    use crate::operations::creation::MakeWire;
     use crate::tessellation::{TessellateFace, TessellateSolid, TessellationParams};
     use crate::topology::FaceSurface;
 
@@ -349,6 +439,128 @@ mod tests {
                 .unwrap();
             assert!(!mesh.indices.is_empty());
             assert!(!mesh.vertices.is_empty());
+        }
+    }
+
+    // ── BRep shared topology helpers ─────────────────────────────
+
+    /// Collects unique vertex and edge IDs from all faces in a shell.
+    fn collect_shell_topology(
+        store: &TopologyStore,
+        shell: &crate::topology::ShellData,
+    ) -> (HashSet<VertexId>, HashSet<EdgeId>) {
+        let mut vertices = HashSet::new();
+        let mut edges = HashSet::new();
+        for &face_id in &shell.faces {
+            let face = store.face(face_id).unwrap();
+            let wire = store.wire(face.outer_wire).unwrap();
+            for oe in &wire.edges {
+                let edge = store.edge(oe.edge).unwrap();
+                vertices.insert(edge.start);
+                vertices.insert(edge.end);
+                edges.insert(oe.edge);
+            }
+        }
+        (vertices, edges)
+    }
+
+    /// Counts how many times each edge appears across all face wires.
+    fn count_edge_usage(
+        store: &TopologyStore,
+        shell: &crate::topology::ShellData,
+    ) -> HashMap<EdgeId, usize> {
+        let mut counts = HashMap::new();
+        for &face_id in &shell.faces {
+            let face = store.face(face_id).unwrap();
+            let wire = store.wire(face.outer_wire).unwrap();
+            for oe in &wire.edges {
+                *counts.entry(oe.edge).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    // ── BRep shared topology verification ────────────────────────
+
+    #[test]
+    fn cube_shared_vertices() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+        );
+        let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        let (vertices, _) = collect_shell_topology(&store, shell);
+        assert_eq!(vertices.len(), 8, "cube should have 8 unique vertices");
+    }
+
+    #[test]
+    fn cube_shared_edges() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+        );
+        let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        let (_, edges) = collect_shell_topology(&store, shell);
+        assert_eq!(edges.len(), 12, "cube should have 12 unique edges");
+    }
+
+    #[test]
+    fn cube_each_edge_used_twice() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+        );
+        let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        let counts = count_edge_usage(&store, shell);
+        for (edge_id, count) in &counts {
+            assert_eq!(
+                *count, 2,
+                "edge {edge_id:?} should be used exactly 2 times, got {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn prism_shared_topology() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![p(0.0, 0.0, 0.0), p(3.0, 0.0, 0.0), p(1.5, 2.0, 0.0)],
+        );
+        let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 3.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        let (vertices, edges) = collect_shell_topology(&store, shell);
+        assert_eq!(vertices.len(), 6, "prism should have 6 unique vertices");
+        assert_eq!(edges.len(), 9, "prism should have 9 unique edges");
+
+        let counts = count_edge_usage(&store, shell);
+        for (edge_id, count) in &counts {
+            assert_eq!(
+                *count, 2,
+                "edge {edge_id:?} should be used exactly 2 times, got {count}"
+            );
         }
     }
 }

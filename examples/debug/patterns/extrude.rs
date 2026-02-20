@@ -6,7 +6,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_face, register_label, register_stroke};
+use super::{register_edges, register_face, register_label, register_stroke};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -40,6 +40,11 @@ fn render_extrude(
     };
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(&topo) {
         register_face(storage, mesh, mesh_color);
+    }
+
+    // BRep edges as GPU lines (3D viewport only)
+    if let Ok(solid_data) = topo.solid(solid) {
+        register_edges(storage, &topo, solid_data.outer_shell, outline_color);
     }
 }
 

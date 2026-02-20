@@ -3,11 +3,16 @@ pub mod face_creation;
 pub mod stroke_joins;
 pub mod wall_offset;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use geolis::math::Point3;
 use geolis::tessellation::{StrokeStyle, TessellateStroke, TriangleMesh};
-use revion_core::{RawMesh2D, RawMesh2DId, RawMesh3D, RawMesh3DId, RawVertex2D, RawVertex3D};
+use geolis::topology::{ShellId, TopologyStore};
+use revion_core::{
+    Line3D, Line3DId, LineTopology, LineVertex3D, RawMesh2D, RawMesh2DId, RawMesh3D, RawMesh3DId,
+    RawVertex2D, RawVertex3D,
+};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
@@ -110,6 +115,62 @@ pub fn register_face(storage: &MeshStorage, mesh: TriangleMesh, color: Color) {
         RawMesh3DId::new(),
         Arc::new(into_raw_mesh_3d(mesh, color)),
     );
+}
+
+/// Collect unique edges from a shell and register them as a single GPU `Line3D`.
+///
+/// Walks shell → faces → wires → edges, deduplicates by `EdgeId`, and emits
+/// each edge's start/end vertex positions as a `LineList`. Only renders in the
+/// 3D viewport (Revion has no `Line2D`).
+#[allow(clippy::cast_possible_truncation)]
+pub fn register_edges(
+    storage: &MeshStorage,
+    topo: &TopologyStore,
+    shell_id: ShellId,
+    color: Color,
+) {
+    let Ok(shell) = topo.shell(shell_id) else {
+        return;
+    };
+
+    let mut seen = HashSet::new();
+    let mut vertices: Vec<LineVertex3D> = Vec::new();
+
+    for &face_id in &shell.faces {
+        let Ok(face) = topo.face(face_id) else {
+            continue;
+        };
+
+        // Collect edges from outer wire and all inner wires
+        let wire_ids = std::iter::once(face.outer_wire).chain(face.inner_wires.iter().copied());
+        for wire_id in wire_ids {
+            let Ok(wire) = topo.wire(wire_id) else {
+                continue;
+            };
+            for oe in &wire.edges {
+                if !seen.insert(oe.edge) {
+                    continue;
+                }
+                let Ok(edge) = topo.edge(oe.edge) else {
+                    continue;
+                };
+                let (Ok(sv), Ok(ev)) = (topo.vertex(edge.start), topo.vertex(edge.end)) else {
+                    continue;
+                };
+                vertices.push(LineVertex3D {
+                    position: [sv.point.x as f32, sv.point.y as f32, sv.point.z as f32],
+                });
+                vertices.push(LineVertex3D {
+                    position: [ev.point.x as f32, ev.point.y as f32, ev.point.z as f32],
+                });
+            }
+        }
+    }
+
+    if !vertices.is_empty() {
+        let line = Line3D::new(vertices, LineTopology::LineList, color);
+        storage.upsert_line(Line3DId::new(), Arc::new(line));
+    }
 }
 
 /// Register a numeric label as a 7-segment display mesh at `(x, y)`.
