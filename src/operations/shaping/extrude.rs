@@ -23,13 +23,12 @@ impl Extrude {
     /// Executes the extrusion, creating the solid in the topology store.
     ///
     /// Builds a proper `BRep` solid where adjacent faces share edges via
-    /// `OrientedEdge`. For an n-sided polygon this produces 2n vertices,
-    /// 3n edges, and n+2 faces.
+    /// `OrientedEdge`. Supports faces with inner wires (holes): for each hole,
+    /// additional side faces are created to form the hole walls.
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError::InvalidInput`] if the direction is zero-length
-    /// or the face has inner wires (holes are not yet supported).
+    /// Returns [`OperationError::InvalidInput`] if the direction is zero-length.
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
         // Validate direction is non-zero
         if self.direction.norm() < TOLERANCE {
@@ -38,15 +37,9 @@ impl Extrude {
             );
         }
 
-        // Validate no inner wires (Phase 1 limitation)
         let face = store.face(self.face)?;
-        if !face.inner_wires.is_empty() {
-            return Err(OperationError::InvalidInput(
-                "extrusion of faces with holes is not yet supported".into(),
-            )
-            .into());
-        }
         let outer_wire = face.outer_wire;
+        let inner_wire_ids = face.inner_wires.clone();
 
         // Collect base points from the outer wire
         let base_points = collect_wire_points(store, outer_wire)?;
@@ -59,15 +52,16 @@ impl Extrude {
         //   - bottom face = reversed winding → normal ≈ -direction (outward below)
         //   - top face = same winding translated → normal ≈ +direction (outward above)
         //   - side quads naturally face outward
-        let base_points = if normal.dot(&self.direction) > 0.0 {
-            base_points
-        } else {
+        let should_reverse = normal.dot(&self.direction) < 0.0;
+        let base_points = if should_reverse {
             base_points.into_iter().rev().collect()
+        } else {
+            base_points
         };
 
         let n = base_points.len();
 
-        // --- Create 2n vertices ---
+        // --- Create outer wire vertices and edges ---
         let bottom_verts: Vec<VertexId> = base_points
             .iter()
             .map(|p| store.add_vertex(VertexData::new(*p)))
@@ -78,68 +72,35 @@ impl Extrude {
             .map(|p| store.add_vertex(VertexData::new(*p)))
             .collect();
 
-        // --- Create 3n edges ---
-        // be[i]: bottom[i] → bottom[(i+1)%n]
-        let mut bottom_edges = Vec::with_capacity(n);
-        for i in 0..n {
-            let j = (i + 1) % n;
-            bottom_edges.push(create_line_edge(
-                store,
-                bottom_verts[i],
-                bottom_verts[j],
-                base_points[i],
-                base_points[j],
-            )?);
-        }
+        let bottom_edges = create_loop_edges(store, &bottom_verts, &base_points)?;
+        let top_edges = create_loop_edges(store, &top_verts, &top_points)?;
+        let vert_edges = create_vertical_edges(store, &bottom_verts, &top_verts, &base_points, &top_points)?;
 
-        // te[i]: top[i] → top[(i+1)%n]
-        let mut top_edges = Vec::with_capacity(n);
-        for i in 0..n {
-            let j = (i + 1) % n;
-            top_edges.push(create_line_edge(
-                store,
-                top_verts[i],
-                top_verts[j],
-                top_points[i],
-                top_points[j],
-            )?);
-        }
+        let mut all_faces = Vec::with_capacity(n + 2 + inner_wire_ids.len() * 4);
 
-        // ve[i]: bottom[i] → top[i]
-        let mut vert_edges = Vec::with_capacity(n);
-        for i in 0..n {
-            vert_edges.push(create_line_edge(
-                store,
-                bottom_verts[i],
-                top_verts[i],
-                base_points[i],
-                top_points[i],
-            )?);
-        }
+        // --- Process inner wires (holes) ---
+        let (bottom_inner_wires, top_inner_wires, hole_faces) =
+            extrude_inner_wires(store, &inner_wire_ids, should_reverse, &self.direction)?;
+        all_faces.extend(hole_faces);
 
-        // --- Build wires and faces ---
-        let mut all_faces = Vec::with_capacity(n + 2);
-
-        // Bottom face: reversed winding → normal ≈ -direction
-        // Wire: be[n-1]↓, be[n-2]↓, ..., be[0]↓
+        // Bottom face: reversed winding with inner wires as holes
         let bottom_wire_edges: Vec<OrientedEdge> = (0..n)
             .rev()
             .map(|i| OrientedEdge::new(bottom_edges[i], false))
             .collect();
         let bottom_wire = create_closed_wire(store, bottom_wire_edges);
-        let bottom_face = MakeFace::new(bottom_wire, vec![]).execute(store)?;
+        let bottom_face = MakeFace::new(bottom_wire, bottom_inner_wires).execute(store)?;
         all_faces.push(bottom_face);
 
-        // Top face: same winding → normal ≈ +direction
-        // Wire: te[0]↑, te[1]↑, ..., te[n-1]↑
+        // Top face: same winding with inner wires as holes
         let top_wire_edges: Vec<OrientedEdge> = (0..n)
             .map(|i| OrientedEdge::new(top_edges[i], true))
             .collect();
         let top_wire = create_closed_wire(store, top_wire_edges);
-        let top_face = MakeFace::new(top_wire, vec![]).execute(store)?;
+        let top_face = MakeFace::new(top_wire, top_inner_wires).execute(store)?;
         all_faces.push(top_face);
 
-        // Side faces: be[i]↑, ve[j]↑, te[i]↓, ve[i]↓  where j = (i+1)%n
+        // Outer side faces
         for i in 0..n {
             let j = (i + 1) % n;
             let side_wire_edges = vec![
@@ -160,6 +121,73 @@ impl Extrude {
         });
         MakeSolid::new(shell_id, vec![]).execute(store)
     }
+}
+
+/// Processes inner wires (holes) for extrusion, creating hole side faces
+/// and inner wires for the cap faces.
+#[allow(clippy::similar_names)]
+fn extrude_inner_wires(
+    store: &mut TopologyStore,
+    inner_wire_ids: &[WireId],
+    should_reverse: bool,
+    direction: &Vector3,
+) -> Result<(Vec<WireId>, Vec<WireId>, Vec<FaceId>)> {
+    let mut bottom_inner_wires = Vec::with_capacity(inner_wire_ids.len());
+    let mut top_inner_wires = Vec::with_capacity(inner_wire_ids.len());
+    let mut hole_faces = Vec::new();
+
+    for &inner_wire_id in inner_wire_ids {
+        let inner_points_raw = collect_wire_points(store, inner_wire_id)?;
+        let inner_points = if should_reverse {
+            inner_points_raw.into_iter().rev().collect::<Vec<_>>()
+        } else {
+            inner_points_raw
+        };
+
+        let m = inner_points.len();
+
+        let ib_verts: Vec<VertexId> = inner_points
+            .iter()
+            .map(|p| store.add_vertex(VertexData::new(*p)))
+            .collect();
+        let it_points: Vec<Point3> = inner_points.iter().map(|p| p + direction).collect();
+        let it_verts: Vec<VertexId> = it_points
+            .iter()
+            .map(|p| store.add_vertex(VertexData::new(*p)))
+            .collect();
+
+        let ib_edges = create_loop_edges(store, &ib_verts, &inner_points)?;
+        let it_edges = create_loop_edges(store, &it_verts, &it_points)?;
+        let iv_edges = create_vertical_edges(store, &ib_verts, &it_verts, &inner_points, &it_points)?;
+
+        let bottom_inner_wire_edges: Vec<OrientedEdge> = (0..m)
+            .map(|i| OrientedEdge::new(ib_edges[i], true))
+            .collect();
+        let biw = create_closed_wire(store, bottom_inner_wire_edges);
+        bottom_inner_wires.push(biw);
+
+        let top_inner_wire_edges: Vec<OrientedEdge> = (0..m)
+            .rev()
+            .map(|i| OrientedEdge::new(it_edges[i], false))
+            .collect();
+        let tiw = create_closed_wire(store, top_inner_wire_edges);
+        top_inner_wires.push(tiw);
+
+        for i in 0..m {
+            let j = (i + 1) % m;
+            let side_wire_edges = vec![
+                OrientedEdge::new(ib_edges[i], false),
+                OrientedEdge::new(iv_edges[i], true),
+                OrientedEdge::new(it_edges[i], true),
+                OrientedEdge::new(iv_edges[j], false),
+            ];
+            let side_wire = create_closed_wire(store, side_wire_edges);
+            let side_face = MakeFace::new(side_wire, vec![]).execute(store)?;
+            hole_faces.push(side_face);
+        }
+    }
+
+    Ok((bottom_inner_wires, top_inner_wires, hole_faces))
 }
 
 /// Collects vertex positions from a wire in traversal order.
@@ -195,6 +223,43 @@ fn newell_normal(points: &[Point3]) -> Result<Vector3> {
         );
     }
     Ok(normal / len)
+}
+
+/// Creates edges forming a closed loop from vertex/point arrays.
+fn create_loop_edges(
+    store: &mut TopologyStore,
+    verts: &[VertexId],
+    points: &[Point3],
+) -> Result<Vec<EdgeId>> {
+    let n = verts.len();
+    let mut edges = Vec::with_capacity(n);
+    for i in 0..n {
+        let j = (i + 1) % n;
+        edges.push(create_line_edge(store, verts[i], verts[j], points[i], points[j])?);
+    }
+    Ok(edges)
+}
+
+/// Creates vertical edges connecting bottom and top vertex arrays.
+fn create_vertical_edges(
+    store: &mut TopologyStore,
+    bottom_verts: &[VertexId],
+    top_verts: &[VertexId],
+    bottom_points: &[Point3],
+    top_points: &[Point3],
+) -> Result<Vec<EdgeId>> {
+    let n = bottom_verts.len();
+    let mut edges = Vec::with_capacity(n);
+    for i in 0..n {
+        edges.push(create_line_edge(
+            store,
+            bottom_verts[i],
+            top_verts[i],
+            bottom_points[i],
+            top_points[i],
+        )?);
+    }
+    Ok(edges)
 }
 
 /// Creates a line edge between two existing vertices.
@@ -351,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn face_with_holes_returns_error() {
+    fn face_with_hole_creates_solid() {
         let mut store = TopologyStore::new();
         let outer = vec![
             p(0.0, 0.0, 0.0), p(10.0, 0.0, 0.0),
@@ -367,8 +432,47 @@ mod tests {
             .execute(&mut store)
             .unwrap();
 
-        let result = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0)).execute(&mut store);
-        assert!(result.is_err());
+        let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 5.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        // 2 cap faces (with holes) + 4 outer sides + 4 inner sides = 10
+        assert_eq!(shell.faces.len(), 10);
+        assert!(shell.is_closed);
+    }
+
+    #[test]
+    fn face_with_hole_all_edges_shared() {
+        let mut store = TopologyStore::new();
+        let outer = vec![
+            p(0.0, 0.0, 0.0), p(10.0, 0.0, 0.0),
+            p(10.0, 10.0, 0.0), p(0.0, 10.0, 0.0),
+        ];
+        let inner = vec![
+            p(3.0, 3.0, 0.0), p(7.0, 3.0, 0.0),
+            p(7.0, 7.0, 0.0), p(3.0, 7.0, 0.0),
+        ];
+        let outer_wire = MakeWire::new(outer, true).execute(&mut store).unwrap();
+        let inner_wire = MakeWire::new(inner, true).execute(&mut store).unwrap();
+        let face = MakeFace::new(outer_wire, vec![inner_wire])
+            .execute(&mut store)
+            .unwrap();
+
+        let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 3.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        let counts = count_edge_usage(&store, shell);
+        for (edge_id, count) in &counts {
+            assert_eq!(
+                *count, 2,
+                "edge {edge_id:?} should be used exactly 2 times, got {count}"
+            );
+        }
     }
 
     // ── TessellateSolid ────────────────────────────────────────
@@ -475,6 +579,12 @@ mod tests {
             let wire = store.wire(face.outer_wire).unwrap();
             for oe in &wire.edges {
                 *counts.entry(oe.edge).or_insert(0) += 1;
+            }
+            for &inner_wire_id in &face.inner_wires {
+                let inner_wire = store.wire(inner_wire_id).unwrap();
+                for oe in &inner_wire.edges {
+                    *counts.entry(oe.edge).or_insert(0) += 1;
+                }
             }
         }
         counts
