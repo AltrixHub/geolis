@@ -14,6 +14,17 @@ pub use tessellate_with_holes::TessellateWithHoles;
 
 use crate::math::{Point2, Point3, Vector3};
 
+/// Tessellation mode controlling how curved surfaces are meshed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TessellationMode {
+    /// Uniform UV grid based on chord-error segment counts.
+    #[default]
+    Default,
+    /// Adaptive subdivision: starts with a coarse grid and recursively
+    /// subdivides cells whose midpoint deviation exceeds the tolerance.
+    Adaptive,
+}
+
 /// Parameters controlling tessellation quality.
 #[derive(Debug, Clone, Copy)]
 pub struct TessellationParams {
@@ -23,6 +34,8 @@ pub struct TessellationParams {
     pub min_segments: usize,
     /// Maximum number of segments for curves.
     pub max_segments: usize,
+    /// Tessellation mode for curved surfaces.
+    pub mode: TessellationMode,
 }
 
 impl Default for TessellationParams {
@@ -31,6 +44,7 @@ impl Default for TessellationParams {
             tolerance: 0.01,
             min_segments: 4,
             max_segments: 256,
+            mode: TessellationMode::Default,
         }
     }
 }

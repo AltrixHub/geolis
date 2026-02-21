@@ -11,7 +11,7 @@ use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
 use crate::topology::{EdgeCurve, FaceId, FaceSurface, TopologyStore, WireId};
 
-use super::{TessellationParams, TriangleMesh};
+use super::{TessellationMode, TessellationParams, TriangleMesh};
 
 /// Tessellates a face into a triangle mesh.
 pub struct TessellateFace {
@@ -55,48 +55,58 @@ impl TessellateFace {
                 let cyl = cyl.clone();
                 let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| cyl.inverse(p));
-                let (u_min, u_max) = if full_rev { (0.0, TAU) } else {
-                    let (u_min, u_max, _, _) = compute_uv_bounds(&outer_3d, |p| cyl.inverse(p));
-                    (u_min, u_max)
+                let (u_min, u_max) = if full_rev {
+                    (0.0, TAU)
+                } else {
+                    compute_unwrapped_u_bounds(&outer_3d, |p| cyl.inverse(p))
                 };
                 let n_u = adaptive_angular_segments(cyl.radius(), u_max - u_min, &self.params);
                 let n_v = adaptive_linear_segments(v_max - v_min, &self.params);
-                tessellate_uv_grid(&cyl, u_min, u_max, v_min, v_max, n_u, n_v, same_sense)
+                tessellate_surface(&cyl, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
             }
             FaceSurface::Sphere(sph) => {
                 let sph = sph.clone();
                 let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
-                let (u_min, u_max, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| sph.inverse(p));
-                let (u_min, u_max) = if full_rev { (0.0, TAU) } else { (u_min, u_max) };
+                let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| sph.inverse(p));
+                let (u_min, u_max) = if full_rev {
+                    (0.0, TAU)
+                } else {
+                    compute_unwrapped_u_bounds(&outer_3d, |p| sph.inverse(p))
+                };
                 let n_u = adaptive_angular_segments(sph.radius(), u_max - u_min, &self.params);
                 let n_v = adaptive_angular_segments(sph.radius(), v_max - v_min, &self.params);
-                tessellate_uv_grid(&sph, u_min, u_max, v_min, v_max, n_u, n_v, same_sense)
+                tessellate_surface(&sph, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
             }
             FaceSurface::Cone(cone) => {
                 let cone = cone.clone();
                 let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| cone.inverse(p));
-                let (u_min, u_max) = if full_rev { (0.0, TAU) } else {
-                    let (u_min, u_max, _, _) = compute_uv_bounds(&outer_3d, |p| cone.inverse(p));
-                    (u_min, u_max)
+                let (u_min, u_max) = if full_rev {
+                    (0.0, TAU)
+                } else {
+                    compute_unwrapped_u_bounds(&outer_3d, |p| cone.inverse(p))
                 };
                 let max_radius = v_max * cone.half_angle().sin();
                 let n_u = adaptive_angular_segments(max_radius, u_max - u_min, &self.params);
                 let n_v = adaptive_linear_segments(v_max - v_min, &self.params);
-                tessellate_uv_grid(&cone, u_min, u_max, v_min, v_max, n_u, n_v, same_sense)
+                tessellate_surface(&cone, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
             }
             FaceSurface::Torus(torus) => {
                 let torus = torus.clone();
                 let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
-                let (u_min, u_max, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| torus.inverse(p));
-                let (u_min, u_max) = if full_rev { (0.0, TAU) } else { (u_min, u_max) };
+                let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| torus.inverse(p));
+                let (u_min, u_max) = if full_rev {
+                    (0.0, TAU)
+                } else {
+                    compute_unwrapped_u_bounds(&outer_3d, |p| torus.inverse(p))
+                };
                 let n_u = adaptive_angular_segments(
                     torus.major_radius() + torus.minor_radius(),
                     u_max - u_min,
                     &self.params,
                 );
                 let n_v = adaptive_angular_segments(torus.minor_radius(), v_max - v_min, &self.params);
-                tessellate_uv_grid(&torus, u_min, u_max, v_min, v_max, n_u, n_v, same_sense)
+                tessellate_surface(&torus, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
             }
         }
     }
@@ -200,6 +210,46 @@ fn wire_has_full_circle(store: &TopologyStore, wire_id: WireId) -> bool {
         }
     }
     false
+}
+
+/// Computes u-bounds by unwrapping `atan2` values along the wire boundary.
+///
+/// The surface's `inverse()` returns `u` via `atan2`, which has a discontinuity
+/// at ±π. This function tracks cumulative angular deltas to produce a continuous
+/// `(u_min, u_max)` range that correctly handles sweeps beyond π (e.g., 270°).
+///
+/// This works regardless of whether the surface's angular direction matches the
+/// Arc edge's direction (e.g., Cone with reversed axis vs Cylinder with aligned axis).
+fn compute_unwrapped_u_bounds(
+    points: &[crate::math::Point3],
+    inverse: impl Fn(&crate::math::Point3) -> (f64, f64),
+) -> (f64, f64) {
+    if points.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    let (first_u, _) = inverse(&points[0]);
+    let mut u_min = first_u;
+    let mut u_max = first_u;
+    let mut prev_raw = first_u;
+    let mut running = first_u;
+
+    for p in &points[1..] {
+        let (raw_u, _) = inverse(p);
+        let mut delta = raw_u - prev_raw;
+        // Unwrap: keep delta in (-π, π]
+        if delta > std::f64::consts::PI {
+            delta -= TAU;
+        } else if delta < -std::f64::consts::PI {
+            delta += TAU;
+        }
+        running += delta;
+        u_min = u_min.min(running);
+        u_max = u_max.max(running);
+        prev_raw = raw_u;
+    }
+
+    (u_min, u_max)
 }
 
 /// Extracts the min/max radii and center from circle edges in a wire.
@@ -363,6 +413,170 @@ fn tessellate_uv_grid(
     }
 
     Ok(mesh)
+}
+
+/// Dispatches to either `tessellate_uv_grid` or `tessellate_uv_adaptive` based on mode.
+///
+/// In adaptive mode, the curvature-computed `n_u`/`n_v` are ignored; instead a
+/// coarse base grid (`min_segments × min_segments`) is used, and cells are
+/// recursively subdivided where the midpoint deviation exceeds the tolerance.
+#[allow(clippy::too_many_arguments)]
+fn tessellate_surface(
+    surface: &dyn Surface,
+    u_min: f64,
+    u_max: f64,
+    v_min: f64,
+    v_max: f64,
+    n_u: usize,
+    n_v: usize,
+    same_sense: bool,
+    params: &TessellationParams,
+) -> Result<TriangleMesh> {
+    match params.mode {
+        TessellationMode::Default => {
+            tessellate_uv_grid(surface, u_min, u_max, v_min, v_max, n_u, n_v, same_sense)
+        }
+        TessellationMode::Adaptive => {
+            let base = params.min_segments;
+            tessellate_uv_adaptive(surface, u_min, u_max, v_min, v_max, base, base, same_sense, params.tolerance)
+        }
+    }
+}
+
+/// Maximum recursion depth for adaptive subdivision.
+///
+/// Each level doubles the effective resolution per base cell, so depth 6
+/// yields up to 64× the base resolution in each direction.
+const MAX_ADAPTIVE_DEPTH: usize = 6;
+
+/// Tessellates a parametric surface using adaptive midpoint subdivision.
+///
+/// Starts with a `base_n_u × base_n_v` grid and recursively subdivides cells
+/// whose midpoint deviation from bilinear interpolation exceeds `tolerance`.
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
+fn tessellate_uv_adaptive(
+    surface: &dyn Surface,
+    u_min: f64,
+    u_max: f64,
+    v_min: f64,
+    v_max: f64,
+    base_n_u: usize,
+    base_n_v: usize,
+    same_sense: bool,
+    tolerance: f64,
+) -> Result<TriangleMesh> {
+    let mut mesh = TriangleMesh::default();
+    let mut vertex_cache: HashMap<(u64, u64), u32> = HashMap::new();
+
+    #[allow(clippy::cast_precision_loss)]
+    let du = (u_max - u_min) / base_n_u as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let dv = (v_max - v_min) / base_n_v as f64;
+
+    for iv in 0..base_n_v {
+        #[allow(clippy::cast_precision_loss)]
+        let cv0 = v_min + dv * iv as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let cv1 = v_min + dv * (iv + 1) as f64;
+        for iu in 0..base_n_u {
+            #[allow(clippy::cast_precision_loss)]
+            let cu0 = u_min + du * iu as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let cu1 = u_min + du * (iu + 1) as f64;
+            subdivide_cell(
+                surface, cu0, cu1, cv0, cv1, same_sense, tolerance, 0,
+                &mut mesh, &mut vertex_cache,
+            )?;
+        }
+    }
+
+    Ok(mesh)
+}
+
+/// Recursively subdivides a UV cell if its midpoint deviation exceeds the tolerance.
+///
+/// If the surface midpoint deviates from the bilinear interpolation of the 4 corners
+/// by more than `tolerance`, the cell is split into 4 sub-cells. Otherwise, 2 triangles
+/// are emitted for the cell.
+#[allow(clippy::too_many_arguments)]
+fn subdivide_cell(
+    surface: &dyn Surface,
+    u0: f64,
+    u1: f64,
+    v0: f64,
+    v1: f64,
+    same_sense: bool,
+    tolerance: f64,
+    depth: usize,
+    mesh: &mut TriangleMesh,
+    cache: &mut HashMap<(u64, u64), u32>,
+) -> Result<()> {
+    let mid_u = f64::midpoint(u0, u1);
+    let mid_v = f64::midpoint(v0, v1);
+
+    let p00 = surface.evaluate(u0, v0)?;
+    let p10 = surface.evaluate(u1, v0)?;
+    let p01 = surface.evaluate(u0, v1)?;
+    let p11 = surface.evaluate(u1, v1)?;
+    let actual_mid = surface.evaluate(mid_u, mid_v)?;
+
+    let bilinear_mid = crate::math::Point3::new(
+        (p00.x + p10.x + p01.x + p11.x) / 4.0,
+        (p00.y + p10.y + p01.y + p11.y) / 4.0,
+        (p00.z + p10.z + p01.z + p11.z) / 4.0,
+    );
+
+    let deviation = (actual_mid - bilinear_mid).norm();
+
+    if deviation > tolerance && depth < MAX_ADAPTIVE_DEPTH {
+        subdivide_cell(surface, u0, mid_u, v0, mid_v, same_sense, tolerance, depth + 1, mesh, cache)?;
+        subdivide_cell(surface, mid_u, u1, v0, mid_v, same_sense, tolerance, depth + 1, mesh, cache)?;
+        subdivide_cell(surface, u0, mid_u, mid_v, v1, same_sense, tolerance, depth + 1, mesh, cache)?;
+        subdivide_cell(surface, mid_u, u1, mid_v, v1, same_sense, tolerance, depth + 1, mesh, cache)?;
+    } else {
+        let i00 = get_or_insert_vertex(mesh, cache, surface, u0, v0, same_sense)?;
+        let i10 = get_or_insert_vertex(mesh, cache, surface, u1, v0, same_sense)?;
+        let i01 = get_or_insert_vertex(mesh, cache, surface, u0, v1, same_sense)?;
+        let i11 = get_or_insert_vertex(mesh, cache, surface, u1, v1, same_sense)?;
+
+        if same_sense {
+            mesh.indices.push([i00, i10, i11]);
+            mesh.indices.push([i00, i11, i01]);
+        } else {
+            mesh.indices.push([i00, i11, i10]);
+            mesh.indices.push([i00, i01, i11]);
+        }
+    }
+
+    Ok(())
+}
+
+/// Gets an existing vertex from the cache or inserts a new one.
+///
+/// Uses `f64::to_bits()` for exact UV deduplication so adjacent cells
+/// at the same subdivision level share vertices perfectly.
+#[allow(clippy::cast_possible_truncation)]
+fn get_or_insert_vertex(
+    mesh: &mut TriangleMesh,
+    cache: &mut HashMap<(u64, u64), u32>,
+    surface: &dyn Surface,
+    u: f64,
+    v: f64,
+    same_sense: bool,
+) -> Result<u32> {
+    let key = (u.to_bits(), v.to_bits());
+    if let Some(&idx) = cache.get(&key) {
+        return Ok(idx);
+    }
+    let pt = surface.evaluate(u, v)?;
+    let n = surface.normal(u, v).unwrap_or(Vector3::z());
+    let n = if same_sense { n } else { -n };
+    let idx = mesh.vertices.len() as u32;
+    mesh.vertices.push(pt);
+    mesh.normals.push(n);
+    mesh.uvs.push(Point2::new(u, v));
+    cache.insert(key, idx);
+    Ok(idx)
 }
 
 /// Computes UV bounds from wire vertex positions using an inverse parametrization function.
@@ -914,5 +1128,137 @@ mod tests {
         assert!(!mesh.indices.is_empty());
         assert_eq!(mesh.vertices.len(), mesh.normals.len());
         assert_eq!(mesh.vertices.len(), mesh.uvs.len());
+    }
+
+    // ── Adaptive tessellation tests ──────────────────────────────
+
+    use super::TessellationMode;
+
+    #[test]
+    fn adaptive_sphere_tessellates() {
+        let mut store = crate::topology::TopologyStore::new();
+        let face = make_sphere_face(&mut store, 3.0);
+        let params = TessellationParams {
+            mode: TessellationMode::Adaptive,
+            ..TessellationParams::default()
+        };
+        let mesh = TessellateFace::new(face, params)
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty());
+        assert_eq!(mesh.vertices.len(), mesh.normals.len());
+        assert_eq!(mesh.vertices.len(), mesh.uvs.len());
+    }
+
+    #[test]
+    fn adaptive_cylinder_tessellates() {
+        let mut store = crate::topology::TopologyStore::new();
+        let face = make_cylinder_face(&mut store, 2.0, 5.0);
+        let params = TessellationParams {
+            mode: TessellationMode::Adaptive,
+            ..TessellationParams::default()
+        };
+        let mesh = TessellateFace::new(face, params)
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty());
+        assert_eq!(mesh.vertices.len(), mesh.normals.len());
+    }
+
+    #[test]
+    fn adaptive_torus_tessellates() {
+        let mut store = crate::topology::TopologyStore::new();
+        let face = make_torus_face(&mut store, 3.0, 1.0);
+        let params = TessellationParams {
+            mode: TessellationMode::Adaptive,
+            ..TessellationParams::default()
+        };
+        let mesh = TessellateFace::new(face, params)
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty());
+        assert_eq!(mesh.vertices.len(), mesh.normals.len());
+    }
+
+    #[test]
+    fn adaptive_cylinder_subdivides_coarse_cells() {
+        // With a coarse tolerance, the default grid has large cells.
+        // Adaptive should subdivide cells whose midpoint deviation exceeds
+        // tolerance, producing more triangles than the base grid.
+        let mut store = crate::topology::TopologyStore::new();
+        let face = make_cylinder_face(&mut store, 2.0, 5.0);
+
+        let coarse = TessellationParams {
+            tolerance: 0.5,
+            min_segments: 4,
+            max_segments: 256,
+            mode: TessellationMode::Default,
+        };
+        let default_mesh = TessellateFace::new(face, coarse)
+            .execute(&store)
+            .unwrap();
+
+        let adaptive = TessellationParams {
+            tolerance: 0.5,
+            min_segments: 4,
+            max_segments: 256,
+            mode: TessellationMode::Adaptive,
+        };
+        let adaptive_mesh = TessellateFace::new(face, adaptive)
+            .execute(&store)
+            .unwrap();
+
+        // With coarse tolerance on a cylinder, the initial 4-segment grid
+        // has cells with significant midpoint deviation, so adaptive should
+        // subdivide and produce more triangles.
+        assert!(
+            adaptive_mesh.indices.len() > default_mesh.indices.len(),
+            "adaptive ({}) should produce more triangles than default ({}) at coarse tolerance",
+            adaptive_mesh.indices.len(),
+            default_mesh.indices.len(),
+        );
+    }
+
+    #[test]
+    fn adaptive_sphere_normals_outward() {
+        let mut store = crate::topology::TopologyStore::new();
+        let face = make_sphere_face(&mut store, 3.0);
+        let params = TessellationParams {
+            mode: TessellationMode::Adaptive,
+            ..TessellationParams::default()
+        };
+        let mesh = TessellateFace::new(face, params)
+            .execute(&store)
+            .unwrap();
+        for (i, n) in mesh.normals.iter().enumerate() {
+            let v = &mesh.vertices[i];
+            let len = Vector3::new(v.x, v.y, v.z).norm();
+            if len > 1e-6 {
+                let expected = Vector3::new(v.x, v.y, v.z) / len;
+                let dot = n.dot(&expected);
+                assert!(dot > 0.9, "normal at {v:?} not outward: dot={dot}");
+            }
+        }
+    }
+
+    #[test]
+    fn default_mode_unchanged() {
+        // Verify that TessellationMode::Default produces same result as before
+        let mut store = crate::topology::TopologyStore::new();
+        let face = make_cylinder_face(&mut store, 2.0, 5.0);
+        let params_default = TessellationParams {
+            mode: TessellationMode::Default,
+            ..TessellationParams::default()
+        };
+        let mesh = TessellateFace::new(face, params_default)
+            .execute(&store)
+            .unwrap();
+
+        // Should produce the same mesh as with no mode specified (same Default)
+        let mesh2 = TessellateFace::new(face, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert_eq!(mesh.indices.len(), mesh2.indices.len());
+        assert_eq!(mesh.vertices.len(), mesh2.vertices.len());
     }
 }

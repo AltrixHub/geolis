@@ -1,15 +1,23 @@
+mod area;
 mod bounding_box;
 mod closest_point;
+mod closest_point_surface;
+mod curve_surface_intersect;
 mod intersect;
 mod is_valid;
 mod length;
 mod point_on_curve;
 mod point_on_surface;
+mod volume;
 
+pub use area::Area;
 pub use bounding_box::BoundingBox;
 pub use closest_point::ClosestPointOnCurve;
+pub use closest_point_surface::{ClosestPointOnSurface, SurfacePoint};
+pub use curve_surface_intersect::{CurveSurfaceHit, LineSurfaceIntersect};
 pub use intersect::CurveCurveIntersect;
 pub use is_valid::IsValid;
 pub use length::Length;
 pub use point_on_curve::PointOnCurve;
 pub use point_on_surface::PointOnSurface;
+pub use volume::Volume;

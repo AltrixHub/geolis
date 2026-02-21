@@ -1,34 +1,43 @@
 use std::f64::consts::TAU;
 
 use crate::error::{OperationError, Result};
-use crate::geometry::curve::{Circle, Line};
+use crate::geometry::curve::{Arc, Circle, Line};
 use crate::geometry::surface::{Cone, Cylinder, Plane};
 use crate::math::{Point3, Vector3, TOLERANCE};
-use crate::operations::creation::MakeSolid;
+use crate::operations::creation::{MakeFace, MakeSolid};
 use crate::topology::{
     EdgeCurve, EdgeData, EdgeId, FaceData, FaceId, FaceSurface, OrientedEdge, ShellData, SolidId,
     TopologyStore, VertexData, VertexId, WireData, WireId,
 };
 
-/// Revolves a planar face 360 degrees around an axis to create a solid of revolution.
+/// Revolves a planar face around an axis to create a solid of revolution.
 ///
 /// The profile face must be planar with line edges only (polygon profile).
-/// Full revolution only (no partial angles).
+/// Supports full (360°) and partial revolution angles.
 pub struct Revolve {
     face: FaceId,
     axis_origin: Point3,
     axis_dir: Vector3,
+    angle: f64,
 }
 
 impl Revolve {
-    /// Creates a new `Revolve` operation.
+    /// Creates a new `Revolve` operation with a full 360° revolution.
     #[must_use]
     pub fn new(face: FaceId, axis_origin: Point3, axis_dir: Vector3) -> Self {
         Self {
             face,
             axis_origin,
             axis_dir,
+            angle: TAU,
         }
+    }
+
+    /// Sets the revolution angle in radians. Must be in `(0, TAU]`.
+    #[must_use]
+    pub fn with_angle(mut self, angle: f64) -> Self {
+        self.angle = angle;
+        self
     }
 
     /// Executes the revolution, creating a solid in the topology store.
@@ -52,6 +61,15 @@ impl Revolve {
         }
         let axis = self.axis_dir / axis_len;
 
+        // Validate angle
+        if self.angle <= 0.0 || self.angle > TAU + TOLERANCE {
+            return Err(OperationError::InvalidInput(
+                "revolve angle must be in (0, 2π]".into(),
+            )
+            .into());
+        }
+        let is_full = (self.angle - TAU).abs() < TOLERANCE;
+
         let face = store.face(self.face)?;
         let outer_wire_id = face.outer_wire;
 
@@ -72,10 +90,26 @@ impl Revolve {
             .collect();
 
         // Compute a stable reference direction for circles/surfaces.
-        // Use the first vertex that is NOT on the axis.
         let ref_dir = compute_ref_dir(&vert_info, &axis)?;
 
-        // Create topology vertices (full revolution: start = end, so one vertex per profile point)
+        if is_full {
+            self.execute_full(store, &axis, &profile_points, &vert_info, &ref_dir, n)
+        } else {
+            self.execute_partial(store, &axis, &profile_points, &vert_info, &ref_dir, n)
+        }
+    }
+
+    /// Full 360° revolution (existing logic).
+    fn execute_full(
+        &self,
+        store: &mut TopologyStore,
+        axis: &Vector3,
+        profile_points: &[Point3],
+        vert_info: &[VertexInfo],
+        ref_dir: &Vector3,
+        n: usize,
+    ) -> Result<SolidId> {
+        // Create topology vertices (full revolution: start = end, one vertex per profile point)
         let verts: Vec<VertexId> = profile_points
             .iter()
             .map(|p| store.add_vertex(VertexData::new(*p)))
@@ -87,14 +121,13 @@ impl Revolve {
             .zip(&verts)
             .map(|(info, &vid)| {
                 if info.radius < TOLERANCE {
-                    // Vertex is on the axis: degenerate, no circle edge
                     None
                 } else {
                     let circle = make_circle_on_axis(
                         &info.axis_foot,
                         info.radius,
-                        &axis,
-                        &ref_dir,
+                        axis,
+                        ref_dir,
                     );
                     match circle {
                         Ok(c) => Some(store.add_edge(EdgeData {
@@ -110,8 +143,7 @@ impl Revolve {
             })
             .collect();
 
-        // Create seam line edges (connecting profile vertices along the axis seam).
-        // Full revolution: each seam edge is shared by two adjacent side faces.
+        // Create seam line edges (shared by two adjacent side faces)
         let seam_edges: Vec<EdgeId> = (0..n)
             .map(|i| {
                 let j = (i + 1) % n;
@@ -119,11 +151,13 @@ impl Revolve {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Create side faces
+        // Create side faces (skip degenerate edges where both vertices are on axis)
         let mut all_faces = Vec::with_capacity(n);
-
         for i in 0..n {
             let j = (i + 1) % n;
+            if vert_info[i].radius < TOLERANCE && vert_info[j].radius < TOLERANCE {
+                continue;
+            }
             let face_id = create_side_face(
                 store,
                 &vert_info[i],
@@ -134,13 +168,157 @@ impl Revolve {
                 circle_edges[j],
                 seam_edges[i],
                 &self.axis_origin,
-                &axis,
-                &ref_dir,
+                axis,
+                ref_dir,
             )?;
             all_faces.push(face_id);
         }
 
-        // Create shell and solid
+        let shell_id = store.add_shell(ShellData {
+            faces: all_faces,
+            is_closed: true,
+        });
+        MakeSolid::new(shell_id, vec![]).execute(store)
+    }
+
+    /// Partial revolution (angle < 360°).
+    #[allow(clippy::too_many_lines)]
+    fn execute_partial(
+        &self,
+        store: &mut TopologyStore,
+        axis: &Vector3,
+        profile_points: &[Point3],
+        vert_info: &[VertexInfo],
+        ref_dir: &Vector3,
+        n: usize,
+    ) -> Result<SolidId> {
+        let angle = self.angle;
+
+        // Compute end (rotated) profile points
+        let end_points: Vec<Point3> = profile_points
+            .iter()
+            .map(|p| rotate_point(p, &self.axis_origin, axis, angle))
+            .collect();
+
+        // Create start vertices
+        let start_verts: Vec<VertexId> = profile_points
+            .iter()
+            .map(|p| store.add_vertex(VertexData::new(*p)))
+            .collect();
+
+        // Create end vertices (on-axis vertices share start vertex)
+        let end_verts: Vec<VertexId> = vert_info
+            .iter()
+            .enumerate()
+            .map(|(idx, info)| {
+                if info.radius < TOLERANCE {
+                    start_verts[idx]
+                } else {
+                    store.add_vertex(VertexData::new(end_points[idx]))
+                }
+            })
+            .collect();
+
+        // Create arc edges for each off-axis vertex (start → end along revolution)
+        let arc_edges: Vec<Option<EdgeId>> = vert_info
+            .iter()
+            .enumerate()
+            .map(|(idx, info)| {
+                if info.radius < TOLERANCE {
+                    None
+                } else {
+                    let vertex_ref_dir = (profile_points[idx] - info.axis_foot) / info.radius;
+                    let arc = Arc::new(
+                        info.axis_foot,
+                        info.radius,
+                        *axis,
+                        vertex_ref_dir,
+                        0.0,
+                        angle,
+                    );
+                    match arc {
+                        Ok(a) => Some(store.add_edge(EdgeData {
+                            start: start_verts[idx],
+                            end: end_verts[idx],
+                            curve: EdgeCurve::Arc(a),
+                            t_start: 0.0,
+                            t_end: angle,
+                        })),
+                        Err(_) => None,
+                    }
+                }
+            })
+            .collect();
+
+        // Create start seam edges (connecting adjacent vertices on the start profile)
+        let start_seam_edges: Vec<EdgeId> = (0..n)
+            .map(|i| {
+                let j = (i + 1) % n;
+                create_line_edge(
+                    store,
+                    start_verts[i],
+                    start_verts[j],
+                    profile_points[i],
+                    profile_points[j],
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Create end seam edges (connecting adjacent vertices on the end profile)
+        let end_seam_edges: Vec<EdgeId> = (0..n)
+            .map(|i| {
+                let j = (i + 1) % n;
+                create_line_edge(
+                    store,
+                    end_verts[i],
+                    end_verts[j],
+                    end_points[i],
+                    end_points[j],
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Create side faces (skip degenerate edges where both vertices are on axis)
+        let mut all_faces = Vec::with_capacity(n + 2);
+        for i in 0..n {
+            let j = (i + 1) % n;
+            if vert_info[i].radius < TOLERANCE && vert_info[j].radius < TOLERANCE {
+                continue;
+            }
+            let face_id = create_partial_side_face(
+                store,
+                &vert_info[i],
+                &vert_info[j],
+                arc_edges[i],
+                arc_edges[j],
+                start_seam_edges[i],
+                end_seam_edges[i],
+                &self.axis_origin,
+                axis,
+                ref_dir,
+            )?;
+            all_faces.push(face_id);
+        }
+
+        // Start cap face: reversed winding so normal points inward (towards -sweep)
+        let start_cap_edges: Vec<OrientedEdge> = (0..n)
+            .rev()
+            .map(|i| OrientedEdge::new(start_seam_edges[i], false))
+            .collect();
+        let start_cap_wire = create_closed_wire(store, start_cap_edges);
+        let start_cap =
+            MakeFace::new(start_cap_wire, vec![]).execute(store)?;
+        all_faces.push(start_cap);
+
+        // End cap face: forward winding so normal points outward (+sweep)
+        let end_cap_edges: Vec<OrientedEdge> = (0..n)
+            .map(|i| OrientedEdge::new(end_seam_edges[i], true))
+            .collect();
+        let end_cap_wire = create_closed_wire(store, end_cap_edges);
+        let end_cap =
+            MakeFace::new(end_cap_wire, vec![]).execute(store)?;
+        all_faces.push(end_cap);
+
         let shell_id = store.add_shell(ShellData {
             faces: all_faces,
             is_closed: true,
@@ -159,6 +337,15 @@ struct VertexInfo {
     height: f64,
     /// Foot of perpendicular on the axis (center for the circle).
     axis_foot: Point3,
+}
+
+/// Rotates a point around an axis using Rodrigues' rotation formula.
+fn rotate_point(point: &Point3, axis_origin: &Point3, axis: &Vector3, angle: f64) -> Point3 {
+    let dp = point - axis_origin;
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+    let dot = dp.dot(axis);
+    axis_origin + dp * cos_a + axis.cross(&dp) * sin_a + axis * dot * (1.0 - cos_a)
 }
 
 fn compute_vertex_info(point: &Point3, axis_origin: &Point3, axis: &Vector3) -> VertexInfo {
@@ -293,6 +480,73 @@ fn create_side_face(
     // Determine same_sense: the surface normal should point outward.
     // For a CCW profile (looking from outside towards axis), the outward normal
     // of the surface should agree with the surface's natural normal.
+    let same_sense = determine_same_sense(vi, vj, axis, &surface);
+
+    Ok(store.add_face(FaceData {
+        surface,
+        outer_wire: wire,
+        inner_wires: vec![],
+        same_sense,
+    }))
+}
+
+/// Creates a side face for one profile edge revolved by a partial angle.
+///
+/// Wire construction uses arc edges (start→end) and separate start/end seam edges.
+#[allow(clippy::too_many_arguments)]
+fn create_partial_side_face(
+    store: &mut TopologyStore,
+    vi: &VertexInfo,
+    vj: &VertexInfo,
+    arc_i: Option<EdgeId>,
+    arc_j: Option<EdgeId>,
+    start_seam: EdgeId,
+    end_seam: EdgeId,
+    axis_origin: &Point3,
+    axis: &Vector3,
+    ref_dir: &Vector3,
+) -> Result<FaceId> {
+    let on_axis_i = vi.radius < TOLERANCE;
+    let on_axis_j = vj.radius < TOLERANCE;
+
+    // Build the wire for this side face
+    let wire_edges = match (on_axis_i, on_axis_j, arc_i, arc_j) {
+        // Both off-axis: 4-edge face
+        (false, false, Some(ai), Some(aj)) => {
+            vec![
+                OrientedEdge::new(ai, true),         // arc i: start_i → end_i
+                OrientedEdge::new(end_seam, true),    // end seam: end_i → end_j
+                OrientedEdge::new(aj, false),          // arc j: end_j → start_j (reverse)
+                OrientedEdge::new(start_seam, false),  // start seam: start_j → start_i (reverse)
+            ]
+        }
+        // i on axis: 3-edge face (no arc_i)
+        (true, false, None, Some(aj)) => {
+            vec![
+                OrientedEdge::new(end_seam, true),     // end seam: end_i → end_j
+                OrientedEdge::new(aj, false),           // arc j: end_j → start_j (reverse)
+                OrientedEdge::new(start_seam, false),   // start seam: start_j → start_i (reverse)
+            ]
+        }
+        // j on axis: 3-edge face (no arc_j)
+        (false, true, Some(ai), None) => {
+            vec![
+                OrientedEdge::new(ai, true),           // arc i: start_i → end_i
+                OrientedEdge::new(end_seam, true),      // end seam: end_i → end_j
+                OrientedEdge::new(start_seam, false),   // start seam: start_j → start_i (reverse)
+            ]
+        }
+        // Both on axis: degenerate
+        _ => {
+            return Err(OperationError::Failed(
+                "both vertices on axis: degenerate face".into(),
+            )
+            .into());
+        }
+    };
+
+    let wire = create_closed_wire(store, wire_edges);
+    let surface = compute_side_surface(vi, vj, on_axis_i, on_axis_j, axis_origin, axis, ref_dir)?;
     let same_sense = determine_same_sense(vi, vj, axis, &surface);
 
     Ok(store.add_face(FaceData {
@@ -740,5 +994,209 @@ mod tests {
             }
         }
         (vertices, edges)
+    }
+
+    // ── Partial revolve ───────────────────────────────────────
+
+    #[test]
+    fn square_partial_90_has_6_faces() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![
+                p(2.0, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(4.0, 0.0, 3.0),
+                p(2.0, 0.0, 3.0),
+            ],
+        );
+        let solid = Revolve::new(face, Point3::origin(), Vector3::z())
+            .with_angle(std::f64::consts::FRAC_PI_2)
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        // 4 side faces + 2 cap faces = 6
+        assert_eq!(shell.faces.len(), 6);
+        assert!(shell.is_closed);
+    }
+
+    #[test]
+    fn triangle_on_axis_partial_180_has_5_faces() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![
+                p(0.0, 0.0, 5.0), // on axis
+                p(3.0, 0.0, 0.0),
+                p(3.0, 0.0, 5.0),
+            ],
+        );
+        let solid = Revolve::new(face, Point3::origin(), Vector3::z())
+            .with_angle(std::f64::consts::PI)
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        // 3 side faces + 2 cap faces = 5
+        assert_eq!(shell.faces.len(), 5);
+    }
+
+    #[test]
+    fn partial_revolve_edges_shared() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![
+                p(2.0, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(4.0, 0.0, 3.0),
+                p(2.0, 0.0, 3.0),
+            ],
+        );
+        let solid = Revolve::new(face, Point3::origin(), Vector3::z())
+            .with_angle(std::f64::consts::FRAC_PI_2)
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        let counts = count_edge_usage(&store, shell);
+        for (edge_id, count) in &counts {
+            assert_eq!(
+                *count, 2,
+                "edge {edge_id:?} should be used exactly 2 times, got {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_revolve_tessellates() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![
+                p(2.0, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(4.0, 0.0, 3.0),
+                p(2.0, 0.0, 3.0),
+            ],
+        );
+        let solid = Revolve::new(face, Point3::origin(), Vector3::z())
+            .with_angle(std::f64::consts::FRAC_PI_2)
+            .execute(&mut store)
+            .unwrap();
+
+        let mesh = TessellateSolid::new(solid, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty());
+        assert_eq!(mesh.vertices.len(), mesh.normals.len());
+    }
+
+    #[test]
+    fn partial_revolve_each_face_tessellates() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![
+                p(2.0, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(4.0, 0.0, 3.0),
+                p(2.0, 0.0, 3.0),
+            ],
+        );
+        let solid = Revolve::new(face, Point3::origin(), Vector3::z())
+            .with_angle(std::f64::consts::FRAC_PI_2)
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        for &fid in &shell.faces {
+            let mesh = TessellateFace::new(fid, TessellationParams::default())
+                .execute(&store)
+                .unwrap();
+            assert!(!mesh.indices.is_empty(), "face {fid:?} produced empty mesh");
+        }
+    }
+
+    #[test]
+    fn full_angle_backward_compatible() {
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![
+                p(2.0, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(4.0, 0.0, 3.0),
+                p(2.0, 0.0, 3.0),
+            ],
+        );
+        let solid = Revolve::new(face, Point3::origin(), Vector3::z())
+            .with_angle(TAU)
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+        // Full angle should produce same result as default (4 faces, no caps)
+        assert_eq!(shell.faces.len(), 4);
+    }
+
+    #[test]
+    fn trapezoid_270_no_vertices_in_gap() {
+        // Trapezoid 270° revolve: the gap is from 270° to 360° around Z axis.
+        // No tessellated vertex should fall in this gap region.
+        let mut store = TopologyStore::new();
+        let face = make_face(
+            &mut store,
+            vec![
+                p(1.5, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(3.0, 0.0, 6.0),
+                p(2.0, 0.0, 6.0),
+            ],
+        );
+        let angle = 3.0 * std::f64::consts::FRAC_PI_2;
+        let solid = Revolve::new(face, Point3::origin(), Vector3::z())
+            .with_angle(angle)
+            .execute(&mut store)
+            .unwrap();
+
+        let solid_data = store.solid(solid).unwrap();
+        let shell = store.shell(solid_data.outer_shell).unwrap();
+
+        // For each face, tessellate and check vertices
+        for (face_idx, &fid) in shell.faces.iter().enumerate() {
+            let mesh = TessellateFace::new(fid, TessellationParams::default())
+                .execute(&store)
+                .unwrap();
+
+            for (vi, v) in mesh.vertices.iter().enumerate() {
+                // Only check vertices that are off-axis (have meaningful x/y)
+                let r = (v.x * v.x + v.y * v.y).sqrt();
+                if r < TOLERANCE {
+                    continue;
+                }
+                let theta = v.y.atan2(v.x); // (-PI, PI]
+
+                // Gap region: atan2 in (-PI/2, 0) exclusive
+                // (i.e., the quadrant between +X and -Y, excluding boundaries)
+                let in_gap = theta > -std::f64::consts::FRAC_PI_2 + 0.01
+                    && theta < -0.01;
+                assert!(
+                    !in_gap,
+                    "face {face_idx} vertex {vi} at ({:.3}, {:.3}, {:.3}) is in the gap \
+                     (theta={:.3}°)",
+                    v.x,
+                    v.y,
+                    v.z,
+                    theta.to_degrees()
+                );
+            }
+        }
     }
 }

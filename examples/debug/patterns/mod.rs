@@ -1,9 +1,13 @@
 pub mod boolean;
 pub mod extrude;
 pub mod face_creation;
+pub mod primitives;
 pub mod revolve;
+pub mod shell;
+pub mod split;
 pub mod stroke_joins;
 pub mod wall_offset;
+pub mod wall_self_intersect;
 pub mod wall_with_window;
 
 use std::collections::HashSet;
@@ -11,7 +15,7 @@ use std::sync::Arc;
 
 use geolis::math::Point3;
 use geolis::tessellation::{StrokeStyle, TessellateStroke, TriangleMesh};
-use geolis::topology::{ShellId, TopologyStore};
+use geolis::topology::{EdgeCurve, ShellId, TopologyStore};
 use revion_core::{
     Line3D, Line3DId, LineTopology, LineVertex3D, RawMesh2D, RawMesh2DId, RawMesh3D, RawMesh3DId,
     RawVertex2D, RawVertex3D,
@@ -20,7 +24,7 @@ use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
 /// All available pattern names.
-pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset", "face_creation", "extrude", "revolve", "boolean", "wall_with_window"];
+pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset", "wall_self_intersect", "face_creation", "extrude", "revolve", "boolean", "wall_with_window", "primitives", "split", "shell"];
 
 /// Register meshes for the named pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
@@ -49,8 +53,24 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
             boolean::register(storage);
             true
         }
+        "wall_self_intersect" => {
+            wall_self_intersect::register(storage);
+            true
+        }
         "wall_with_window" => {
             wall_with_window::register(storage);
+            true
+        }
+        "primitives" => {
+            primitives::register(storage);
+            true
+        }
+        "split" => {
+            split::register(storage);
+            true
+        }
+        "shell" => {
+            shell::register(storage);
             true
         }
         _ => false,
@@ -135,8 +155,8 @@ pub fn register_face(storage: &MeshStorage, mesh: TriangleMesh, color: Color) {
 /// Collect unique edges from a shell and register them as a single GPU `Line3D`.
 ///
 /// Walks shell → faces → wires → edges, deduplicates by `EdgeId`, and emits
-/// each edge's start/end vertex positions as a `LineList`. Only renders in the
-/// 3D viewport (Revion has no `Line2D`).
+/// line segments. Curved edges (Arc, Circle, Ellipse) are tessellated into
+/// polyline segments; Line edges emit a single straight segment.
 #[allow(clippy::cast_possible_truncation)]
 pub fn register_edges(
     storage: &MeshStorage,
@@ -144,6 +164,8 @@ pub fn register_edges(
     shell_id: ShellId,
     color: Color,
 ) {
+    const CURVE_SEGMENTS: usize = 24;
+
     let Ok(shell) = topo.shell(shell_id) else {
         return;
     };
@@ -151,12 +173,17 @@ pub fn register_edges(
     let mut seen = HashSet::new();
     let mut vertices: Vec<LineVertex3D> = Vec::new();
 
+    let push_pt = |verts: &mut Vec<LineVertex3D>, p: &Point3| {
+        verts.push(LineVertex3D {
+            position: [p.x as f32, p.y as f32, p.z as f32],
+        });
+    };
+
     for &face_id in &shell.faces {
         let Ok(face) = topo.face(face_id) else {
             continue;
         };
 
-        // Collect edges from outer wire and all inner wires
         let wire_ids = std::iter::once(face.outer_wire).chain(face.inner_wires.iter().copied());
         for wire_id in wire_ids {
             let Ok(wire) = topo.wire(wire_id) else {
@@ -169,15 +196,33 @@ pub fn register_edges(
                 let Ok(edge) = topo.edge(oe.edge) else {
                     continue;
                 };
-                let (Ok(sv), Ok(ev)) = (topo.vertex(edge.start), topo.vertex(edge.end)) else {
-                    continue;
-                };
-                vertices.push(LineVertex3D {
-                    position: [sv.point.x as f32, sv.point.y as f32, sv.point.z as f32],
-                });
-                vertices.push(LineVertex3D {
-                    position: [ev.point.x as f32, ev.point.y as f32, ev.point.z as f32],
-                });
+
+                match &edge.curve {
+                    EdgeCurve::Line(_) => {
+                        let (Ok(sv), Ok(ev)) =
+                            (topo.vertex(edge.start), topo.vertex(edge.end))
+                        else {
+                            continue;
+                        };
+                        push_pt(&mut vertices, &sv.point);
+                        push_pt(&mut vertices, &ev.point);
+                    }
+                    EdgeCurve::Arc(curve) => {
+                        tessellate_curve_edge(
+                            &mut vertices, curve, edge.t_start, edge.t_end, CURVE_SEGMENTS,
+                        );
+                    }
+                    EdgeCurve::Circle(curve) => {
+                        tessellate_curve_edge(
+                            &mut vertices, curve, edge.t_start, edge.t_end, CURVE_SEGMENTS,
+                        );
+                    }
+                    EdgeCurve::Ellipse(curve) => {
+                        tessellate_curve_edge(
+                            &mut vertices, curve, edge.t_start, edge.t_end, CURVE_SEGMENTS,
+                        );
+                    }
+                }
             }
         }
     }
@@ -185,6 +230,31 @@ pub fn register_edges(
     if !vertices.is_empty() {
         let line = Line3D::new(vertices, LineTopology::LineList, color);
         storage.upsert_line(Line3DId::new(), Arc::new(line));
+    }
+}
+
+/// Tessellates a curved edge into line segments for wireframe rendering.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn tessellate_curve_edge(
+    vertices: &mut Vec<LineVertex3D>,
+    curve: &dyn geolis::geometry::curve::Curve,
+    t_start: f64,
+    t_end: f64,
+    n: usize,
+) {
+    for i in 0..n {
+        let frac0 = i as f64 / n as f64;
+        let frac1 = (i + 1) as f64 / n as f64;
+        let t0 = t_start + frac0 * (t_end - t_start);
+        let t1 = t_start + frac1 * (t_end - t_start);
+        let Ok(p0) = curve.evaluate(t0) else { continue };
+        let Ok(p1) = curve.evaluate(t1) else { continue };
+        vertices.push(LineVertex3D {
+            position: [p0.x as f32, p0.y as f32, p0.z as f32],
+        });
+        vertices.push(LineVertex3D {
+            position: [p1.x as f32, p1.y as f32, p1.z as f32],
+        });
     }
 }
 
