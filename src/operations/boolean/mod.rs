@@ -3,6 +3,7 @@ mod classify;
 mod engine;
 mod face_intersection;
 mod intersect_op;
+mod merge;
 mod select;
 mod split;
 mod subtract;

@@ -94,7 +94,10 @@ pub fn boolean_execute(
     }
 
     // Step 6: Assemble the result
-    assemble_result(store, &all_fragments)
+    let assembled = assemble_result(store, &all_fragments)?;
+
+    // Step 7: Merge coplanar adjacent faces
+    super::merge::merge_coplanar_faces(store, assembled)
 }
 
 /// Classifies a fragment's centroid against the other solid.
@@ -355,12 +358,19 @@ mod tests {
         let solid_id = result.unwrap();
         let solid = store.solid(solid_id).unwrap();
         let shell = store.shell(solid.outer_shell).unwrap();
-        // Should have more than 6 faces (box with a hole cut through it)
-        assert!(
-            shell.faces.len() > 6,
-            "expected >6 faces, got {}",
-            shell.faces.len()
-        );
+        // After merge: 4 outer walls + 1 top (with hole) + 1 bottom (with hole) + 4 inner walls = 10
+        assert_eq!(shell.faces.len(), 10, "expected 10 faces after merge");
+
+        // Verify that exactly 2 faces have inner wires (the top and bottom with holes)
+        let faces_with_holes = shell
+            .faces
+            .iter()
+            .filter(|&&fid| {
+                let face = store.face(fid).unwrap();
+                !face.inner_wires.is_empty()
+            })
+            .count();
+        assert_eq!(faces_with_holes, 2, "expected 2 faces with inner wires (holes)");
     }
 
     #[test]
