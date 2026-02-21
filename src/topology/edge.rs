@@ -1,4 +1,4 @@
-use crate::geometry::curve::{Arc, Line};
+use crate::geometry::curve::{Arc, Circle, Ellipse, Line};
 
 use super::vertex::VertexId;
 
@@ -14,6 +14,10 @@ pub enum EdgeCurve {
     Line(Line),
     /// A circular arc.
     Arc(Arc),
+    /// A full circle.
+    Circle(Circle),
+    /// An ellipse or elliptical arc.
+    Ellipse(Ellipse),
 }
 
 /// Data associated with a topological edge.

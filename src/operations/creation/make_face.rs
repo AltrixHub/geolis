@@ -162,7 +162,9 @@ mod tests {
         let wire = make_closed_wire(&mut store, pts);
         let face_id = MakeFace::new(wire, vec![]).execute(&mut store).unwrap();
         let face = store.face(face_id).unwrap();
-        let FaceSurface::Plane(plane) = &face.surface;
+        let FaceSurface::Plane(plane) = &face.surface else {
+            panic!("expected Plane surface");
+        };
         let n = plane.plane_normal();
         assert!(n.z.abs() > 0.99);
     }

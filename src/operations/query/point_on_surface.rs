@@ -26,6 +26,10 @@ impl PointOnSurface {
         let face = store.face(self.face)?;
         match &face.surface {
             FaceSurface::Plane(plane) => plane.evaluate(self.u, self.v),
+            FaceSurface::Cylinder(cyl) => cyl.evaluate(self.u, self.v),
+            FaceSurface::Cone(cone) => cone.evaluate(self.u, self.v),
+            FaceSurface::Sphere(sphere) => sphere.evaluate(self.u, self.v),
+            FaceSurface::Torus(torus) => torus.evaluate(self.u, self.v),
         }
     }
 }

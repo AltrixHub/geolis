@@ -99,7 +99,9 @@ fn collect_all_face_info(store: &TopologyStore, solid_id: SolidId) -> Result<Vec
 /// Extracts directed edges and plane info from a single face.
 fn collect_face_info(store: &TopologyStore, face_id: FaceId) -> Result<FaceInfo> {
     let face = store.face(face_id)?;
-    let FaceSurface::Plane(ref plane) = face.surface;
+    let FaceSurface::Plane(ref plane) = face.surface else {
+        todo!("Coplanar face merge for non-planar faces")
+    };
     let wire = store.wire(face.outer_wire)?;
 
     let mut edges = Vec::with_capacity(wire.edges.len());

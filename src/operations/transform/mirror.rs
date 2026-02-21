@@ -202,6 +202,9 @@ fn mirror_edges(
                     t_end: domain.t_max,
                 }
             }
+            EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
+                todo!("Mirror for Circle/Ellipse edges")
+            }
         };
         let new_eid = store.add_edge(new_edge_data);
         map.insert(eid, new_eid);
@@ -236,9 +239,10 @@ fn build_mirrored_faces(
         let plane = if points.len() >= 3 {
             compute_plane_from_points(&points)?
         } else {
-            match &store.face(face_id)?.surface {
-                FaceSurface::Plane(p) => p.clone(),
-            }
+            let FaceSurface::Plane(p) = &store.face(face_id)?.surface else {
+                todo!("Mirror for non-planar faces")
+            };
+            p.clone()
         };
 
         let new_face_id = store.add_face(FaceData {

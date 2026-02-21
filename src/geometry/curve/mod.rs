@@ -1,7 +1,11 @@
 mod arc;
+mod circle;
+mod ellipse;
 mod line;
 
 pub use arc::Arc;
+pub use circle::Circle;
+pub use ellipse::Ellipse;
 pub use line::Line;
 
 use crate::error::Result;

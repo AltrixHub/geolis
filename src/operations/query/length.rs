@@ -34,6 +34,40 @@ impl Length {
                 let sweep = (domain.t_max - domain.t_min).abs();
                 Ok(arc.radius() * sweep)
             }
+            EdgeCurve::Circle(circle) => {
+                // Full circle: circumference = 2 * pi * r
+                // Partial: r * |sweep|
+                let domain = circle.domain();
+                let sweep = (domain.t_max - domain.t_min).abs();
+                Ok(circle.radius() * sweep)
+            }
+            EdgeCurve::Ellipse(ellipse) => {
+                // Approximate ellipse arc length using numerical integration (Simpson's rule)
+                let domain = ellipse.domain();
+                let t_min = domain.t_min;
+                let t_max = domain.t_max;
+                let segments = 100_usize;
+                #[allow(clippy::cast_precision_loss)]
+                let step = (t_max - t_min) / segments as f64;
+                let mut sum = 0.0;
+                for idx in 0..=segments {
+                    #[allow(clippy::cast_precision_loss)]
+                    let param = t_min + step * idx as f64;
+                    // dP/dt = -a*sin(t)*major + b*cos(t)*minor
+                    let dx = -ellipse.semi_major() * param.sin();
+                    let dy = ellipse.semi_minor() * param.cos();
+                    let speed = (dx * dx + dy * dy).sqrt();
+                    let weight = if idx == 0 || idx == segments {
+                        1.0
+                    } else if idx % 2 == 1 {
+                        4.0
+                    } else {
+                        2.0
+                    };
+                    sum += weight * speed;
+                }
+                Ok(sum * step / 3.0)
+            }
         }
     }
 }

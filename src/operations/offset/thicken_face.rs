@@ -38,6 +38,9 @@ impl ThickenFace {
                 let n = *plane.plane_normal();
                 if face.same_sense { n } else { -n }
             }
+            _ => {
+                todo!("ThickenFace for non-planar surfaces")
+            }
         };
 
         let direction = normal * self.thickness;

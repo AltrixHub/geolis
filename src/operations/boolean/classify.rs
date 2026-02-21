@@ -63,7 +63,9 @@ fn collect_face_data(
     let mut faces = Vec::with_capacity(face_ids.len());
     for &face_id in face_ids {
         let face = store.face(face_id)?;
-        let FaceSurface::Plane(ref plane) = face.surface;
+        let FaceSurface::Plane(ref plane) = face.surface else {
+            todo!("Point classification for non-planar faces")
+        };
 
         let wire = store.wire(face.outer_wire)?;
         let mut polygon = Vec::with_capacity(wire.edges.len());

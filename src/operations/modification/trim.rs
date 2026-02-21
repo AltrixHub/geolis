@@ -90,6 +90,26 @@ impl Trim {
                     t_end: self.t_end,
                 }
             }
+            EdgeCurve::Circle(circle) => {
+                // Trimming a circle produces a new circle with updated parameter bounds
+                EdgeData {
+                    start: start_vertex,
+                    end: end_vertex,
+                    curve: EdgeCurve::Circle(circle.clone()),
+                    t_start: self.t_start,
+                    t_end: self.t_end,
+                }
+            }
+            EdgeCurve::Ellipse(ellipse) => {
+                // Trimming an ellipse updates the parameter bounds
+                EdgeData {
+                    start: start_vertex,
+                    end: end_vertex,
+                    curve: EdgeCurve::Ellipse(ellipse.clone()),
+                    t_start: self.t_start,
+                    t_end: self.t_end,
+                }
+            }
         };
 
         Ok(store.add_edge(new_edge_data))
@@ -101,6 +121,8 @@ fn evaluate_curve(curve: &EdgeCurve, t: f64) -> Result<Point3> {
     match curve {
         EdgeCurve::Line(line) => line.evaluate(t),
         EdgeCurve::Arc(arc) => arc.evaluate(t),
+        EdgeCurve::Circle(circle) => circle.evaluate(t),
+        EdgeCurve::Ellipse(ellipse) => ellipse.evaluate(t),
     }
 }
 

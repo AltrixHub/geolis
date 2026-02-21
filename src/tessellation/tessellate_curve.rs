@@ -36,6 +36,13 @@ impl TessellateCurve {
                 })
             }
             EdgeCurve::Arc(arc) => tessellate_arc(arc, edge.t_start, edge.t_end, &self.params),
+            EdgeCurve::Circle(circle) => {
+                tessellate_circular(circle.radius(), circle, edge.t_start, edge.t_end, &self.params)
+            }
+            EdgeCurve::Ellipse(ellipse) => {
+                // Approximate with the semi-major axis for chord error calculation
+                tessellate_circular(ellipse.semi_major(), ellipse, edge.t_start, edge.t_end, &self.params)
+            }
         }
     }
 }
@@ -47,15 +54,28 @@ fn tessellate_arc(
     t_end: f64,
     params: &TessellationParams,
 ) -> Result<Polyline> {
-    let radius = arc.radius();
+    tessellate_circular(arc.radius(), arc, t_start, t_end, params)
+}
+
+/// Tessellates any circular/elliptical curve into a polyline with adaptive subdivision.
+///
+/// `approx_radius` is used for chord error calculation (use radius for circles,
+/// semi-major axis for ellipses).
+fn tessellate_circular(
+    approx_radius: f64,
+    curve: &dyn Curve,
+    t_start: f64,
+    t_end: f64,
+    params: &TessellationParams,
+) -> Result<Polyline> {
     let sweep = (t_end - t_start).abs();
 
     // Compute number of segments based on tolerance:
     // chord error = r * (1 - cos(theta/2)) where theta = sweep/n
     // So n = sweep / (2 * acos(1 - tolerance/r))
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let n = if radius > params.tolerance {
-        let half_angle = (1.0 - params.tolerance / radius).acos();
+    let n = if approx_radius > params.tolerance {
+        let half_angle = (1.0 - params.tolerance / approx_radius).acos();
         let computed = (sweep / (2.0 * half_angle)).ceil() as usize;
         computed.clamp(params.min_segments, params.max_segments)
     } else {
@@ -67,7 +87,7 @@ fn tessellate_arc(
         #[allow(clippy::cast_precision_loss)]
         let frac = i as f64 / n as f64;
         let t = t_start + frac * (t_end - t_start);
-        points.push(arc.evaluate(t)?);
+        points.push(curve.evaluate(t)?);
     }
 
     Ok(Polyline { points })

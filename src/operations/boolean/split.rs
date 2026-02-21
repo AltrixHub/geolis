@@ -37,7 +37,9 @@ pub fn split_face(
     source: SolidSource,
 ) -> Result<Vec<FaceFragment>> {
     let face = store.face(face_id)?;
-    let FaceSurface::Plane(ref plane) = face.surface;
+    let FaceSurface::Plane(ref plane) = face.surface else {
+        todo!("Face splitting for non-planar faces")
+    };
 
     let polygon = collect_face_polygon(store, face_id)?;
     if polygon.len() < 3 {

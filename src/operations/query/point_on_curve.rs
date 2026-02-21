@@ -26,6 +26,8 @@ impl PointOnCurve {
         match &edge.curve {
             EdgeCurve::Line(line) => line.evaluate(self.t),
             EdgeCurve::Arc(arc) => arc.evaluate(self.t),
+            EdgeCurve::Circle(circle) => circle.evaluate(self.t),
+            EdgeCurve::Ellipse(ellipse) => ellipse.evaluate(self.t),
         }
     }
 }

@@ -33,6 +33,9 @@ impl CurveOffset2D {
         match &curve {
             EdgeCurve::Line(line) => offset_line(store, line, t_start, t_end, self.distance),
             EdgeCurve::Arc(arc) => offset_arc(store, arc, t_start, t_end, self.distance),
+            EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
+                todo!("CurveOffset2D for Circle/Ellipse")
+            }
         }
     }
 }

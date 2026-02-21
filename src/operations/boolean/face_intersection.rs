@@ -29,8 +29,12 @@ pub fn intersect_face_face(
     let fa = store.face(face_a)?;
     let fb = store.face(face_b)?;
 
-    let FaceSurface::Plane(ref plane_a) = fa.surface;
-    let FaceSurface::Plane(ref plane_b) = fb.surface;
+    let FaceSurface::Plane(ref plane_a) = fa.surface else {
+        todo!("Face intersection for non-planar faces")
+    };
+    let FaceSurface::Plane(ref plane_b) = fb.surface else {
+        todo!("Face intersection for non-planar faces")
+    };
 
     // Step 1: intersect the two planes
     let relation = plane_plane_intersect(plane_a, plane_b);

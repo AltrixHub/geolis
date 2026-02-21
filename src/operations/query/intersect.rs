@@ -64,6 +64,9 @@ impl CurveCurveIntersect {
             (EdgeCurve::Arc(aa), EdgeCurve::Arc(ab)) => {
                 Ok(intersect_arc_arc(aa, ta_start, ta_end, ab, tb_start, tb_end))
             }
+            _ => {
+                todo!("CurveCurveIntersect for Circle/Ellipse")
+            }
         }
     }
 }

@@ -387,7 +387,9 @@ mod tests {
 
         for &face_id in &shell.faces {
             let face_data = store.face(face_id).unwrap();
-            let FaceSurface::Plane(plane) = &face_data.surface;
+            let FaceSurface::Plane(plane) = &face_data.surface else {
+                panic!("expected Plane surface");
+            };
             let face_normal = plane.plane_normal();
             let face_origin = plane.origin();
 

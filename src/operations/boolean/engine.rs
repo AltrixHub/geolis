@@ -293,7 +293,9 @@ fn copy_solid(store: &mut TopologyStore, solid_id: SolidId) -> Result<SolidId> {
     for face_id in &faces {
         let polygon = collect_face_polygon(store, *face_id)?;
         let face = store.face(*face_id)?;
-        let FaceSurface::Plane(ref plane) = face.surface;
+        let FaceSurface::Plane(ref plane) = face.surface else {
+            todo!("Boolean operations for non-planar faces")
+        };
 
         fragments.push((
             FaceFragment {

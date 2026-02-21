@@ -1,6 +1,14 @@
+mod cone;
+mod cylinder;
 mod plane;
+mod sphere;
+mod torus;
 
+pub use cone::Cone;
+pub use cylinder::Cylinder;
 pub use plane::Plane;
+pub use sphere::Sphere;
+pub use torus::Torus;
 
 use crate::error::Result;
 use crate::math::{Point3, Vector3};

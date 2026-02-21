@@ -79,6 +79,9 @@ impl GeneralTransform {
                     )?;
                     (EdgeCurve::Arc(new_arc), domain.t_min, domain.t_max)
                 }
+                EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
+                    todo!("GeneralTransform for Circle/Ellipse edges")
+                }
             };
 
             let edge = store.edge_mut(edge_id)?;

@@ -1,4 +1,4 @@
-use crate::geometry::surface::Plane;
+use crate::geometry::surface::{Cone, Cylinder, Plane, Sphere, Torus};
 
 use super::wire::WireId;
 
@@ -12,6 +12,14 @@ slotmap::new_key_type! {
 pub enum FaceSurface {
     /// A planar surface.
     Plane(Plane),
+    /// A cylindrical surface.
+    Cylinder(Cylinder),
+    /// A conical surface.
+    Cone(Cone),
+    /// A spherical surface.
+    Sphere(Sphere),
+    /// A toroidal surface.
+    Torus(Torus),
 }
 
 /// Data associated with a topological face.
