@@ -1,10 +1,10 @@
 use crate::error::Result;
 use crate::geometry::surface::Plane;
-use crate::math::polygon_3d::polygon_area_3d;
+use crate::math::polygon_3d::{point_in_polygon_3d, polygon_area_3d};
 use crate::math::{Point3, TOLERANCE};
 use crate::topology::{FaceId, FaceSurface, TopologyStore};
 
-use super::face_intersection::collect_face_polygon;
+use super::face_intersection::{collect_face_polygon, collect_inner_wire_polygons};
 
 /// Which solid a face fragment originated from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,7 @@ pub enum SolidSource {
 #[derive(Debug, Clone)]
 pub struct FaceFragment {
     pub boundary: Vec<Point3>,
+    pub inner_boundaries: Vec<Vec<Point3>>,
     pub plane: Plane,
     pub same_sense: bool,
     pub source_face: FaceId,
@@ -42,6 +43,8 @@ pub fn split_face(
     };
 
     let polygon = collect_face_polygon(store, face_id)?;
+    let inner_polygons = collect_inner_wire_polygons(store, face_id)?;
+
     if polygon.len() < 3 {
         return Ok(Vec::new());
     }
@@ -58,6 +61,7 @@ pub fn split_face(
     if relevant_cuts.is_empty() {
         return Ok(vec![FaceFragment {
             boundary: polygon,
+            inner_boundaries: inner_polygons,
             plane: plane.clone(),
             same_sense: face.same_sense,
             source_face: face_id,
@@ -78,22 +82,79 @@ pub fn split_face(
         fragments = next_fragments;
     }
 
-    // Filter out degenerate fragments
+    // Split inner polygons by the same cut lines
+    let mut inner_fragments: Vec<Vec<Point3>> = Vec::new();
+    for inner in &inner_polygons {
+        let mut current = vec![inner.clone()];
+        for cut in &relevant_cuts {
+            let mut next = Vec::new();
+            for poly in &current {
+                let split_result = split_polygon_by_line(poly, &cut.0, &cut.1, plane);
+                next.extend(split_result);
+            }
+            current = next;
+        }
+        // Filter degenerate inner fragments
+        let normal = plane.plane_normal();
+        let min_area = TOLERANCE * TOLERANCE;
+        for frag in current {
+            if frag.len() >= 3 && polygon_area_3d(&frag, normal) > min_area {
+                inner_fragments.push(frag);
+            }
+        }
+    }
+
+    // Filter out degenerate outer fragments and associate inner fragments
     let normal = plane.plane_normal();
     let min_area = TOLERANCE * TOLERANCE;
     let result = fragments
         .into_iter()
         .filter(|f| f.len() >= 3 && polygon_area_3d(f, normal) > min_area)
-        .map(|boundary| FaceFragment {
-            boundary,
-            plane: plane.clone(),
-            same_sense: face.same_sense,
-            source_face: face_id,
-            source,
+        .map(|boundary| {
+            let inners = associate_inner_fragments(&boundary, &inner_fragments, plane);
+            FaceFragment {
+                boundary,
+                inner_boundaries: inners,
+                plane: plane.clone(),
+                same_sense: face.same_sense,
+                source_face: face_id,
+                source,
+            }
         })
         .collect();
 
     Ok(result)
+}
+
+/// Associates inner polygon fragments with an outer boundary using centroid containment.
+fn associate_inner_fragments(
+    outer_boundary: &[Point3],
+    inner_fragments: &[Vec<Point3>],
+    plane: &Plane,
+) -> Vec<Vec<Point3>> {
+    inner_fragments
+        .iter()
+        .filter(|inner| {
+            let centroid = polygon_centroid(inner);
+            point_in_polygon_3d(&centroid, outer_boundary, plane)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Computes the centroid of a polygon.
+fn polygon_centroid(points: &[Point3]) -> Point3 {
+    let n = points.len();
+    if n == 0 {
+        return Point3::new(0.0, 0.0, 0.0);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let inv_n = 1.0 / n as f64;
+    Point3::new(
+        points.iter().map(|p| p.x).sum::<f64>() * inv_n,
+        points.iter().map(|p| p.y).sum::<f64>() * inv_n,
+        points.iter().map(|p| p.z).sum::<f64>() * inv_n,
+    )
 }
 
 /// Splits a polygon by an infinite line defined by two points on the face plane.

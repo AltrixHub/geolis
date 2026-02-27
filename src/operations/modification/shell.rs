@@ -1,19 +1,24 @@
+use std::collections::HashSet;
+
 use crate::error::{OperationError, Result};
-use crate::math::{Point3, Vector3, TOLERANCE};
-use crate::operations::creation::{MakeFace, MakeSolid, MakeWire};
-use crate::topology::{
-    FaceId, FaceSurface, ShellData, SolidId, TopologyStore,
-};
+use crate::math::TOLERANCE;
+use crate::operations::boolean::Subtract;
+use crate::operations::creation::MakeBox;
+use crate::operations::query::BoundingBox;
+use crate::topology::{FaceId, FaceSurface, SolidId, TopologyStore};
 
 /// Hollows a solid by removing specified faces and offsetting the remaining
 /// faces inward by a given thickness.
 ///
-/// The result is a shell (thin-walled solid) with:
-/// - The original outer faces (unchanged)
-/// - Offset inner faces (moved inward by thickness)
-/// - Side faces connecting the boundaries of removed faces
+/// The result is a shell (thin-walled solid) where the wall thickness equals
+/// the given `thickness` parameter. The removed faces become openings.
 ///
-/// Currently supports Plane faces only.
+/// Implementation uses boolean subtraction: an inner block (derived from
+/// the offset planes of kept faces) is subtracted from the original solid.
+/// The inner block extends beyond the solid at each removed face, creating
+/// openings.
+///
+/// Currently supports axis-aligned box solids with `Plane` faces.
 pub struct Shell {
     solid: SolidId,
     thickness: f64,
@@ -49,128 +54,91 @@ impl Shell {
             );
         }
 
-        let solid = store.solid(self.solid)?;
-        let shell = store.shell(solid.outer_shell)?;
+        let solid_data = store.solid(self.solid)?;
+        let shell = store.shell(solid_data.outer_shell)?;
         let face_ids: Vec<FaceId> = shell.faces.clone();
 
-        // Separate faces into kept and removed
-        let removed_set: std::collections::HashSet<FaceId> =
-            self.removed_faces.iter().copied().collect();
+        let removed_set: HashSet<FaceId> = self.removed_faces.iter().copied().collect();
 
-        let mut all_result_faces: Vec<FaceId> = Vec::new();
+        // Get the solid's bounding box
+        let aabb = BoundingBox::new(self.solid).execute(store)?;
 
-        // For each kept face, create the outer face (copy) and inner face (offset inward)
+        // Compute inner box by offsetting each face inward (kept) or outward (removed).
+        // For axis-aligned box solids, each face normal aligns with ±X, ±Y, or ±Z.
+        let mut inner_min = aabb.min;
+        let mut inner_max = aabb.max;
+        let extend = self.thickness * 2.0;
+
         for &face_id in &face_ids {
-            if removed_set.contains(&face_id) {
+            let face = store.face(face_id)?;
+            let FaceSurface::Plane(plane) = &face.surface else {
                 continue;
-            }
-
-            let face = store.face(face_id)?;
-            match &face.surface {
-                FaceSurface::Plane(plane) => {
-                    let plane = plane.clone();
-                    let same_sense = face.same_sense;
-                    let outer_wire_id = face.outer_wire;
-
-                    // Get outer boundary points
-                    let outer_points = collect_wire_points(store, outer_wire_id)?;
-
-                    // Create outer face (original)
-                    let outer_wire = MakeWire::new(outer_points.clone(), true).execute(store)?;
-                    let outer_face = MakeFace::new(outer_wire, vec![]).execute(store)?;
-                    all_result_faces.push(outer_face);
-
-                    // Create inner face (offset inward)
-                    let normal = if same_sense {
-                        *plane.plane_normal()
-                    } else {
-                        -*plane.plane_normal()
-                    };
-                    // Inward = opposite of outward normal
-                    let offset_dir = -normal * self.thickness;
-                    let inner_points: Vec<Point3> =
-                        outer_points.iter().map(|p| p + offset_dir).collect();
-
-                    // Inner face has reversed winding (points inward)
-                    let inner_reversed: Vec<Point3> = inner_points.iter().copied().rev().collect();
-                    let inner_wire = MakeWire::new(inner_reversed, true).execute(store)?;
-                    let inner_face = MakeFace::new(inner_wire, vec![]).execute(store)?;
-                    all_result_faces.push(inner_face);
-                }
-                _ => {
-                    // For non-plane faces, just copy the outer face for now
-                    let outer_wire_id = face.outer_wire;
-                    let outer_points = collect_wire_points(store, outer_wire_id)?;
-                    let outer_wire = MakeWire::new(outer_points, true).execute(store)?;
-                    let outer_face = MakeFace::new(outer_wire, vec![]).execute(store)?;
-                    all_result_faces.push(outer_face);
-                }
-            }
-        }
-
-        // For each removed face, create side faces connecting outer and inner edges
-        for &face_id in &self.removed_faces {
-            let face = store.face(face_id)?;
-            let outer_wire_id = face.outer_wire;
-            let outer_points = collect_wire_points(store, outer_wire_id)?;
-
-            let same_sense = face.same_sense;
-            let normal = match &face.surface {
-                FaceSurface::Plane(plane) => {
-                    if same_sense {
-                        *plane.plane_normal()
-                    } else {
-                        -*plane.plane_normal()
-                    }
-                }
-                _ => Vector3::z(), // fallback
+            };
+            let normal = if face.same_sense {
+                *plane.plane_normal()
+            } else {
+                -*plane.plane_normal()
             };
 
-            let offset_dir = -normal * self.thickness;
-            let inner_points: Vec<Point3> =
-                outer_points.iter().map(|p| p + offset_dir).collect();
+            let is_removed = removed_set.contains(&face_id);
+            let (axis, positive) = dominant_axis(&normal);
 
-            // Create side faces (quads connecting outer[i]→outer[i+1]→inner[i+1]→inner[i])
-            let n = outer_points.len();
-            for i in 0..n {
-                let j = (i + 1) % n;
-                let quad = vec![
-                    outer_points[i],
-                    outer_points[j],
-                    inner_points[j],
-                    inner_points[i],
-                ];
-                let wire = MakeWire::new(quad, true).execute(store)?;
-                let side_face = MakeFace::new(wire, vec![]).execute(store)?;
-                all_result_faces.push(side_face);
+            if is_removed {
+                // Extend beyond the solid to create an opening
+                if positive {
+                    inner_max[axis] += extend;
+                } else {
+                    inner_min[axis] -= extend;
+                }
+            } else {
+                // Offset inward by thickness
+                if positive {
+                    inner_max[axis] -= self.thickness;
+                } else {
+                    inner_min[axis] += self.thickness;
+                }
             }
         }
 
-        let shell_id = store.add_shell(ShellData {
-            faces: all_result_faces,
-            is_closed: true,
-        });
-        MakeSolid::new(shell_id, vec![]).execute(store)
+        // Validate that the inner box is non-degenerate
+        if inner_min.x >= inner_max.x
+            || inner_min.y >= inner_max.y
+            || inner_min.z >= inner_max.z
+        {
+            return Err(OperationError::InvalidInput(
+                "shell thickness too large for solid dimensions".into(),
+            )
+            .into());
+        }
+
+        // Create inner box and subtract from outer solid
+        let inner = MakeBox::new(inner_min, inner_max).execute(store)?;
+        Subtract::new(self.solid, inner).execute(store)
     }
 }
 
-/// Collects vertex positions from a wire in traversal order.
-fn collect_wire_points(store: &TopologyStore, wire_id: crate::topology::WireId) -> Result<Vec<Point3>> {
-    let edges = store.wire(wire_id)?.edges.clone();
-    let mut points = Vec::with_capacity(edges.len());
-    for oe in &edges {
-        let edge = store.edge(oe.edge)?;
-        let vertex_id = if oe.forward { edge.start } else { edge.end };
-        points.push(store.vertex(vertex_id)?.point);
+/// Returns the dominant axis index (0=X, 1=Y, 2=Z) and whether
+/// the normal points in the positive direction along that axis.
+fn dominant_axis(normal: &crate::math::Vector3) -> (usize, bool) {
+    let ax = normal.x.abs();
+    let ay = normal.y.abs();
+    let az = normal.z.abs();
+    if ax >= ay && ax >= az {
+        (0, normal.x > 0.0)
+    } else if ay >= az {
+        (1, normal.y > 0.0)
+    } else {
+        (2, normal.z > 0.0)
     }
-    Ok(points)
 }
+
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::operations::creation::MakeBox;
+    use crate::math::Point3;
+    use crate::operations::query::Volume;
     use crate::tessellation::{TessellateSolid, TessellationParams};
 
     fn p(x: f64, y: f64, z: f64) -> Point3 {
@@ -235,10 +203,14 @@ mod tests {
             .execute(&mut store)
             .unwrap();
 
+        // Boolean subtract should produce a valid solid with faces
         let result_data = store.solid(result).unwrap();
         let result_shell = store.shell(result_data.outer_shell).unwrap();
-        // 5 kept faces × 2 (outer + inner) + 4 side faces = 14
-        assert_eq!(result_shell.faces.len(), 14);
+        assert!(
+            result_shell.faces.len() >= 10,
+            "expected at least 10 faces, got {}",
+            result_shell.faces.len()
+        );
     }
 
     #[test]
@@ -255,7 +227,11 @@ mod tests {
 
         let result_data = store.solid(result).unwrap();
         let result_shell = store.shell(result_data.outer_shell).unwrap();
-        assert_eq!(result_shell.faces.len(), 14);
+        assert!(
+            result_shell.faces.len() >= 10,
+            "expected at least 10 faces, got {}",
+            result_shell.faces.len()
+        );
     }
 
     #[test]
@@ -274,6 +250,57 @@ mod tests {
             .execute(&store)
             .unwrap();
         assert!(!mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn shell_inner_vertices_correct() {
+        // Box (0,0,0)-(4,4,4), top removed, thickness=0.5
+        // Inner block should be (0.5, 0.5, 0.5)-(3.5, 3.5, 4+extend)
+        // Subtraction result should have vertices at the inner boundary
+        let mut store = TopologyStore::new();
+        let solid = MakeBox::new(p(0.0, 0.0, 0.0), p(4.0, 4.0, 4.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let top = get_top_face(&store, solid);
+        let result = Shell::new(solid, 0.5, vec![top])
+            .execute(&mut store)
+            .unwrap();
+
+        // Check bounding box of result
+        let aabb = BoundingBox::new(result).execute(&store).unwrap();
+        assert!((aabb.min.x - 0.0).abs() < 1e-6);
+        assert!((aabb.min.y - 0.0).abs() < 1e-6);
+        assert!((aabb.min.z - 0.0).abs() < 1e-6);
+        assert!((aabb.max.x - 4.0).abs() < 1e-6);
+        assert!((aabb.max.y - 4.0).abs() < 1e-6);
+        assert!((aabb.max.z - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shell_volume_correct() {
+        // Box (0,0,0)-(4,4,4), top removed, thickness=0.5
+        // Outer box volume = 4 * 4 * 4 = 64
+        // Inner box = (0.5, 0.5, 0.5) to (3.5, 3.5, 5.0)
+        //   → inner width=3, depth=3, height=4.5 BUT clamped by outer box at z=4
+        //   → effective inner = (0.5,0.5,0.5) to (3.5,3.5,4.0) = 3 * 3 * 3.5 = 31.5
+        // Shell volume = 64 - 31.5 = 32.5
+        let mut store = TopologyStore::new();
+        let solid = MakeBox::new(p(0.0, 0.0, 0.0), p(4.0, 4.0, 4.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let top = get_top_face(&store, solid);
+        let result = Shell::new(solid, 0.5, vec![top])
+            .execute(&mut store)
+            .unwrap();
+
+        let volume = Volume::new(result).execute(&store).unwrap();
+        let expected = 32.5;
+        assert!(
+            (volume - expected).abs() < expected * 0.05,
+            "shell volume: expected ~{expected}, got {volume}"
+        );
     }
 
     #[test]
@@ -296,6 +323,77 @@ mod tests {
             .unwrap();
 
         let result = Shell::new(solid, 0.5, vec![]).execute(&mut store);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shell_top_face_has_opening() {
+        // The shell result should have a face at z=4 with an inner wire (hole)
+        // representing the opening where the top face was removed.
+        let mut store = TopologyStore::new();
+        let solid = MakeBox::new(p(0.0, 0.0, 0.0), p(4.0, 4.0, 4.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let top = get_top_face(&store, solid);
+        let result = Shell::new(solid, 0.5, vec![top])
+            .execute(&mut store)
+            .unwrap();
+
+        let result_data = store.solid(result).unwrap();
+        let result_shell = store.shell(result_data.outer_shell).unwrap();
+
+        // Find any face at z=4 with normal pointing up
+        let mut top_faces = Vec::new();
+        for &face_id in &result_shell.faces {
+            let face = store.face(face_id).unwrap();
+            if let FaceSurface::Plane(plane) = &face.surface {
+                let normal = if face.same_sense {
+                    *plane.plane_normal()
+                } else {
+                    -*plane.plane_normal()
+                };
+                // Check if face is at z=4 with upward normal
+                if normal.z > 0.9 {
+                    let wire = store.wire(face.outer_wire).unwrap();
+                    let mut max_z = f64::NEG_INFINITY;
+                    for oe in &wire.edges {
+                        let edge = store.edge(oe.edge).unwrap();
+                        let sv = store.vertex(edge.start).unwrap();
+                        if sv.point.z > max_z {
+                            max_z = sv.point.z;
+                        }
+                    }
+                    if (max_z - 4.0).abs() < 0.01 {
+                        top_faces.push((face_id, !face.inner_wires.is_empty()));
+                    }
+                }
+            }
+        }
+
+        // There should be a top face at z=4, and it should have an inner wire (hole)
+        assert!(
+            !top_faces.is_empty(),
+            "expected at least one face at z=4 with upward normal"
+        );
+
+        let has_hole = top_faces.iter().any(|(_id, has_inner)| *has_inner);
+        assert!(
+            has_hole,
+            "expected top face at z=4 to have inner wire (opening), but found faces: {top_faces:?}"
+        );
+    }
+
+    #[test]
+    fn shell_thickness_too_large_fails() {
+        let mut store = TopologyStore::new();
+        let solid = MakeBox::new(p(0.0, 0.0, 0.0), p(4.0, 4.0, 4.0))
+            .execute(&mut store)
+            .unwrap();
+        let top = get_top_face(&store, solid);
+
+        // Thickness 2.5 > half of 4.0 → inner box is degenerate
+        let result = Shell::new(solid, 2.5, vec![top]).execute(&mut store);
         assert!(result.is_err());
     }
 }

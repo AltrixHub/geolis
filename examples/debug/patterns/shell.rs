@@ -1,7 +1,7 @@
 use geolis::math::Point3;
 use geolis::operations::creation::MakeBox;
 use geolis::operations::modification::Shell;
-use geolis::tessellation::{TessellateFace, TessellateSolid, TessellationParams};
+use geolis::tessellation::{TessellateSolid, TessellationParams};
 use geolis::topology::{FaceSurface, TopologyStore};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
@@ -12,7 +12,7 @@ const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 const GREEN: Color = Color::rgb(100, 200, 100);
 const BLUE: Color = Color::rgb(100, 150, 255);
-const RED: Color = Color::rgb(230, 100, 80);
+const RED: Color = Color::rgb(230, 100, 100);
 
 fn render_solid(
     storage: &MeshStorage,
@@ -27,40 +27,6 @@ fn render_solid(
     if let Ok(solid_data) = topo.solid(solid) {
         register_edges(storage, topo, solid_data.outer_shell, edge_color);
     }
-}
-
-/// Renders each face of a shell's solid individually with alternating colors
-/// to make the structure visible (outer, inner, side faces).
-fn render_shell_faces(
-    storage: &MeshStorage,
-    topo: &TopologyStore,
-    solid: geolis::topology::SolidId,
-    outer_color: Color,
-    inner_color: Color,
-    side_color: Color,
-    n_kept: usize,
-    edge_color: Color,
-) {
-    let params = TessellationParams::default();
-    let Ok(solid_data) = topo.solid(solid) else {
-        return;
-    };
-    let Ok(shell) = topo.shell(solid_data.outer_shell) else {
-        return;
-    };
-
-    for (i, &face_id) in shell.faces.iter().enumerate() {
-        let color = if i < n_kept * 2 {
-            // First n_kept*2 faces are outer/inner pairs
-            if i % 2 == 0 { outer_color } else { inner_color }
-        } else {
-            side_color
-        };
-        if let Ok(mesh) = TessellateFace::new(face_id, params).execute(topo) {
-            register_face(storage, mesh, color);
-        }
-    }
-    register_edges(storage, topo, solid_data.outer_shell, edge_color);
 }
 
 /// Gets the face with the highest component in the given axis direction.
@@ -97,7 +63,7 @@ pub fn register(storage: &MeshStorage) {
     let spacing = 14.0;
     let edge_color = Color::rgb(60, 60, 60);
 
-    // Case 1: Shell with top removed — rendered as full solid
+    // Case 1: Shell with top removed (thickness=0.5)
     {
         let bx = 0.0;
         let by = 0.0;
@@ -109,15 +75,14 @@ pub fn register(storage: &MeshStorage) {
                 .execute(&mut topo)
         {
             if let Some(top) = get_face_by_normal(&topo, solid, |n| n.z) {
-                if let Ok(result) = Shell::new(solid, 1.5, vec![top]).execute(&mut topo) {
+                if let Ok(result) = Shell::new(solid, 0.5, vec![top]).execute(&mut topo) {
                     render_solid(storage, &topo, result, GREEN, edge_color);
                 }
             }
         }
     }
 
-    // Case 2: Shell with top removed — faces colored by type
-    // Outer=green, Inner=red, Side=blue
+    // Case 2: Shell with side (+x) removed (thickness=0.5)
     {
         let bx = spacing;
         let by = 0.0;
@@ -128,20 +93,15 @@ pub fn register(storage: &MeshStorage) {
             MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 4.0, by + 4.0, 4.0))
                 .execute(&mut topo)
         {
-            if let Some(top) = get_face_by_normal(&topo, solid, |n| n.z) {
-                // 5 kept faces (6 - 1 removed)
-                if let Ok(result) = Shell::new(solid, 1.5, vec![top]).execute(&mut topo) {
-                    render_shell_faces(
-                        storage, &topo, result,
-                        GREEN, RED, BLUE,
-                        5, edge_color,
-                    );
+            if let Some(side) = get_face_by_normal(&topo, solid, |n| n.x) {
+                if let Ok(result) = Shell::new(solid, 0.5, vec![side]).execute(&mut topo) {
+                    render_solid(storage, &topo, result, BLUE, edge_color);
                 }
             }
         }
     }
 
-    // Case 3: Shell with side removed — faces colored by type
+    // Case 3: Shell with thick walls (thickness=1.5, 6x6x6 box, top removed)
     {
         let bx = spacing * 2.0;
         let by = 0.0;
@@ -149,16 +109,12 @@ pub fn register(storage: &MeshStorage) {
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =
-            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 4.0, by + 4.0, 4.0))
+            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 6.0, by + 6.0, 6.0))
                 .execute(&mut topo)
         {
-            if let Some(side) = get_face_by_normal(&topo, solid, |n| n.x) {
-                if let Ok(result) = Shell::new(solid, 1.5, vec![side]).execute(&mut topo) {
-                    render_shell_faces(
-                        storage, &topo, result,
-                        GREEN, RED, BLUE,
-                        5, edge_color,
-                    );
+            if let Some(top) = get_face_by_normal(&topo, solid, |n| n.z) {
+                if let Ok(result) = Shell::new(solid, 1.5, vec![top]).execute(&mut topo) {
+                    render_solid(storage, &topo, result, RED, edge_color);
                 }
             }
         }

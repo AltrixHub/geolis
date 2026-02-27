@@ -51,7 +51,17 @@ pub fn assemble_result(
             frag.boundary.clone()
         };
 
-        let face_id = create_face_from_polygon(store, &boundary, &mut merger)?;
+        let inner_boundaries: Vec<Vec<Point3>> = if decision == KeepDecision::KeepFlipped {
+            frag.inner_boundaries
+                .iter()
+                .map(|ib| ib.iter().rev().copied().collect())
+                .collect()
+        } else {
+            frag.inner_boundaries.clone()
+        };
+
+        let face_id =
+            create_face_from_polygon(store, &boundary, &inner_boundaries, &mut merger)?;
         all_faces.push(face_id);
     }
 
@@ -65,10 +75,11 @@ pub fn assemble_result(
     MakeSolid::new(shell_id, vec![]).execute(store)
 }
 
-/// Creates a face from a polygon boundary, reusing merged vertices.
+/// Creates a face from a polygon boundary with optional inner boundaries, reusing merged vertices.
 fn create_face_from_polygon(
     store: &mut TopologyStore,
     boundary: &[Point3],
+    inner_boundaries: &[Vec<Point3>],
     merger: &mut VertexMerger,
 ) -> Result<FaceId> {
     let n = boundary.len();
@@ -84,7 +95,7 @@ fn create_face_from_polygon(
         .map(|p| merger.get_or_create(store, p))
         .collect();
 
-    // Create edges and oriented edges for the wire
+    // Create edges and oriented edges for the outer wire
     let mut oriented_edges = Vec::with_capacity(n);
     for i in 0..n {
         let j = (i + 1) % n;
@@ -97,14 +108,42 @@ fn create_face_from_polygon(
         oriented_edges.push(OrientedEdge::new(edge_id, true));
     }
 
-    // Create closed wire
+    // Create closed outer wire
     let wire_id = store.add_wire(WireData {
         edges: oriented_edges,
         is_closed: true,
     });
 
+    // Create inner wires
+    let mut inner_wire_ids = Vec::with_capacity(inner_boundaries.len());
+    for inner in inner_boundaries {
+        let m = inner.len();
+        if m < 3 {
+            continue;
+        }
+
+        let inner_vids: Vec<VertexId> = inner
+            .iter()
+            .map(|p| merger.get_or_create(store, p))
+            .collect();
+
+        let mut inner_edges = Vec::with_capacity(m);
+        for i in 0..m {
+            let j = (i + 1) % m;
+            let edge_id =
+                create_line_edge(store, inner_vids[i], inner_vids[j], inner[i], inner[j])?;
+            inner_edges.push(OrientedEdge::new(edge_id, true));
+        }
+
+        let inner_wire_id = store.add_wire(WireData {
+            edges: inner_edges,
+            is_closed: true,
+        });
+        inner_wire_ids.push(inner_wire_id);
+    }
+
     // Create face via MakeFace
-    MakeFace::new(wire_id, vec![]).execute(store)
+    MakeFace::new(wire_id, inner_wire_ids).execute(store)
 }
 
 /// Creates a line edge between two vertices.
@@ -196,6 +235,7 @@ mod tests {
         let plane = Plane::from_normal(p(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
         let frag = FaceFragment {
             boundary,
+            inner_boundaries: vec![],
             plane,
             same_sense: true,
             source_face: crate::topology::FaceId::default(),
@@ -271,6 +311,7 @@ mod tests {
                         p(3.0, 3.0, 0.0),
                         p(2.0, 3.0, 0.0),
                     ],
+                    inner_boundaries: vec![],
                     plane: Plane::from_normal(p(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0))
                         .unwrap(),
                     same_sense: true,

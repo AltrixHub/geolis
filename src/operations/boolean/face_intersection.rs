@@ -107,6 +107,26 @@ pub(crate) fn collect_face_polygon(
     Ok(polygon)
 }
 
+/// Collects the inner wire polygons (holes) of a face.
+pub(crate) fn collect_inner_wire_polygons(
+    store: &TopologyStore,
+    face_id: FaceId,
+) -> Result<Vec<Vec<Point3>>> {
+    let face = store.face(face_id)?;
+    let mut result = Vec::with_capacity(face.inner_wires.len());
+    for &wire_id in &face.inner_wires {
+        let wire = store.wire(wire_id)?;
+        let mut polygon = Vec::with_capacity(wire.edges.len());
+        for oe in &wire.edges {
+            let edge = store.edge(oe.edge)?;
+            let vid = if oe.forward { edge.start } else { edge.end };
+            polygon.push(store.vertex(vid)?.point);
+        }
+        result.push(polygon);
+    }
+    Ok(result)
+}
+
 /// Computes the min/max projection of a set of points onto a line.
 fn line_extent(origin: &Point3, dir: &crate::math::Vector3, points: &[&Point3]) -> (f64, f64) {
     let mut t_min = f64::INFINITY;

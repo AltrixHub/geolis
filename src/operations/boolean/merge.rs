@@ -20,6 +20,8 @@ struct FaceInfo {
     face_id: FaceId,
     /// Directed edges as (`start_point`, `end_point`) pairs.
     edges: Vec<(Point3, Point3)>,
+    /// Directed edges from inner wires, grouped by wire.
+    inner_edges: Vec<Vec<(Point3, Point3)>>,
     /// Effective outward normal of the face.
     normal: Vector3,
     /// Signed distance from origin to the face plane along the normal.
@@ -117,6 +119,25 @@ fn collect_face_info(store: &TopologyStore, face_id: FaceId) -> Result<FaceInfo>
         edges.push((start_pt, end_pt));
     }
 
+    // Collect inner wire edges
+    let mut inner_edges = Vec::with_capacity(face.inner_wires.len());
+    for &inner_wire_id in &face.inner_wires {
+        let inner_wire = store.wire(inner_wire_id)?;
+        let mut wire_edges = Vec::with_capacity(inner_wire.edges.len());
+        for oe in &inner_wire.edges {
+            let edge = store.edge(oe.edge)?;
+            let (start_vid, end_vid) = if oe.forward {
+                (edge.start, edge.end)
+            } else {
+                (edge.end, edge.start)
+            };
+            let start_pt = store.vertex(start_vid)?.point;
+            let end_pt = store.vertex(end_vid)?.point;
+            wire_edges.push((start_pt, end_pt));
+        }
+        inner_edges.push(wire_edges);
+    }
+
     // Effective normal: if same_sense is false, flip the normal
     let surface_normal = *plane.plane_normal();
     let normal = if face.same_sense {
@@ -131,6 +152,7 @@ fn collect_face_info(store: &TopologyStore, face_id: FaceId) -> Result<FaceInfo>
     Ok(FaceInfo {
         face_id,
         edges,
+        inner_edges,
         normal,
         plane_dist,
     })
@@ -193,14 +215,23 @@ fn find_connected_components(group: &[usize], face_infos: &[FaceInfo]) -> Vec<Ve
             let key = EdgeKey::new(start, end);
             edge_to_face.entry(key).or_default().push(local_idx);
         }
+        for inner_wire_edges in &face_infos[global_idx].inner_edges {
+            for (start, end) in inner_wire_edges {
+                let key = EdgeKey::new(start, end);
+                edge_to_face.entry(key).or_default().push(local_idx);
+            }
+        }
     }
 
     // Build adjacency graph: face i is adjacent to face j if they share a reversed edge
     let mut adj: Vec<HashSet<usize>> = vec![HashSet::new(); n];
     for (local_idx, &global_idx) in group.iter().enumerate() {
-        for (start, end) in &face_infos[global_idx].edges {
+        let info = &face_infos[global_idx];
+        let outer_iter = info.edges.iter();
+        let inner_iter = info.inner_edges.iter().flat_map(|w| w.iter());
+        for &(start, end) in outer_iter.chain(inner_iter) {
             // Look for the reverse edge (end→start)
-            let reverse_key = EdgeKey::new(end, start);
+            let reverse_key = EdgeKey::new(&end, &start);
             if let Some(neighbors) = edge_to_face.get(&reverse_key) {
                 for &neighbor in neighbors {
                     if neighbor != local_idx {
@@ -256,6 +287,13 @@ fn merge_component(
             let key = EdgeKey::new(&start, &end);
             *edge_count.entry(key).or_insert(0) += 1;
             edge_points.entry(key).or_insert((start, end));
+        }
+        for inner_wire_edges in &face_infos[idx].inner_edges {
+            for &(start, end) in inner_wire_edges {
+                let key = EdgeKey::new(&start, &end);
+                *edge_count.entry(key).or_insert(0) += 1;
+                edge_points.entry(key).or_insert((start, end));
+            }
         }
     }
 

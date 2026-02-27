@@ -284,7 +284,7 @@ fn get_solid_vertex(store: &TopologyStore, solid_id: SolidId) -> Result<Point3> 
 
 /// Creates a copy of a solid by duplicating all its topology.
 fn copy_solid(store: &mut TopologyStore, solid_id: SolidId) -> Result<SolidId> {
-    use super::face_intersection::collect_face_polygon;
+    use super::face_intersection::{collect_face_polygon, collect_inner_wire_polygons};
     use super::split::SolidSource;
 
     let faces = collect_solid_faces(store, solid_id)?;
@@ -292,6 +292,7 @@ fn copy_solid(store: &mut TopologyStore, solid_id: SolidId) -> Result<SolidId> {
 
     for face_id in &faces {
         let polygon = collect_face_polygon(store, *face_id)?;
+        let inner_polygons = collect_inner_wire_polygons(store, *face_id)?;
         let face = store.face(*face_id)?;
         let FaceSurface::Plane(ref plane) = face.surface else {
             todo!("Boolean operations for non-planar faces")
@@ -300,6 +301,7 @@ fn copy_solid(store: &mut TopologyStore, solid_id: SolidId) -> Result<SolidId> {
         fragments.push((
             FaceFragment {
                 boundary: polygon,
+                inner_boundaries: inner_polygons,
                 plane: plane.clone(),
                 same_sense: face.same_sense,
                 source_face: *face_id,

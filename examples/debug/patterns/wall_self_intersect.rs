@@ -39,51 +39,6 @@ fn min_distance_to_centerlines(px: f64, py: f64, centerlines: &[Pline]) -> f64 {
     min_d
 }
 
-fn segment_segment_intersection(
-    ax: f64, ay: f64, bx: f64, by: f64,
-    cx: f64, cy: f64, dx: f64, dy: f64,
-) -> Option<(f64, f64)> {
-    let d1x = bx - ax;
-    let d1y = by - ay;
-    let d2x = dx - cx;
-    let d2y = dy - cy;
-    let cross = d1x * d2y - d1y * d2x;
-    if cross.abs() < 1e-12 {
-        return None;
-    }
-    let d3x = cx - ax;
-    let d3y = cy - ay;
-    let t = (d3x * d2y - d3y * d2x) / cross;
-    let u = (d3x * d1y - d3y * d1x) / cross;
-    let eps = 1e-9;
-    if t > eps && t < 1.0 - eps && u > eps && u < 1.0 - eps {
-        Some((t, u))
-    } else {
-        None
-    }
-}
-
-fn find_self_intersection(vertices: &[PlineVertex]) -> Option<(usize, usize, f64, f64)> {
-    let n = vertices.len();
-    for i in 0..n {
-        let i_next = (i + 1) % n;
-        let (ax, ay) = (vertices[i].x, vertices[i].y);
-        let (bx, by) = (vertices[i_next].x, vertices[i_next].y);
-        for j in (i + 2)..n {
-            let j_next = (j + 1) % n;
-            if j_next == i {
-                continue;
-            }
-            let (cx, cy) = (vertices[j].x, vertices[j].y);
-            let (dx, dy) = (vertices[j_next].x, vertices[j_next].y);
-            if let Some((t, _)) = segment_segment_intersection(ax, ay, bx, by, cx, cy, dx, dy) {
-                return Some((i, j, ax + t * (bx - ax), ay + t * (by - ay)));
-            }
-        }
-    }
-    None
-}
-
 fn find_clip_point(
     inside_x: f64, inside_y: f64,
     outside_x: f64, outside_y: f64,
@@ -144,6 +99,51 @@ fn clip_miter_vertices(
     *verts = result;
 }
 
+fn segment_segment_intersection(
+    ax: f64, ay: f64, bx: f64, by: f64,
+    cx: f64, cy: f64, dx: f64, dy: f64,
+) -> Option<(f64, f64)> {
+    let d1x = bx - ax;
+    let d1y = by - ay;
+    let d2x = dx - cx;
+    let d2y = dy - cy;
+    let cross = d1x * d2y - d1y * d2x;
+    if cross.abs() < 1e-12 {
+        return None;
+    }
+    let d3x = cx - ax;
+    let d3y = cy - ay;
+    let t = (d3x * d2y - d3y * d2x) / cross;
+    let u = (d3x * d1y - d3y * d1x) / cross;
+    let eps = 1e-9;
+    if t > eps && t < 1.0 - eps && u > eps && u < 1.0 - eps {
+        Some((t, u))
+    } else {
+        None
+    }
+}
+
+fn find_self_intersection(vertices: &[PlineVertex]) -> Option<(usize, usize, f64, f64)> {
+    let n = vertices.len();
+    for i in 0..n {
+        let i_next = (i + 1) % n;
+        let (ax, ay) = (vertices[i].x, vertices[i].y);
+        let (bx, by) = (vertices[i_next].x, vertices[i_next].y);
+        for j in (i + 2)..n {
+            let j_next = (j + 1) % n;
+            if j_next == i {
+                continue;
+            }
+            let (cx, cy) = (vertices[j].x, vertices[j].y);
+            let (dx, dy) = (vertices[j_next].x, vertices[j_next].y);
+            if let Some((t, _)) = segment_segment_intersection(ax, ay, bx, by, cx, cy, dx, dy) {
+                return Some((i, j, ax + t * (bx - ax), ay + t * (by - ay)));
+            }
+        }
+    }
+    None
+}
+
 fn polygon_area_pv(vertices: &[PlineVertex]) -> f64 {
     let n = vertices.len();
     if n < 3 {
@@ -158,12 +158,14 @@ fn polygon_area_pv(vertices: &[PlineVertex]) -> f64 {
     area / 2.0
 }
 
-fn resolve_boundary_self_intersections(
+/// Resolve to a single outer-contour polygon per boundary (ground truth).
+/// Miter clip → split at self-intersection → keep largest area loop.
+fn resolve_outer_contour(
     boundaries: &mut Vec<Pline>,
     centerlines: &[Pline],
     half_thickness: f64,
 ) {
-    let max_allowed = half_thickness * 2.0;
+    let max_allowed = half_thickness * 4.0;
     let mut result: Vec<Pline> = Vec::new();
 
     for boundary in boundaries.drain(..) {
@@ -172,14 +174,12 @@ fn resolve_boundary_self_intersections(
             continue;
         }
 
-        // Phase 1: Clip miter vertices → bevel
         let mut verts = boundary.vertices.clone();
         clip_miter_vertices(&mut verts, centerlines, max_allowed);
         if verts.len() < 3 {
             continue;
         }
 
-        // Phase 2: Trim self-intersections — keep outer contour only
         for _iter in 0..100 {
             if verts.len() < 4 {
                 break;
@@ -198,7 +198,6 @@ fn resolve_boundary_self_intersections(
                     for k in 0..=edge_i {
                         loop_b.push(PlineVertex::line(verts[k].x, verts[k].y));
                     }
-                    // Keep outer contour (larger area), discard inner fold
                     let area_a = polygon_area_pv(&loop_a).abs();
                     let area_b = polygon_area_pv(&loop_b).abs();
                     verts = if area_a >= area_b { loop_a } else { loop_b };
@@ -209,6 +208,87 @@ fn resolve_boundary_self_intersections(
 
         if verts.len() >= 3 {
             result.push(Pline { vertices: verts, closed: true });
+        }
+    }
+
+    *boundaries = result;
+}
+
+/// Resolve keeping both loops (algorithm output for wall_group.rs).
+/// Miter clip → split at self-intersection → keep both loops.
+fn resolve_keep_both(
+    boundaries: &mut Vec<Pline>,
+    centerlines: &[Pline],
+    half_thickness: f64,
+) {
+    let max_allowed = half_thickness * 4.0;
+    let mut result: Vec<Pline> = Vec::new();
+
+    for boundary in boundaries.drain(..) {
+        if !boundary.closed || boundary.vertices.len() < 4 {
+            result.push(boundary);
+            continue;
+        }
+
+        let mut verts = boundary.vertices.clone();
+        clip_miter_vertices(&mut verts, centerlines, max_allowed);
+        if verts.len() < 3 {
+            continue;
+        }
+
+        let mut pending = vec![verts];
+
+        for _iter in 0..100 {
+            let mut next_pending: Vec<Vec<PlineVertex>> = Vec::new();
+            let mut made_progress = false;
+
+            for verts in pending.drain(..) {
+                if verts.len() < 4 {
+                    if verts.len() >= 3 {
+                        result.push(Pline { vertices: verts, closed: true });
+                    }
+                    continue;
+                }
+
+                match find_self_intersection(&verts) {
+                    Some((edge_i, edge_j, ix, iy)) => {
+                        let n = verts.len();
+                        let mut loop_a = vec![PlineVertex::line(ix, iy)];
+                        for k in (edge_i + 1)..=edge_j {
+                            loop_a.push(PlineVertex::line(verts[k].x, verts[k].y));
+                        }
+                        let mut loop_b = vec![PlineVertex::line(ix, iy)];
+                        for k in (edge_j + 1)..n {
+                            loop_b.push(PlineVertex::line(verts[k].x, verts[k].y));
+                        }
+                        for k in 0..=edge_i {
+                            loop_b.push(PlineVertex::line(verts[k].x, verts[k].y));
+                        }
+
+                        if loop_a.len() >= 3 {
+                            next_pending.push(loop_a);
+                        }
+                        if loop_b.len() >= 3 {
+                            next_pending.push(loop_b);
+                        }
+                        made_progress = true;
+                    }
+                    None => {
+                        result.push(Pline { vertices: verts, closed: true });
+                    }
+                }
+            }
+
+            pending = next_pending;
+            if !made_progress || pending.is_empty() {
+                break;
+            }
+        }
+
+        for verts in pending {
+            if verts.len() >= 3 {
+                result.push(Pline { vertices: verts, closed: true });
+            }
         }
     }
 
@@ -262,14 +342,6 @@ fn draw_case(
     let thin = StrokeStyle::new(0.03).unwrap_or_else(|_| unreachable!());
     let medium = StrokeStyle::new(0.06).unwrap_or_else(|_| unreachable!());
 
-    // Centreline (gray, thin)
-    let center: Vec<Point3> = pts
-        .iter()
-        .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
-        .collect();
-    register_stroke(storage, &center, thin, false, GRAY);
-
-    // Raw WallOutline2D output (red = before fix)
     let pline = Pline {
         vertices: pts.iter().map(|&(x, y)| PlineVertex::line(x, y)).collect(),
         closed: false,
@@ -280,7 +352,16 @@ fn draw_case(
         .execute()
         .unwrap_or_default();
 
-    // Draw raw boundaries in RED (left side)
+    // LEFT: RED = raw WallOutline2D output (BEFORE any processing)
+    // Shows self-intersecting boundaries — the problem we're fixing.
+
+    // Centreline (gray, thin)
+    let center: Vec<Point3> = pts
+        .iter()
+        .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
+        .collect();
+    register_stroke(storage, &center, thin, false, GRAY);
+
     for ol in &raw_boundaries {
         let p: Vec<Point3> = ol
             .vertices
@@ -290,12 +371,11 @@ fn draw_case(
         register_stroke(storage, &p, medium, ol.closed, RED);
     }
 
-    // Draw resolved boundaries in GREEN (right side, offset by 15)
+    // RIGHT: GREEN = algorithm output (keep both loops)
     let mut resolved = raw_boundaries.clone();
-    resolve_boundary_self_intersections(&mut resolved, &centerlines, half_w);
+    resolve_keep_both(&mut resolved, &centerlines, half_w);
 
     let rx = bx + 15.0;
-    // Centreline again (gray)
     let center2: Vec<Point3> = pts
         .iter()
         .map(|&(x, y)| Point3::new(x + rx, y + by, 0.0))
@@ -320,12 +400,12 @@ fn draw_case(
 
 /// Register `wall_self_intersect` pattern meshes.
 ///
-/// Left column: RED = raw WallOutline2D output (may self-intersect)
-/// Right column: GREEN = after resolve_boundary_self_intersections
+/// Left column: RED = raw WallOutline2D output (BEFORE, may self-intersect)
+/// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
 pub fn register(storage: &MeshStorage) {
     // Labels for columns
-    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED);      // "BEFORE"
-    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN);   // "AFTER"
+    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED);      // BEFORE
+    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN);   // AFTER
 
     let cases: Vec<(&str, Vec<(f64, f64)>, f64)> = vec![
         ("1", v_slight_overlap(), 0.15),       // 3pt V, slight overlap, thin
