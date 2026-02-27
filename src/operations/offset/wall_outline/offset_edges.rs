@@ -10,23 +10,25 @@ pub struct OffsetEdge {
     pub end: (f64, f64),
 }
 
-/// Builds offset edges from a centerline network at the given half-width.
+/// Builds offset edges from a centerline network at the given widths.
 ///
-/// For each sub-segment, generates left and right offset lines, then resolves
-/// endpoints at junctions (offset line intersections) and dead ends (flat caps).
+/// `left_width` is the offset distance to the left of the segment direction;
+/// `right_width` is the offset distance to the right.  Pass equal values for a
+/// centred wall; pass `(0, thickness)` or `(thickness, 0)` for a wall that
+/// extends only to one side of the baseline.
 ///
 /// Edge orientation convention (produces CW outer boundary):
 /// - Right offset edges go FORWARD (segment start to end direction)
 /// - Left offset edges go BACKWARD (segment end to start direction)
 /// - Start caps: left start to right start
 /// - End caps: right end to left end
-pub fn build(network: &Network, half_width: f64) -> Vec<OffsetEdge> {
+pub fn build(network: &Network, left_width: f64, right_width: f64) -> Vec<OffsetEdge> {
     let sub_segs = &network.sub_segments;
 
     // Precompute offset line data for each sub-segment.
     let offset_data: Vec<OffsetLineData> = sub_segs
         .iter()
-        .map(|ss| compute_offset_lines(ss, half_width))
+        .map(|ss| compute_offset_lines(ss, left_width, right_width))
         .collect();
 
     // Resolve endpoint positions at junctions.
@@ -93,7 +95,7 @@ struct ResolvedEndpoints {
     right_end: (f64, f64),
 }
 
-fn compute_offset_lines(ss: &SubSegment, half_width: f64) -> OffsetLineData {
+fn compute_offset_lines(ss: &SubSegment, left_width: f64, right_width: f64) -> OffsetLineData {
     let dx = ss.end.0 - ss.start.0;
     let dy = ss.end.1 - ss.start.1;
     let len = (dx * dx + dy * dy).sqrt();
@@ -107,20 +109,20 @@ fn compute_offset_lines(ss: &SubSegment, half_width: f64) -> OffsetLineData {
     let ln = (-ny, nx);
 
     let left_start = (
-        ss.start.0 + half_width * ln.0,
-        ss.start.1 + half_width * ln.1,
+        ss.start.0 + left_width * ln.0,
+        ss.start.1 + left_width * ln.1,
     );
     let left_end = (
-        ss.end.0 + half_width * ln.0,
-        ss.end.1 + half_width * ln.1,
+        ss.end.0 + left_width * ln.0,
+        ss.end.1 + left_width * ln.1,
     );
     let right_start = (
-        ss.start.0 - half_width * ln.0,
-        ss.start.1 - half_width * ln.1,
+        ss.start.0 - right_width * ln.0,
+        ss.start.1 - right_width * ln.1,
     );
     let right_end = (
-        ss.end.0 - half_width * ln.0,
-        ss.end.1 - half_width * ln.1,
+        ss.end.0 - right_width * ln.0,
+        ss.end.1 - right_width * ln.1,
     );
 
     OffsetLineData {
@@ -276,7 +278,7 @@ mod tests {
             },
         ];
         let net = junction::build_network(&segments);
-        let edges = build(&net, 0.3);
+        let edges = build(&net, 0.3, 0.3);
         // Should produce offset edges for all sub-segments + caps.
         assert!(!edges.is_empty(), "should produce offset edges");
     }
@@ -288,7 +290,7 @@ mod tests {
             end: (5.0, 0.0),
         }];
         let net = junction::build_network(&segments);
-        let edges = build(&net, 0.3);
+        let edges = build(&net, 0.3, 0.3);
         // 1 sub-seg → 2 side edges + 2 cap edges = 4.
         assert_eq!(edges.len(), 4, "expected 4 edges, got {}", edges.len());
     }
@@ -303,7 +305,7 @@ mod tests {
             UniqueSegment { start: (0.0, 10.0), end: (0.0, 0.0) },
         ];
         let net = junction::build_network(&segments);
-        let edges = build(&net, 0.3);
+        let edges = build(&net, 0.3, 0.3);
         // 4 sub-segments × 2 side edges = 8. No cap edges (no dead ends).
         assert_eq!(edges.len(), 8, "expected 8 edges (no caps), got {}", edges.len());
     }
@@ -315,7 +317,7 @@ mod tests {
             end: (5.0, 0.0),
         }];
         let net = junction::build_network(&segments);
-        let edges = build(&net, 0.3);
+        let edges = build(&net, 0.3, 0.3);
 
         // Verify edge coordinates for a horizontal segment at y=0, half_width=0.3.
         // Left offset at y=0.3, right offset at y=-0.3.

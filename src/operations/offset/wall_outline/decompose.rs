@@ -44,6 +44,9 @@ fn merge_to_unique_segments(raw_segments: &[((f64, f64), (f64, f64))]) -> Vec<Un
         let (t_a, t_b) = project_extent(&key, a, b);
         let t_min = t_a.min(t_b);
         let t_max = t_a.max(t_b);
+        // The original segment goes forward (matches canonical direction) when
+        // the projected parameter of `a` is less than that of `b`.
+        let is_forward = t_a <= t_b;
 
         let mut merged = false;
         for g in &mut groups {
@@ -57,6 +60,7 @@ fn merge_to_unique_segments(raw_segments: &[((f64, f64), (f64, f64))]) -> Vec<Un
             groups.push(SupportingLine {
                 key,
                 intervals: vec![(t_min, t_max)],
+                first_is_forward: is_forward,
             });
         }
     }
@@ -65,8 +69,15 @@ fn merge_to_unique_segments(raw_segments: &[((f64, f64), (f64, f64))]) -> Vec<Un
     for g in &mut groups {
         let merged = merge_intervals(&mut g.intervals);
         for &(t_min, t_max) in &merged {
-            let start = unproject(&g.key, t_min);
-            let end = unproject(&g.key, t_max);
+            // Preserve the original traversal direction of the first segment
+            // on this supporting line.  For asymmetric offsets the left/right
+            // normal assignment depends on which way the segment points, so
+            // reversing the segment would swap which side the wall extends to.
+            let (start, end) = if g.first_is_forward {
+                (unproject(&g.key, t_min), unproject(&g.key, t_max))
+            } else {
+                (unproject(&g.key, t_max), unproject(&g.key, t_min))
+            };
             result.push(UniqueSegment { start, end });
         }
     }
@@ -100,6 +111,14 @@ struct LineKey {
 struct SupportingLine {
     key: LineKey,
     intervals: Vec<(f64, f64)>,
+    /// Whether the first segment added to this group has the same direction as
+    /// the canonical key direction (i.e., t_a < t_b for that segment).
+    ///
+    /// Used to reconstruct the original traversal direction of each unique
+    /// segment when unprojecting, which is critical for asymmetric offsets
+    /// (`left_width ≠ right_width`): reversing a segment swaps its left/right
+    /// normals and therefore the side the wall material extends to.
+    first_is_forward: bool,
 }
 
 /// Computes a canonical supporting line key for a segment.

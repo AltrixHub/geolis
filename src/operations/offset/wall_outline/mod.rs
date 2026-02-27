@@ -10,20 +10,37 @@ use crate::geometry::pline::Pline;
 ///
 /// Given a collection of `Pline`s representing wall centerlines (potentially with
 /// self-intersecting paths), produces closed outline polygons at the
-/// specified half-width distance. When multiple polylines are provided,
+/// specified distances. When multiple polylines are provided,
 /// their segments are merged into a single network so that intersections
 /// between separate walls are properly trimmed.
+///
+/// The wall material spans from `left_width` to the left of each segment to
+/// `right_width` to the right (using the segment's forward direction).
+/// Use [`WallOutline2D::new`] for a centred wall (`left == right == half_thickness`)
+/// or [`WallOutline2D::new_asymmetric`] for a wall aligned to one side of the baseline.
 #[derive(Debug)]
 pub struct WallOutline2D {
     plines: Vec<Pline>,
-    half_width: f64,
+    left_width: f64,
+    right_width: f64,
 }
 
 impl WallOutline2D {
-    /// Creates a new wall outline operation from one or more centerline polylines.
+    /// Creates a centred wall outline (equal offset on both sides of the baseline).
     #[must_use]
     pub fn new(plines: Vec<Pline>, half_width: f64) -> Self {
-        Self { plines, half_width }
+        Self { plines, left_width: half_width, right_width: half_width }
+    }
+
+    /// Creates a wall outline with independent left and right offsets.
+    ///
+    /// - `left_width = 0, right_width = thickness`: baseline is the left (inner) boundary;
+    ///   wall material extends entirely to the right.
+    /// - `left_width = thickness, right_width = 0`: baseline is the right (outer) boundary;
+    ///   wall material extends entirely to the left.
+    #[must_use]
+    pub fn new_asymmetric(plines: Vec<Pline>, left_width: f64, right_width: f64) -> Self {
+        Self { plines, left_width, right_width }
     }
 
     /// Executes the wall outline generation.
@@ -44,7 +61,9 @@ impl WallOutline2D {
             .into());
         }
 
-        if self.half_width.abs() < crate::math::TOLERANCE {
+        if self.left_width.abs() < crate::math::TOLERANCE
+            && self.right_width.abs() < crate::math::TOLERANCE
+        {
             return Ok(self.plines.clone());
         }
 
@@ -60,7 +79,7 @@ impl WallOutline2D {
         let network = junction::build_network(&segments);
 
         // Step 3: Generate offset edges with junction resolution.
-        let edges = offset_edges::build(&network, self.half_width);
+        let edges = offset_edges::build(&network, self.left_width, self.right_width);
 
         // Step 4: Trace outer boundaries.
         let outlines = trace::trace_boundaries(&edges);
