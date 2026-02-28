@@ -2463,7 +2463,6 @@ name = "revion_app"
 version = "0.1.0"
 dependencies = [
  "derive-new",
- "revion_macro",
  "revion_renderer",
  "revion_ui",
  "thiserror 2.0.18",
