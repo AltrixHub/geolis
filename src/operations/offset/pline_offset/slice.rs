@@ -8,8 +8,10 @@ use super::self_intersect::Intersection;
 pub struct PlineSlice {
     pub vertices: Vec<PlineVertex>,
     /// Index of the starting intersection in the original intersection list.
+    #[allow(dead_code)]
     pub start_idx: usize,
     /// Index of the ending intersection in the original intersection list.
+    #[allow(dead_code)]
     pub end_idx: usize,
 }
 
