@@ -17,6 +17,7 @@ pub struct Intersection {
     /// Parameter on segment j (0..1).
     pub t_j: f64,
     /// Intersection point.
+    #[allow(dead_code)]
     pub point: (f64, f64),
 }
 

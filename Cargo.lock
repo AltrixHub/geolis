@@ -808,7 +808,6 @@ dependencies = [
  "nalgebra",
  "revion_app",
  "revion_core",
- "revion_macro",
  "revion_ui",
  "slotmap",
  "spade",
@@ -2477,16 +2476,6 @@ dependencies = [
  "lyon",
  "ulid",
  "winit",
-]
-
-[[package]]
-name = "revion_macro"
-version = "0.1.0"
-dependencies = [
- "derive-new",
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
