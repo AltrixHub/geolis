@@ -47,7 +47,11 @@ impl WireOffset2D {
         if !is_closed {
             if let Some(last_oe) = edges.last() {
                 let edge = store.edge(last_oe.edge)?;
-                let vid = if last_oe.forward { edge.end } else { edge.start };
+                let vid = if last_oe.forward {
+                    edge.end
+                } else {
+                    edge.start
+                };
                 points.push(store.vertex(vid)?.point);
             }
         }
@@ -59,9 +63,7 @@ impl WireOffset2D {
         let results = PlineOffset2D::new(pline, self.distance).execute()?;
 
         if results.is_empty() {
-            return Err(
-                OperationError::Failed("wire offset collapsed entirely".into()).into(),
-            );
+            return Err(OperationError::Failed("wire offset collapsed entirely".into()).into());
         }
 
         // Convert first result back to wire
@@ -81,9 +83,7 @@ impl WireOffset2D {
         }
 
         if result_points.len() < 2 {
-            return Err(
-                OperationError::Failed("offset result has too few points".into()).into(),
-            );
+            return Err(OperationError::Failed("offset result has too few points".into()).into());
         }
 
         MakeWire::new(result_points, is_closed).execute(store)
@@ -112,9 +112,7 @@ mod tests {
         .execute(&mut store)
         .unwrap();
 
-        let result = WireOffset2D::new(wire, 1.0)
-            .execute(&mut store)
-            .unwrap();
+        let result = WireOffset2D::new(wire, 1.0).execute(&mut store).unwrap();
 
         let result_wire = store.wire(result).unwrap();
         assert!(result_wire.is_closed);

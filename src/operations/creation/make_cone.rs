@@ -52,20 +52,17 @@ impl MakeCone {
             );
         }
         if self.top_radius < 0.0 {
-            return Err(
-                OperationError::InvalidInput("cone top radius must be non-negative".into()).into(),
-            );
+            return Err(OperationError::InvalidInput(
+                "cone top radius must be non-negative".into(),
+            )
+            .into());
         }
         if self.height.abs() < TOLERANCE {
-            return Err(
-                OperationError::InvalidInput("cone height must be non-zero".into()).into(),
-            );
+            return Err(OperationError::InvalidInput("cone height must be non-zero".into()).into());
         }
         let axis_len = self.axis.norm();
         if axis_len < TOLERANCE {
-            return Err(
-                OperationError::InvalidInput("cone axis must be non-zero".into()).into(),
-            );
+            return Err(OperationError::InvalidInput("cone axis must be non-zero".into()).into());
         }
         let axis = self.axis / axis_len;
 
@@ -80,9 +77,9 @@ impl MakeCone {
             // Pointed cone: triangle profile
             // bottom-outer -> top-apex (on axis) -> bottom-center (on axis)
             let profile = vec![
-                self.center + ref_dir * rb,          // bottom outer edge
-                self.center + axis * h,               // top apex (on axis)
-                self.center,                           // bottom center (on axis)
+                self.center + ref_dir * rb, // bottom outer edge
+                self.center + axis * h,     // top apex (on axis)
+                self.center,                // bottom center (on axis)
             ];
 
             let wire = MakeWire::new(profile, true).execute(store)?;
@@ -92,10 +89,10 @@ impl MakeCone {
             // Truncated cone: trapezoid profile
             // bottom-outer (rb, 0) -> top-outer (rt, h) -> top-center (0, h) -> bottom-center (0, 0)
             let profile = vec![
-                self.center + ref_dir * rb,              // bottom outer
-                self.center + ref_dir * rt + axis * h,   // top outer
-                self.center + axis * h,                   // top center (on axis)
-                self.center,                               // bottom center (on axis)
+                self.center + ref_dir * rb,            // bottom outer
+                self.center + ref_dir * rt + axis * h, // top outer
+                self.center + axis * h,                // top center (on axis)
+                self.center,                           // bottom center (on axis)
             ];
 
             let wire = MakeWire::new(profile, true).execute(store)?;
@@ -225,16 +222,16 @@ mod tests {
     #[test]
     fn zero_bottom_radius_fails() {
         let mut store = TopologyStore::new();
-        let result = MakeCone::new(p(0.0, 0.0, 0.0), 0.0, 0.0, Vector3::z(), 5.0)
-            .execute(&mut store);
+        let result =
+            MakeCone::new(p(0.0, 0.0, 0.0), 0.0, 0.0, Vector3::z(), 5.0).execute(&mut store);
         assert!(result.is_err());
     }
 
     #[test]
     fn zero_height_fails() {
         let mut store = TopologyStore::new();
-        let result = MakeCone::new(p(0.0, 0.0, 0.0), 3.0, 0.0, Vector3::z(), 0.0)
-            .execute(&mut store);
+        let result =
+            MakeCone::new(p(0.0, 0.0, 0.0), 3.0, 0.0, Vector3::z(), 0.0).execute(&mut store);
         assert!(result.is_err());
     }
 }

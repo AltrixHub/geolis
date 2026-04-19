@@ -182,9 +182,7 @@ fn split_polygon_by_line(
         (diff.dot(u_dir), diff.dot(v_dir))
     };
 
-    let unproject = |u: f64, v: f64| -> Point3 {
-        origin + u_dir * u + v_dir * v
-    };
+    let unproject = |u: f64, v: f64| -> Point3 { origin + u_dir * u + v_dir * v };
 
     let poly_uv: Vec<(f64, f64)> = polygon.iter().map(&project).collect();
     let lp0 = project(line_p0);
@@ -305,7 +303,12 @@ mod tests {
         // Horizontal cut at y=2
         let cuts = vec![(p(0.0, 2.0, 0.0), p(4.0, 2.0, 0.0))];
         let fragments = split_face(&store, face, &cuts, SolidSource::A).unwrap();
-        assert_eq!(fragments.len(), 2, "expected 2 fragments, got {}", fragments.len());
+        assert_eq!(
+            fragments.len(),
+            2,
+            "expected 2 fragments, got {}",
+            fragments.len()
+        );
 
         // Both fragments should be rectangles (4 vertices)
         for (i, f) in fragments.iter().enumerate() {
@@ -350,5 +353,147 @@ mod tests {
         let fragments = split_face(&store, face, &[], SolidSource::B).unwrap();
         assert_eq!(fragments[0].source, SolidSource::B);
         assert_eq!(fragments[0].source_face, face);
+    }
+
+    fn make_face_with_hole(store: &mut TopologyStore) -> FaceId {
+        // outer: 10x10, inner: 2x2 hole at center (4..6, 4..6)
+        let outer = MakeWire::new(
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(10.0, 0.0, 0.0),
+                p(10.0, 10.0, 0.0),
+                p(0.0, 10.0, 0.0),
+            ],
+            true,
+        )
+        .execute(store)
+        .unwrap();
+        let inner = MakeWire::new(
+            vec![
+                p(4.0, 4.0, 0.0),
+                p(6.0, 4.0, 0.0),
+                p(6.0, 6.0, 0.0),
+                p(4.0, 6.0, 0.0),
+            ],
+            true,
+        )
+        .execute(store)
+        .unwrap();
+        MakeFace::new(outer, vec![inner]).execute(store).unwrap()
+    }
+
+    #[test]
+    fn split_face_preserves_inner_wire_no_cuts() {
+        let mut store = TopologyStore::new();
+        let face = make_face_with_hole(&mut store);
+        let fragments = split_face(&store, face, &[], SolidSource::A).unwrap();
+        assert_eq!(fragments.len(), 1, "no cuts → 1 fragment");
+        assert_eq!(
+            fragments[0].inner_boundaries.len(),
+            1,
+            "inner wire must be preserved"
+        );
+        assert_eq!(
+            fragments[0].inner_boundaries[0].len(),
+            4,
+            "inner wire has 4 vertices"
+        );
+    }
+
+    #[test]
+    fn split_face_inner_in_one_fragment() {
+        // outer: 10x10, inner: 2x2 hole at bottom-left (1..3, 1..3)
+        // cut at y=5 → hole stays in the lower fragment (y<5), centroid (2,2)
+        let mut store = TopologyStore::new();
+        let outer = MakeWire::new(
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(10.0, 0.0, 0.0),
+                p(10.0, 10.0, 0.0),
+                p(0.0, 10.0, 0.0),
+            ],
+            true,
+        )
+        .execute(&mut store)
+        .unwrap();
+        let inner = MakeWire::new(
+            vec![
+                p(1.0, 1.0, 0.0),
+                p(3.0, 1.0, 0.0),
+                p(3.0, 3.0, 0.0),
+                p(1.0, 3.0, 0.0),
+            ],
+            true,
+        )
+        .execute(&mut store)
+        .unwrap();
+        let face = MakeFace::new(outer, vec![inner])
+            .execute(&mut store)
+            .unwrap();
+        let cuts = vec![(p(0.0, 5.0, 0.0), p(10.0, 5.0, 0.0))];
+        let fragments = split_face(&store, face, &cuts, SolidSource::A).unwrap();
+        assert_eq!(fragments.len(), 2, "cut at y=5 → 2 fragments");
+        let total_inner: usize = fragments.iter().map(|f| f.inner_boundaries.len()).sum();
+        assert_eq!(total_inner, 1, "hole must appear in exactly one fragment");
+        let frag_with_hole = fragments
+            .iter()
+            .find(|f| !f.inner_boundaries.is_empty())
+            .unwrap();
+        let centroid_y: f64 = frag_with_hole.inner_boundaries[0]
+            .iter()
+            .map(|pt| pt.y)
+            .sum::<f64>()
+            / frag_with_hole.inner_boundaries[0].len() as f64;
+        assert!(
+            centroid_y < 5.0,
+            "hole centroid must be in the lower fragment (y<5), got {centroid_y}"
+        );
+    }
+
+    #[test]
+    fn split_face_splits_inner_wire() {
+        // outer: 10x10, inner: 4x6 hole (3..7, 2..8)
+        // cut at y=5 bisects the inner wire → each outer fragment gets one inner fragment
+        let mut store = TopologyStore::new();
+        let outer = MakeWire::new(
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(10.0, 0.0, 0.0),
+                p(10.0, 10.0, 0.0),
+                p(0.0, 10.0, 0.0),
+            ],
+            true,
+        )
+        .execute(&mut store)
+        .unwrap();
+        let inner = MakeWire::new(
+            vec![
+                p(3.0, 2.0, 0.0),
+                p(7.0, 2.0, 0.0),
+                p(7.0, 8.0, 0.0),
+                p(3.0, 8.0, 0.0),
+            ],
+            true,
+        )
+        .execute(&mut store)
+        .unwrap();
+        let face = MakeFace::new(outer, vec![inner])
+            .execute(&mut store)
+            .unwrap();
+        let cuts = vec![(p(0.0, 5.0, 0.0), p(10.0, 5.0, 0.0))];
+        let fragments = split_face(&store, face, &cuts, SolidSource::A).unwrap();
+        assert_eq!(fragments.len(), 2, "cut at y=5 → 2 fragments");
+        let total_inner: usize = fragments.iter().map(|f| f.inner_boundaries.len()).sum();
+        assert_eq!(
+            total_inner, 2,
+            "each fragment should carry one inner fragment"
+        );
+        for (i, frag) in fragments.iter().enumerate() {
+            assert_eq!(
+                frag.inner_boundaries.len(),
+                1,
+                "fragment {i} should have exactly 1 inner boundary"
+            );
+        }
     }
 }

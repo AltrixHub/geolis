@@ -106,7 +106,14 @@ pub fn register(storage: &MeshStorage) {
     // Case labels (one per shape row, to the left of the Miter column)
     let label_y: &[f64] = &[0.5, 4.5, 8.5, 14.0];
     for (i, &ly) in label_y.iter().enumerate() {
-        register_label(storage, -10.0, ly, &format!("{}", i + 1), LABEL_SIZE, LABEL_COLOR);
+        register_label(
+            storage,
+            -10.0,
+            ly,
+            &format!("{}", i + 1),
+            LABEL_SIZE,
+            LABEL_COLOR,
+        );
     }
 
     for &(x_off, join, ref colors) in columns {

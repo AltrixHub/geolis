@@ -114,8 +114,7 @@ fn trace_one_boundary(
         let (si, ei) = edge_list[current_edge];
         boundary.push(points[si]);
 
-        let incoming_angle =
-            (points[ei].1 - points[si].1).atan2(points[ei].0 - points[si].0);
+        let incoming_angle = (points[ei].1 - points[si].1).atan2(points[ei].0 - points[si].0);
 
         let best_next = pick_next_edge(ei, incoming_angle, adjacency, points, used);
 
@@ -157,8 +156,8 @@ fn pick_next_edge(
         if used[next_edge_idx] {
             continue;
         }
-        let next_angle = (points[next_target].1 - points[node].1)
-            .atan2(points[next_target].0 - points[node].0);
+        let next_angle =
+            (points[next_target].1 - points[node].1).atan2(points[next_target].0 - points[node].0);
 
         let mut delta = normalize_angle(next_angle - reverse_angle);
         if delta.abs() < TOLERANCE {
@@ -202,10 +201,22 @@ mod tests {
     #[test]
     fn simple_rectangle_trace() {
         let edges = vec![
-            OffsetEdge { start: (0.0, 0.0), end: (5.0, 0.0) },
-            OffsetEdge { start: (5.0, 0.0), end: (5.0, 3.0) },
-            OffsetEdge { start: (5.0, 3.0), end: (0.0, 3.0) },
-            OffsetEdge { start: (0.0, 3.0), end: (0.0, 0.0) },
+            OffsetEdge {
+                start: (0.0, 0.0),
+                end: (5.0, 0.0),
+            },
+            OffsetEdge {
+                start: (5.0, 0.0),
+                end: (5.0, 3.0),
+            },
+            OffsetEdge {
+                start: (5.0, 3.0),
+                end: (0.0, 3.0),
+            },
+            OffsetEdge {
+                start: (0.0, 3.0),
+                end: (0.0, 0.0),
+            },
         ];
         let result = trace_boundaries(&edges);
         assert_eq!(result.len(), 1, "expected 1 boundary");

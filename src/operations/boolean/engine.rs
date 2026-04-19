@@ -204,10 +204,10 @@ fn handle_disjoint(
         BooleanOp::Union => {
             // For disjoint union, we'd need multi-shell solids.
             // For now, return error — not common in architecture.
-            Err(OperationError::Failed(
-                "union of disjoint solids is not yet supported".into(),
+            Err(
+                OperationError::Failed("union of disjoint solids is not yet supported".into())
+                    .into(),
             )
-            .into())
         }
         BooleanOp::Subtract => {
             // A - B where they don't overlap = A (copy the faces)
@@ -374,7 +374,10 @@ mod tests {
                 !face.inner_wires.is_empty()
             })
             .count();
-        assert_eq!(faces_with_holes, 2, "expected 2 faces with inner wires (holes)");
+        assert_eq!(
+            faces_with_holes, 2,
+            "expected 2 faces with inner wires (holes)"
+        );
     }
 
     #[test]
@@ -440,5 +443,47 @@ mod tests {
 
         let result = boolean_execute(&mut store, a, b, BooleanOp::Intersect);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn subtract_preserves_existing_holes() {
+        let mut store = TopologyStore::new();
+
+        // plate: 10x10x4
+        let plate = make_box(&mut store, 0.0, 0.0, 0.0, 10.0, 10.0, 4.0);
+        // column: 2x2, extends beyond plate in z
+        let column = make_box(&mut store, 4.0, 4.0, -0.5, 2.0, 2.0, 5.0);
+        // plate - column → top and bottom each get a hole
+        let holey = boolean_execute(&mut store, plate, column, BooleanOp::Subtract).unwrap();
+
+        let count_faces_with_holes = |store: &TopologyStore, solid_id| {
+            let solid = store.solid(solid_id).unwrap();
+            let shell = store.shell(solid.outer_shell).unwrap();
+            shell
+                .faces
+                .iter()
+                .filter(|&&fid| {
+                    let face = store.face(fid).unwrap();
+                    !face.inner_wires.is_empty()
+                })
+                .count()
+        };
+
+        let holey_holes = count_faces_with_holes(&store, holey);
+        assert_eq!(
+            holey_holes, 2,
+            "holey should have 2 faces with holes (top + bottom), got {holey_holes}"
+        );
+
+        // corner: cuts off x=7..12 strip, extends beyond plate in z
+        let corner = make_box(&mut store, 7.0, 0.0, -0.5, 5.0, 10.0, 5.0);
+        // holey - corner → right strip removed; left fragments (x=0..7) retain hole (centroid x=5<7)
+        let result = boolean_execute(&mut store, holey, corner, BooleanOp::Subtract).unwrap();
+
+        let result_holes = count_faces_with_holes(&store, result);
+        assert_eq!(
+            result_holes, 2,
+            "result should still have 2 faces with holes, got {result_holes}"
+        );
     }
 }

@@ -322,8 +322,8 @@ mod tests {
         // Arc: full semicircle from angle 0 to π (CCW), center at origin, radius 1.
         let hits = line_arc_intersect_2d(
             -2.0, 0.0, 2.0, 0.0, // segment
-            0.0, 0.0, 1.0,        // center, radius
-            0.0, PI,               // start_angle=0, sweep=π
+            0.0, 0.0, 1.0, // center, radius
+            0.0, PI, // start_angle=0, sweep=π
         );
         // Should hit at (1, 0) (t_arc=0) and (-1, 0) (t_arc=1).
         assert_eq!(hits.len(), 2, "expected 2 hits, got {}", hits.len());
@@ -332,11 +332,7 @@ mod tests {
     #[test]
     fn line_arc_no_crossing() {
         // Segment entirely outside the circle.
-        let hits = line_arc_intersect_2d(
-            3.0, 0.0, 4.0, 0.0,
-            0.0, 0.0, 1.0,
-            0.0, PI,
-        );
+        let hits = line_arc_intersect_2d(3.0, 0.0, 4.0, 0.0, 0.0, 0.0, 1.0, 0.0, PI);
         assert!(hits.is_empty());
     }
 
@@ -346,9 +342,9 @@ mod tests {
         // Arc: upper half, from π/2 to -π/2 (CW through top).
         // Actually use CCW arc from 0 to π which goes through π/2.
         let hits = line_arc_intersect_2d(
-            -1.0, 1.0, 1.0, 1.0,  // horizontal line at y=1
-            0.0, 0.0, 1.0,        // center, radius
-            0.0, PI,               // CCW semicircle
+            -1.0, 1.0, 1.0, 1.0, // horizontal line at y=1
+            0.0, 0.0, 1.0, // center, radius
+            0.0, PI, // CCW semicircle
         );
         // Should hit at (0, 1) which is at angle π/2 (t_arc = 0.5).
         assert_eq!(hits.len(), 1, "hits={hits:?}");
@@ -361,9 +357,15 @@ mod tests {
         // Segment crosses the circle but NOT within the arc's angular range.
         // Arc from 0 to π/2 (first quadrant only).
         let hits = line_arc_intersect_2d(
-            -2.0, 0.0, 2.0, 0.0,  // horizontal at y=0
-            0.0, 0.0, 1.0,
-            PI / 4.0, PI / 4.0,   // arc from 45° to 90° only
+            -2.0,
+            0.0,
+            2.0,
+            0.0, // horizontal at y=0
+            0.0,
+            0.0,
+            1.0,
+            PI / 4.0,
+            PI / 4.0, // arc from 45° to 90° only
         );
         // Circle intersects at x=±1, y=0. Angles 0 and π.
         // Neither is in range [π/4, π/2]. Should return empty.
@@ -380,8 +382,16 @@ mod tests {
         // Arc1: center (0,0), covers [-π, π] (full circle sweep of 2π from -π)
         // Arc2: center (1,0), covers [0, 2π] (full circle)
         let hits = arc_arc_intersect_2d(
-            0.0, 0.0, 1.0, -PI, 2.0 * PI,       // arc1: nearly full circle
-            1.0, 0.0, 1.0, 0.0, 2.0 * PI,        // arc2: nearly full circle
+            0.0,
+            0.0,
+            1.0,
+            -PI,
+            2.0 * PI, // arc1: nearly full circle
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            2.0 * PI, // arc2: nearly full circle
         );
         assert_eq!(hits.len(), 2, "hits={hits:?}");
         // Verify intersection points.
@@ -397,10 +407,7 @@ mod tests {
     #[test]
     fn arc_arc_no_overlap() {
         // Two circles too far apart.
-        let hits = arc_arc_intersect_2d(
-            0.0, 0.0, 1.0, 0.0, PI,
-            5.0, 0.0, 1.0, 0.0, PI,
-        );
+        let hits = arc_arc_intersect_2d(0.0, 0.0, 1.0, 0.0, PI, 5.0, 0.0, 1.0, 0.0, PI);
         assert!(hits.is_empty());
     }
 
@@ -409,8 +416,16 @@ mod tests {
         // Two unit circles tangent externally at (1, 0).
         // Arc1 covers angle 0. Arc2 covers angle π.
         let hits = arc_arc_intersect_2d(
-            0.0, 0.0, 1.0, -PI / 4.0, PI / 2.0,   // covers angle 0
-            2.0, 0.0, 1.0, PI / 2.0, PI,            // covers angle π
+            0.0,
+            0.0,
+            1.0,
+            -PI / 4.0,
+            PI / 2.0, // covers angle 0
+            2.0,
+            0.0,
+            1.0,
+            PI / 2.0,
+            PI, // covers angle π
         );
         assert_eq!(hits.len(), 1, "hits={hits:?}");
         assert!((hits[0].0 .0 - 1.0).abs() < 1e-6);
@@ -421,8 +436,16 @@ mod tests {
     fn arc_arc_miss_outside_range() {
         // Circles overlap, but arcs don't cover the intersection angles.
         let hits = arc_arc_intersect_2d(
-            0.0, 0.0, 1.0, 0.0, PI / 4.0,         // small arc near angle 0
-            1.0, 0.0, 1.0, PI, PI / 4.0,            // small arc near angle π
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            PI / 4.0, // small arc near angle 0
+            1.0,
+            0.0,
+            1.0,
+            PI,
+            PI / 4.0, // small arc near angle π
         );
         // The intersection points of these circles are at y ≈ ±0.866, angles ≈ ±60°.
         // Arc1 only covers [0°, 45°], arc2 only covers [180°, 225°].

@@ -108,6 +108,9 @@ mod tests {
         // Our sphere is a cone approximation, so area will differ
         // The cone approximation has area = pi*r*sqrt(r^2+r^2)*2 = 2*pi*r^2*sqrt(2)
         // ≈ 79.97. We just check it's positive and reasonable.
-        assert!(area > 50.0 && area < 200.0, "unexpected sphere area: {area}");
+        assert!(
+            area > 50.0 && area < 200.0,
+            "unexpected sphere area: {area}"
+        );
     }
 }

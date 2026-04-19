@@ -40,9 +40,7 @@ impl ClosestPointOnCurve {
             EdgeCurve::Line(line) => {
                 closest_point_on_line(line, edge.t_start, edge.t_end, &self.point)
             }
-            EdgeCurve::Arc(arc) => {
-                closest_point_on_arc(arc, edge.t_start, edge.t_end, &self.point)
-            }
+            EdgeCurve::Arc(arc) => closest_point_on_arc(arc, edge.t_start, edge.t_end, &self.point),
             EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                 todo!("ClosestPointOnCurve for Circle/Ellipse")
             }

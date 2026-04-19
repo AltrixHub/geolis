@@ -51,6 +51,8 @@ pub fn classify_point_in_solid(
 
 struct FaceInfo {
     polygon: Vec<Point3>,
+    /// Polygons of inner wires (holes). A ray hit inside a hole is not a face crossing.
+    inner_polygons: Vec<Vec<Point3>>,
     plane: crate::geometry::surface::Plane,
     #[allow(dead_code)]
     outward_normal: Vector3,
@@ -76,6 +78,20 @@ fn collect_face_data(
             polygon.push(vertex.point);
         }
 
+        // Collect inner wire polygons (holes)
+        let mut inner_polygons = Vec::with_capacity(face.inner_wires.len());
+        for &inner_wire_id in &face.inner_wires {
+            let inner_wire = store.wire(inner_wire_id)?;
+            let mut inner_poly = Vec::with_capacity(inner_wire.edges.len());
+            for oe in &inner_wire.edges {
+                let edge = store.edge(oe.edge)?;
+                let vid = if oe.forward { edge.start } else { edge.end };
+                let vertex = store.vertex(vid)?;
+                inner_poly.push(vertex.point);
+            }
+            inner_polygons.push(inner_poly);
+        }
+
         let outward_normal = if face.same_sense {
             *plane.plane_normal()
         } else {
@@ -84,6 +100,7 @@ fn collect_face_data(
 
         faces.push(FaceInfo {
             polygon,
+            inner_polygons,
             plane: plane.clone(),
             outward_normal,
         });
@@ -119,6 +136,15 @@ fn ray_cast_classify(point: &Point3, dir: &Vector3, faces: &[FaceInfo]) -> RayCa
                     continue;
                 }
 
+                // If hit falls inside an inner wire (hole), it doesn't cross the face boundary
+                if face
+                    .inner_polygons
+                    .iter()
+                    .any(|inner| point_in_polygon_3d(&hit, inner, &face.plane))
+                {
+                    continue;
+                }
+
                 // Check if hit point is near a polygon edge (degenerate)
                 if is_near_polygon_edge(&hit, &face.polygon, &face.plane) {
                     return RayCastResult::Degenerate;
@@ -144,7 +170,11 @@ fn ray_cast_classify(point: &Point3, dir: &Vector3, faces: &[FaceInfo]) -> RayCa
 }
 
 /// Check if a point is near any edge of the polygon (within tolerance).
-fn is_near_polygon_edge(point: &Point3, polygon: &[Point3], _plane: &crate::geometry::surface::Plane) -> bool {
+fn is_near_polygon_edge(
+    point: &Point3,
+    polygon: &[Point3],
+    _plane: &crate::geometry::surface::Plane,
+) -> bool {
     let n = polygon.len();
     let edge_tol = TOLERANCE * 100.0;
     for i in 0..n {
@@ -230,8 +260,7 @@ mod tests {
     fn point_just_inside() {
         let mut store = TopologyStore::new();
         let solid = make_box(&mut store);
-        let result =
-            classify_point_in_solid(&p(0.001, 0.001, 0.001), solid, &store).unwrap();
+        let result = classify_point_in_solid(&p(0.001, 0.001, 0.001), solid, &store).unwrap();
         assert_eq!(result, PointClassification::Inside);
     }
 }

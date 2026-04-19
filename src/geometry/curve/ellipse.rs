@@ -173,16 +173,7 @@ mod tests {
     use std::f64::consts::{FRAC_PI_2, TAU};
 
     fn xy_ellipse(a: f64, b: f64) -> Ellipse {
-        Ellipse::new(
-            Point3::origin(),
-            a,
-            b,
-            Vector3::z(),
-            Vector3::x(),
-            0.0,
-            TAU,
-        )
-        .unwrap()
+        Ellipse::new(Point3::origin(), a, b, Vector3::z(), Vector3::x(), 0.0, TAU).unwrap()
     }
 
     fn xy_ellipse_arc(a: f64, b: f64, start: f64, end: f64) -> Ellipse {
@@ -251,7 +242,13 @@ mod tests {
     #[test]
     fn invalid_semi_major() {
         let r = Ellipse::new(
-            Point3::origin(), 0.0, 1.0, Vector3::z(), Vector3::x(), 0.0, TAU,
+            Point3::origin(),
+            0.0,
+            1.0,
+            Vector3::z(),
+            Vector3::x(),
+            0.0,
+            TAU,
         );
         assert!(r.is_err());
     }
@@ -259,7 +256,13 @@ mod tests {
     #[test]
     fn invalid_semi_minor() {
         let r = Ellipse::new(
-            Point3::origin(), 1.0, 0.0, Vector3::z(), Vector3::x(), 0.0, TAU,
+            Point3::origin(),
+            1.0,
+            0.0,
+            Vector3::z(),
+            Vector3::x(),
+            0.0,
+            TAU,
         );
         assert!(r.is_err());
     }

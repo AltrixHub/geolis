@@ -44,10 +44,7 @@ impl Pline {
     /// Creates a `Pline` from `Point3` vertices with all-zero bulges (line segments only).
     #[must_use]
     pub fn from_points(points: &[Point3], closed: bool) -> Self {
-        let vertices = points
-            .iter()
-            .map(|p| PlineVertex::line(p.x, p.y))
-            .collect();
+        let vertices = points.iter().map(|p| PlineVertex::line(p.x, p.y)).collect();
         Self { vertices, closed }
     }
 
@@ -224,7 +221,11 @@ mod tests {
         };
         let pts = pline.to_points(0.01);
         // Should have start, some intermediate points, and end.
-        assert!(pts.len() > 2, "expected more than 2 points, got {}", pts.len());
+        assert!(
+            pts.len() > 2,
+            "expected more than 2 points, got {}",
+            pts.len()
+        );
         // First and last points should match vertices.
         assert!((pts[0].x).abs() < 1e-10);
         assert!((pts[0].y).abs() < 1e-10);

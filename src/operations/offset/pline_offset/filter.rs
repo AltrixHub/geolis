@@ -10,11 +10,7 @@ use super::slice::PlineSlice;
 /// This removes self-intersection loops that are "too close" to the original,
 /// which are artifacts of the offset rather than valid geometry.
 #[must_use]
-pub fn apply<'a>(
-    slices: &'a [PlineSlice],
-    original: &Pline,
-    distance: f64,
-) -> Vec<&'a PlineSlice> {
+pub fn apply<'a>(slices: &'a [PlineSlice], original: &Pline, distance: f64) -> Vec<&'a PlineSlice> {
     let abs_d = distance.abs();
     let threshold = abs_d * 0.5; // Accept slices at ≥ 50% of offset distance.
 

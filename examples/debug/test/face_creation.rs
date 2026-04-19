@@ -25,7 +25,11 @@ fn triangle_mesh(bx: f64, by: f64) -> TriangleMesh {
             Point3::new(bx + 2.0, by + 4.0, 0.0),
         ],
         normals: vec![UP; 3],
-        uvs: vec![Point2::new(0.0, 0.0), Point2::new(4.0, 0.0), Point2::new(2.0, 4.0)],
+        uvs: vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(2.0, 4.0),
+        ],
         indices: vec![[0, 1, 2]],
     }
 }

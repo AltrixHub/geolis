@@ -19,7 +19,11 @@ fn collect_raw_segments(pline: &Pline) -> Vec<((f64, f64), (f64, f64))> {
     let mut raw_segments = Vec::new();
     for i in 0..seg_count {
         let a = (verts[i].x, verts[i].y);
-        let next_i = if pline.closed { (i + 1) % verts.len() } else { i + 1 };
+        let next_i = if pline.closed {
+            (i + 1) % verts.len()
+        } else {
+            i + 1
+        };
         let b = (verts[next_i].x, verts[next_i].y);
         let dx = b.0 - a.0;
         let dy = b.1 - a.1;
@@ -225,16 +229,18 @@ mod tests {
     fn double_cross_decompose_4_segments() {
         let pline = double_cross_pline();
         let result = decompose(&[&pline]);
-        assert_eq!(result.len(), 4, "expected 4 unique segments, got {}", result.len());
+        assert_eq!(
+            result.len(),
+            4,
+            "expected 4 unique segments, got {}",
+            result.len()
+        );
     }
 
     #[test]
     fn single_line_decompose() {
         let pline = Pline {
-            vertices: vec![
-                PlineVertex::line(0.0, 0.0),
-                PlineVertex::line(5.0, 0.0),
-            ],
+            vertices: vec![PlineVertex::line(0.0, 0.0), PlineVertex::line(5.0, 0.0)],
             closed: false,
         };
         let result = decompose(&[&pline]);
@@ -255,7 +261,12 @@ mod tests {
             closed: false,
         };
         let result = decompose(&[&pline]);
-        assert_eq!(result.len(), 2, "expected 2 unique segments, got {}", result.len());
+        assert_eq!(
+            result.len(),
+            2,
+            "expected 2 unique segments, got {}",
+            result.len()
+        );
     }
 
     #[test]
@@ -270,7 +281,12 @@ mod tests {
             closed: true,
         };
         let result = decompose(&[&pline]);
-        assert_eq!(result.len(), 4, "expected 4 unique segments, got {}", result.len());
+        assert_eq!(
+            result.len(),
+            4,
+            "expected 4 unique segments, got {}",
+            result.len()
+        );
     }
 
     #[test]

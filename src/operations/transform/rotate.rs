@@ -60,10 +60,22 @@ fn rotation_matrix(axis: &Vector3, angle: f64) -> Matrix4 {
 
     #[allow(clippy::suspicious_operation_groupings)]
     Matrix4::new(
-        t * x * x + c,     t * x * y - s * z, t * x * z + s * y, 0.0,
-        t * x * y + s * z, t * y * y + c,     t * y * z - s * x, 0.0,
-        t * x * z - s * y, t * y * z + s * x, t * z * z + c,     0.0,
-        0.0,               0.0,               0.0,               1.0,
+        t * x * x + c,
+        t * x * y - s * z,
+        t * x * z + s * y,
+        0.0,
+        t * x * y + s * z,
+        t * y * y + c,
+        t * y * z - s * x,
+        0.0,
+        t * x * z - s * y,
+        t * y * z + s * x,
+        t * z * z + c,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
     )
 }
 
@@ -85,7 +97,12 @@ mod tests {
     fn rotate_90_around_z() {
         let mut store = TopologyStore::new();
         let wire = MakeWire::new(
-            vec![p(1.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 1.0, 0.0), p(1.0, 1.0, 0.0)],
+            vec![
+                p(1.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(2.0, 1.0, 0.0),
+                p(1.0, 1.0, 0.0),
+            ],
             true,
         )
         .execute(&mut store)
@@ -143,13 +160,8 @@ mod tests {
             .execute(&mut store)
             .unwrap();
 
-        let result = Rotate::new(
-            solid,
-            p(0.0, 0.0, 0.0),
-            Vector3::new(0.0, 0.0, 0.0),
-            1.0,
-        )
-        .execute(&mut store);
+        let result = Rotate::new(solid, p(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0), 1.0)
+            .execute(&mut store);
         assert!(result.is_err());
     }
 }

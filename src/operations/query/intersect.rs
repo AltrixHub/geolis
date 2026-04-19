@@ -61,9 +61,9 @@ impl CurveCurveIntersect {
                     })
                     .collect())
             }
-            (EdgeCurve::Arc(aa), EdgeCurve::Arc(ab)) => {
-                Ok(intersect_arc_arc(aa, ta_start, ta_end, ab, tb_start, tb_end))
-            }
+            (EdgeCurve::Arc(aa), EdgeCurve::Arc(ab)) => Ok(intersect_arc_arc(
+                aa, ta_start, ta_end, ab, tb_start, tb_end,
+            )),
             _ => {
                 todo!("CurveCurveIntersect for Circle/Ellipse")
             }
@@ -93,11 +93,7 @@ fn intersect_line_line(
         // Map from [0, 1] back to edge parameter space
         let t1 = ta_start + t * (ta_end - ta_start);
         let t2 = tb_start + u * (tb_end - tb_start);
-        results.push(IntersectionResult {
-            point: pt,
-            t1,
-            t2,
-        });
+        results.push(IntersectionResult { point: pt, t1, t2 });
     }
     Ok(results)
 }
