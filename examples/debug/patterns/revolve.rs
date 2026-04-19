@@ -141,7 +141,15 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(col[0] + 4.0, y2, h),
         Point3::new(col[0] + 2.0, y2, h),
     ];
-    register_case(storage, "4", col[0], y2, &sq4, Some(std::f64::consts::FRAC_PI_2), GREEN);
+    register_case(
+        storage,
+        "4",
+        col[0],
+        y2,
+        &sq4,
+        Some(std::f64::consts::FRAC_PI_2),
+        GREEN,
+    );
 
     // Case 5: Triangle on-axis 180°
     let tri5 = [
@@ -149,7 +157,15 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(col[1] + 3.0, y2, 0.0),
         Point3::new(col[1] + 3.0, y2, h),
     ];
-    register_case(storage, "5", col[1], y2, &tri5, Some(std::f64::consts::PI), BLUE);
+    register_case(
+        storage,
+        "5",
+        col[1],
+        y2,
+        &tri5,
+        Some(std::f64::consts::PI),
+        BLUE,
+    );
 
     // Case 6: Trapezoid 270°
     let trap6 = [
@@ -158,5 +174,13 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(col[2] + 3.0, y2, h),
         Point3::new(col[2] + 2.0, y2, h),
     ];
-    register_case(storage, "6", col[2], y2, &trap6, Some(3.0 * std::f64::consts::FRAC_PI_2), GREEN);
+    register_case(
+        storage,
+        "6",
+        col[2],
+        y2,
+        &trap6,
+        Some(3.0 * std::f64::consts::FRAC_PI_2),
+        GREEN,
+    );
 }

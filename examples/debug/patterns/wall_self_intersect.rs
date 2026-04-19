@@ -40,8 +40,10 @@ fn min_distance_to_centerlines(px: f64, py: f64, centerlines: &[Pline]) -> f64 {
 }
 
 fn find_clip_point(
-    inside_x: f64, inside_y: f64,
-    outside_x: f64, outside_y: f64,
+    inside_x: f64,
+    inside_y: f64,
+    outside_x: f64,
+    outside_y: f64,
     centerlines: &[Pline],
     threshold: f64,
 ) -> (f64, f64) {
@@ -65,11 +67,7 @@ fn find_clip_point(
     )
 }
 
-fn clip_miter_vertices(
-    verts: &mut Vec<PlineVertex>,
-    centerlines: &[Pline],
-    max_allowed: f64,
-) {
+fn clip_miter_vertices(verts: &mut Vec<PlineVertex>, centerlines: &[Pline], max_allowed: f64) {
     let n = verts.len();
     if n < 3 {
         return;
@@ -81,14 +79,20 @@ fn clip_miter_vertices(
             let prev = if i > 0 { i - 1 } else { n - 1 };
             let next = (i + 1) % n;
             let (cx1, cy1) = find_clip_point(
-                verts[prev].x, verts[prev].y,
-                verts[i].x, verts[i].y,
-                centerlines, max_allowed,
+                verts[prev].x,
+                verts[prev].y,
+                verts[i].x,
+                verts[i].y,
+                centerlines,
+                max_allowed,
             );
             let (cx2, cy2) = find_clip_point(
-                verts[next].x, verts[next].y,
-                verts[i].x, verts[i].y,
-                centerlines, max_allowed,
+                verts[next].x,
+                verts[next].y,
+                verts[i].x,
+                verts[i].y,
+                centerlines,
+                max_allowed,
             );
             result.push(PlineVertex::line(cx1, cy1));
             result.push(PlineVertex::line(cx2, cy2));
@@ -100,8 +104,14 @@ fn clip_miter_vertices(
 }
 
 fn segment_segment_intersection(
-    ax: f64, ay: f64, bx: f64, by: f64,
-    cx: f64, cy: f64, dx: f64, dy: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    cx: f64,
+    cy: f64,
+    dx: f64,
+    dy: f64,
 ) -> Option<(f64, f64)> {
     let d1x = bx - ax;
     let d1y = by - ay;
@@ -144,14 +154,9 @@ fn find_self_intersection(vertices: &[PlineVertex]) -> Option<(usize, usize, f64
     None
 }
 
-
 /// Resolve keeping both loops (algorithm output for wall_group.rs).
 /// Miter clip → split at self-intersection → keep both loops.
-fn resolve_keep_both(
-    boundaries: &mut Vec<Pline>,
-    centerlines: &[Pline],
-    half_thickness: f64,
-) {
+fn resolve_keep_both(boundaries: &mut Vec<Pline>, centerlines: &[Pline], half_thickness: f64) {
     let max_allowed = half_thickness * 4.0;
     let mut result: Vec<Pline> = Vec::new();
 
@@ -176,7 +181,10 @@ fn resolve_keep_both(
             for verts in pending.drain(..) {
                 if verts.len() < 4 {
                     if verts.len() >= 3 {
-                        result.push(Pline { vertices: verts, closed: true });
+                        result.push(Pline {
+                            vertices: verts,
+                            closed: true,
+                        });
                     }
                     continue;
                 }
@@ -205,7 +213,10 @@ fn resolve_keep_both(
                         made_progress = true;
                     }
                     None => {
-                        result.push(Pline { vertices: verts, closed: true });
+                        result.push(Pline {
+                            vertices: verts,
+                            closed: true,
+                        });
                     }
                 }
             }
@@ -218,7 +229,10 @@ fn resolve_keep_both(
 
         for verts in pending {
             if verts.len() >= 3 {
-                result.push(Pline { vertices: verts, closed: true });
+                result.push(Pline {
+                    vertices: verts,
+                    closed: true,
+                });
             }
         }
     }
@@ -252,12 +266,7 @@ fn near_reversal() -> Vec<(f64, f64)> {
 
 /// 4-point zigzag: 4th point's wall slightly crosses 1st segment's wall.
 fn zigzag_4_overlap() -> Vec<(f64, f64)> {
-    vec![
-        (0.0, 0.0),
-        (3.0, 4.0),
-        (0.0, 3.0),
-        (0.1, 0.5),
-    ]
+    vec![(0.0, 0.0), (3.0, 4.0), (0.0, 3.0), (0.1, 0.5)]
 }
 
 // ── Drawing helper ──────────────────────────────────────────────────
@@ -335,15 +344,15 @@ fn draw_case(
 /// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
 pub fn register(storage: &MeshStorage) {
     // Labels for columns
-    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED);      // BEFORE
-    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN);   // AFTER
+    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
+    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
 
     let cases: Vec<(&str, Vec<(f64, f64)>, f64)> = vec![
-        ("1", v_slight_overlap(), 0.15),       // 3pt V, slight overlap, thin
-        ("2", v_clear_overlap(), 0.15),        // 3pt V, clear overlap, thin
-        ("3", v_thick_overlap(), 0.3),         // 3pt V, thicker wall
-        ("4", near_reversal(), 0.3),           // 3pt near-reversal
-        ("5", zigzag_4_overlap(), 0.15),       // 4pt, last overlaps 1st seg
+        ("1", v_slight_overlap(), 0.15), // 3pt V, slight overlap, thin
+        ("2", v_clear_overlap(), 0.15),  // 3pt V, clear overlap, thin
+        ("3", v_thick_overlap(), 0.3),   // 3pt V, thicker wall
+        ("4", near_reversal(), 0.3),     // 3pt near-reversal
+        ("5", zigzag_4_overlap(), 0.15), // 4pt, last overlaps 1st seg
     ];
 
     for (i, (label, pts, hw)) in cases.iter().enumerate() {

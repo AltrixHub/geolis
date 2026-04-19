@@ -48,8 +48,7 @@ impl FaceOffset {
                 let offset = normal * self.distance;
 
                 let outer_points = collect_wire_points(store, outer_wire_id)?;
-                let offset_points: Vec<Point3> =
-                    outer_points.iter().map(|p| p + offset).collect();
+                let offset_points: Vec<Point3> = outer_points.iter().map(|p| p + offset).collect();
 
                 let wire = MakeWire::new(offset_points, true).execute(store)?;
                 MakeFace::new(wire, vec![]).execute(store)
@@ -117,8 +116,7 @@ impl FaceOffset {
                 let offset = normal * self.distance;
 
                 let outer_points = collect_wire_points(store, outer_wire_id)?;
-                let offset_points: Vec<Point3> =
-                    outer_points.iter().map(|p| p + offset).collect();
+                let offset_points: Vec<Point3> = outer_points.iter().map(|p| p + offset).collect();
 
                 let wire = MakeWire::new(offset_points, true).execute(store)?;
                 MakeFace::new(wire, vec![]).execute(store)
@@ -161,8 +159,11 @@ fn collect_wire_points(
 
 /// Extension trait for `FaceSurface` to compute an approximate normal at centroid.
 trait FaceSurfaceExt {
-    fn normal_at_centroid(&self, store: &TopologyStore, wire_id: crate::topology::WireId)
-        -> Vector3;
+    fn normal_at_centroid(
+        &self,
+        store: &TopologyStore,
+        wire_id: crate::topology::WireId,
+    ) -> Vector3;
 }
 
 impl FaceSurfaceExt for FaceSurface {
@@ -205,7 +206,12 @@ mod tests {
 
     fn make_xy_face(store: &mut TopologyStore) -> FaceId {
         let wire = MakeWire::new(
-            vec![p(0.0, 0.0, 0.0), p(4.0, 0.0, 0.0), p(4.0, 4.0, 0.0), p(0.0, 4.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(4.0, 4.0, 0.0),
+                p(0.0, 4.0, 0.0),
+            ],
             true,
         )
         .execute(store)

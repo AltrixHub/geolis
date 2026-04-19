@@ -44,9 +44,7 @@ fn render_solid(
     mesh_color: Color,
     edge_color: Color,
 ) {
-    if let Ok(mesh) =
-        TessellateSolid::new(solid, TessellationParams::default()).execute(store)
-    {
+    if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(store) {
         register_face(storage, mesh, mesh_color);
     }
     if let Ok(solid_data) = store.solid(solid) {

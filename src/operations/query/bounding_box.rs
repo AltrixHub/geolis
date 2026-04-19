@@ -38,33 +38,32 @@ impl BoundingBox {
         let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
         let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
 
-        let mut process_shell =
-            |shell_id: crate::topology::ShellId| -> Result<()> {
-                let shell = store.shell(shell_id)?;
-                for &face_id in &shell.faces {
-                    let face = store.face(face_id)?;
-                    let wire_ids: Vec<_> = std::iter::once(face.outer_wire)
-                        .chain(face.inner_wires.iter().copied())
-                        .collect();
+        let mut process_shell = |shell_id: crate::topology::ShellId| -> Result<()> {
+            let shell = store.shell(shell_id)?;
+            for &face_id in &shell.faces {
+                let face = store.face(face_id)?;
+                let wire_ids: Vec<_> = std::iter::once(face.outer_wire)
+                    .chain(face.inner_wires.iter().copied())
+                    .collect();
 
-                    for wire_id in wire_ids {
-                        let wire = store.wire(wire_id)?;
-                        for oe in &wire.edges {
-                            let edge = store.edge(oe.edge)?;
-                            for &vid in &[edge.start, edge.end] {
-                                let pt = store.vertex(vid)?.point;
-                                min.x = min.x.min(pt.x);
-                                min.y = min.y.min(pt.y);
-                                min.z = min.z.min(pt.z);
-                                max.x = max.x.max(pt.x);
-                                max.y = max.y.max(pt.y);
-                                max.z = max.z.max(pt.z);
-                            }
+                for wire_id in wire_ids {
+                    let wire = store.wire(wire_id)?;
+                    for oe in &wire.edges {
+                        let edge = store.edge(oe.edge)?;
+                        for &vid in &[edge.start, edge.end] {
+                            let pt = store.vertex(vid)?.point;
+                            min.x = min.x.min(pt.x);
+                            min.y = min.y.min(pt.y);
+                            min.z = min.z.min(pt.z);
+                            max.x = max.x.max(pt.x);
+                            max.y = max.y.max(pt.y);
+                            max.z = max.z.max(pt.z);
                         }
                     }
                 }
-                Ok(())
-            };
+            }
+            Ok(())
+        };
 
         process_shell(outer_shell_id)?;
         for &shell_id in &inner_shell_ids {
@@ -92,7 +91,12 @@ mod tests {
     fn unit_cube_aabb() {
         let mut store = TopologyStore::new();
         let wire = MakeWire::new(
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
             true,
         )
         .execute(&mut store)
@@ -115,7 +119,12 @@ mod tests {
     fn offset_box_aabb() {
         let mut store = TopologyStore::new();
         let wire = MakeWire::new(
-            vec![p(2.0, 3.0, 0.0), p(5.0, 3.0, 0.0), p(5.0, 7.0, 0.0), p(2.0, 7.0, 0.0)],
+            vec![
+                p(2.0, 3.0, 0.0),
+                p(5.0, 3.0, 0.0),
+                p(5.0, 7.0, 0.0),
+                p(2.0, 7.0, 0.0),
+            ],
             true,
         )
         .execute(&mut store)

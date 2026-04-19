@@ -66,8 +66,7 @@ pub fn register(storage: &MeshStorage) {
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =
-            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 0.0, Vector3::z(), 6.0)
-                .execute(&mut topo)
+            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 0.0, Vector3::z(), 6.0).execute(&mut topo)
         {
             render_solid(storage, &topo, solid, GREEN, edge_color);
         }
@@ -81,8 +80,7 @@ pub fn register(storage: &MeshStorage) {
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =
-            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 1.5, Vector3::z(), 6.0)
-                .execute(&mut topo)
+            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 1.5, Vector3::z(), 6.0).execute(&mut topo)
         {
             render_solid(storage, &topo, solid, BLUE, edge_color);
         }

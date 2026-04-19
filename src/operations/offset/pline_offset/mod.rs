@@ -74,10 +74,7 @@ impl PlineOffset2D {
         let result = stitch::connect(&valid, true);
 
         if result.is_empty() {
-            return Err(OperationError::Failed(
-                "offset collapsed completely".to_owned(),
-            )
-            .into());
+            return Err(OperationError::Failed("offset collapsed completely".to_owned()).into());
         }
 
         Ok(result)
@@ -109,10 +106,7 @@ impl PlineOffset2D {
         let result = stitch::connect(&valid, false);
 
         if result.is_empty() {
-            return Err(OperationError::Failed(
-                "offset collapsed completely".to_owned(),
-            )
-            .into());
+            return Err(OperationError::Failed("offset collapsed completely".to_owned()).into());
         }
 
         Ok(result)
@@ -180,9 +174,9 @@ mod tests {
     fn rounded_rect_pline() -> Pline {
         Pline {
             vertices: vec![
-                PlineVertex::line(0.0, 0.0),   // seg 0: line →(10,0)
+                PlineVertex::line(0.0, 0.0),      // seg 0: line →(10,0)
                 PlineVertex::new(10.0, 0.0, 1.0), // seg 1: CCW semicircle →(10,4)
-                PlineVertex::line(10.0, 4.0),   // seg 2: line →(0,4)
+                PlineVertex::line(10.0, 4.0),     // seg 2: line →(0,4)
                 PlineVertex::new(0.0, 4.0, 1.0),  // seg 3: CCW semicircle →(0,0)
             ],
             closed: true,
@@ -281,10 +275,7 @@ mod tests {
     fn open_straight_line_offset() {
         // Simplest case: a single straight segment.
         let pline = Pline {
-            vertices: vec![
-                PlineVertex::line(0.0, 0.0),
-                PlineVertex::line(10.0, 0.0),
-            ],
+            vertices: vec![PlineVertex::line(0.0, 0.0), PlineVertex::line(10.0, 0.0)],
             closed: false,
         };
         let op = PlineOffset2D::new(pline, 1.0); // Left = +Y

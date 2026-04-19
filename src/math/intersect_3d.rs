@@ -6,10 +6,7 @@ use super::{Point3, Vector3, TOLERANCE};
 #[derive(Debug)]
 pub enum PlanePairRelation {
     /// Planes intersect along a line.
-    IntersectionLine {
-        origin: Point3,
-        direction: Vector3,
-    },
+    IntersectionLine { origin: Point3, direction: Vector3 },
     /// Planes are parallel but not coincident.
     Parallel { distance: f64 },
     /// Planes are the same (coincident).
@@ -60,7 +57,10 @@ pub fn plane_plane_intersect(a: &Plane, b: &Plane) -> PlanePairRelation {
             a.origin() + na * s + nb * t
         };
 
-        PlanePairRelation::IntersectionLine { origin, direction: dir }
+        PlanePairRelation::IntersectionLine {
+            origin,
+            direction: dir,
+        }
     }
 }
 
@@ -77,11 +77,7 @@ pub enum LinePlaneRelation {
 
 /// Computes the intersection of a line `origin + t * dir` with a plane.
 #[must_use]
-pub fn line_plane_intersect(
-    origin: &Point3,
-    dir: &Vector3,
-    plane: &Plane,
-) -> LinePlaneRelation {
+pub fn line_plane_intersect(origin: &Point3, dir: &Vector3, plane: &Plane) -> LinePlaneRelation {
     let normal = plane.plane_normal();
     let denom = normal.dot(dir);
 
@@ -285,8 +281,7 @@ mod tests {
     #[test]
     fn line_oblique_to_plane() {
         let plane = Plane::from_normal(p(0.0, 0.0, 0.0), v(0.0, 0.0, 1.0)).unwrap();
-        let result =
-            line_plane_intersect(&p(0.0, 0.0, -3.0), &v(1.0, 1.0, 1.0), &plane);
+        let result = line_plane_intersect(&p(0.0, 0.0, -3.0), &v(1.0, 1.0, 1.0), &plane);
         match result {
             LinePlaneRelation::Point { point, t } => {
                 assert!((t - 3.0).abs() < TOLERANCE);

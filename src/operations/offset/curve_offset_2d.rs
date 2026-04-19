@@ -122,9 +122,7 @@ fn offset_arc(
                 t_end,
             }))
         }
-        None => Err(
-            OperationError::Failed("arc offset collapsed (radius <= 0)".into()).into(),
-        ),
+        None => Err(OperationError::Failed("arc offset collapsed (radius <= 0)".into()).into()),
     }
 }
 

@@ -63,12 +63,7 @@ pub fn arc_from_bulge(x0: f64, y0: f64, x1: f64, y1: f64, bulge: f64) -> (f64, f
 ///
 /// `is_ccw`: true for counter-clockwise arc, false for clockwise.
 #[must_use]
-pub fn bulge_from_arc(
-    x0: f64, y0: f64,
-    x1: f64, y1: f64,
-    cx: f64, cy: f64,
-    is_ccw: bool,
-) -> f64 {
+pub fn bulge_from_arc(x0: f64, y0: f64, x1: f64, y1: f64, cx: f64, cy: f64, is_ccw: bool) -> f64 {
     let start_angle = (y0 - cy).atan2(x0 - cx);
     let end_angle = (y1 - cy).atan2(x1 - cx);
 
@@ -87,7 +82,8 @@ pub fn bulge_from_arc(
 /// Evaluates a point on an arc at parameter `t` in `[0, 1]`.
 #[must_use]
 pub fn arc_point_at(
-    cx: f64, cy: f64,
+    cx: f64,
+    cy: f64,
     radius: f64,
     start_angle: f64,
     sweep: f64,
@@ -116,8 +112,10 @@ pub fn arc_tangent_at(start_angle: f64, sweep: f64, t: f64) -> (f64, f64) {
 /// Returns `(x0', y0', x1', y1', bulge')`.
 #[must_use]
 pub fn offset_arc_segment(
-    x0: f64, y0: f64,
-    x1: f64, y1: f64,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
     bulge: f64,
     distance: f64,
 ) -> Option<(f64, f64, f64, f64, f64)> {

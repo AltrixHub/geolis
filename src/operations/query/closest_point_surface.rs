@@ -117,10 +117,7 @@ fn closest_on_sphere(
     })
 }
 
-fn closest_on_cone(
-    cone: &crate::geometry::surface::Cone,
-    query: &Point3,
-) -> Result<SurfacePoint> {
+fn closest_on_cone(cone: &crate::geometry::surface::Cone, query: &Point3) -> Result<SurfacePoint> {
     let dp = query - cone.apex();
     let axis_proj = dp.dot(cone.axis());
     let radial = dp - *cone.axis() * axis_proj;

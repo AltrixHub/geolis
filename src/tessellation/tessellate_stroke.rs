@@ -107,10 +107,7 @@ impl TessellateStroke {
                     vertices.push(Point3::new(p.x + off.x, p.y + off.y, p.z + off.z));
                     vertices.push(Point3::new(p.x - off.x, p.y - off.y, p.z - off.z));
                     normals.extend_from_slice(&[normal, normal]);
-                    uvs.extend_from_slice(&[
-                        Point2::new(0.0, v),
-                        Point2::new(1.0, v),
-                    ]);
+                    uvs.extend_from_slice(&[Point2::new(0.0, v), Point2::new(1.0, v)]);
                     slots.push(VertexSlot {
                         in_left: idx,
                         in_right: idx + 1,
@@ -134,7 +131,8 @@ impl TessellateStroke {
                         // Left turn: inside = right (−offset), outside = left (+offset).
                         let v_out_in = Point3::new(p.x + off_in.x, p.y + off_in.y, p.z + off_in.z);
                         let v_in = Point3::new(p.x - in_off.x, p.y - in_off.y, p.z - in_off.z);
-                        let v_out_out = Point3::new(p.x + off_out.x, p.y + off_out.y, p.z + off_out.z);
+                        let v_out_out =
+                            Point3::new(p.x + off_out.x, p.y + off_out.y, p.z + off_out.z);
 
                         vertices.extend_from_slice(&[v_out_in, v_in, v_out_out]);
                         normals.extend_from_slice(&[normal, normal, normal]);
@@ -156,7 +154,8 @@ impl TessellateStroke {
                         // Right turn: inside = left (+offset), outside = right (−offset).
                         let v_in = Point3::new(p.x + in_off.x, p.y + in_off.y, p.z + in_off.z);
                         let v_out_in = Point3::new(p.x - off_in.x, p.y - off_in.y, p.z - off_in.z);
-                        let v_out_out = Point3::new(p.x - off_out.x, p.y - off_out.y, p.z - off_out.z);
+                        let v_out_out =
+                            Point3::new(p.x - off_out.x, p.y - off_out.y, p.z - off_out.z);
 
                         vertices.extend_from_slice(&[v_in, v_out_in, v_out_out]);
                         normals.extend_from_slice(&[normal, normal, normal]);
@@ -337,10 +336,7 @@ mod tests {
 
     #[test]
     fn straight_line_two_points() {
-        let points = vec![
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(10.0, 0.0, 0.0),
-        ];
+        let points = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 0.0, 0.0)];
         let op = TessellateStroke::new(points, style(2.0), false);
         let mesh = op.execute().unwrap();
 
@@ -392,10 +388,7 @@ mod tests {
 
     #[test]
     fn normals_point_up() {
-        let points = vec![
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(5.0, 0.0, 0.0),
-        ];
+        let points = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(5.0, 0.0, 0.0)];
         let op = TessellateStroke::new(points, style(1.0), false);
         let mesh = op.execute().unwrap();
 
@@ -453,10 +446,7 @@ mod tests {
 
     #[test]
     fn zero_length_segment_fails() {
-        let points = vec![
-            Point3::new(1.0, 2.0, 0.0),
-            Point3::new(1.0, 2.0, 0.0),
-        ];
+        let points = vec![Point3::new(1.0, 2.0, 0.0), Point3::new(1.0, 2.0, 0.0)];
         let op = TessellateStroke::new(points, style(1.0), false);
         assert!(op.execute().is_err());
     }

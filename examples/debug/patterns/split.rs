@@ -39,9 +39,11 @@ pub fn register(storage: &MeshStorage) {
         register_label(storage, bx - 2.0, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
-        if let Ok(solid) =
-            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 4.0, by + 4.0, 4.0))
-                .execute(&mut topo)
+        if let Ok(solid) = MakeBox::new(
+            Point3::new(bx, by, 0.0),
+            Point3::new(bx + 4.0, by + 4.0, 4.0),
+        )
+        .execute(&mut topo)
         {
             if let Ok((top, bottom)) =
                 Split::new(solid, Point3::new(0.0, 0.0, 2.0), Vector3::z()).execute(&mut topo)
@@ -59,9 +61,11 @@ pub fn register(storage: &MeshStorage) {
         register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
-        if let Ok(solid) =
-            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 4.0, by + 4.0, 4.0))
-                .execute(&mut topo)
+        if let Ok(solid) = MakeBox::new(
+            Point3::new(bx, by, 0.0),
+            Point3::new(bx + 4.0, by + 4.0, 4.0),
+        )
+        .execute(&mut topo)
         {
             if let Ok((left, right)) =
                 Split::new(solid, Point3::new(bx + 2.0, 0.0, 0.0), Vector3::x()).execute(&mut topo)
@@ -79,9 +83,11 @@ pub fn register(storage: &MeshStorage) {
         register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
-        if let Ok(solid) =
-            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 4.0, by + 4.0, 4.0))
-                .execute(&mut topo)
+        if let Ok(solid) = MakeBox::new(
+            Point3::new(bx, by, 0.0),
+            Point3::new(bx + 4.0, by + 4.0, 4.0),
+        )
+        .execute(&mut topo)
         {
             let normal = Vector3::new(1.0, 0.0, 1.0).normalize();
             if let Ok((a, b)) =

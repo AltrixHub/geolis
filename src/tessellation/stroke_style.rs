@@ -79,7 +79,9 @@ mod tests {
 
     #[test]
     fn with_line_join_sets_join() {
-        let style = StrokeStyle::new(1.0).unwrap().with_line_join(LineJoin::Bevel);
+        let style = StrokeStyle::new(1.0)
+            .unwrap()
+            .with_line_join(LineJoin::Bevel);
         assert_eq!(style.line_join(), LineJoin::Bevel);
     }
 

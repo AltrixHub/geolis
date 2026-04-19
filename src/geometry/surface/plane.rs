@@ -40,9 +40,7 @@ impl Plane {
         let normal = u_dir.cross(&v_dir);
         let normal_len = normal.norm();
         if normal_len < TOLERANCE {
-            return Err(
-                GeometryError::Degenerate("plane directions are parallel".into()).into(),
-            );
+            return Err(GeometryError::Degenerate("plane directions are parallel".into()).into());
         }
         let normal = normal / normal_len;
 
@@ -121,6 +119,11 @@ impl Surface for Plane {
     }
 
     fn domain(&self) -> SurfaceDomain {
-        SurfaceDomain::new(f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY)
+        SurfaceDomain::new(
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        )
     }
 }

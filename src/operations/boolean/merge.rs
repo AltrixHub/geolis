@@ -383,12 +383,9 @@ fn chain_into_loops(edges: &[(Point3, Point3)]) -> Result<Vec<Vec<Point3>>> {
             chain.push(current_end);
 
             // Find the next edge starting from current_end
-            let next = start_map.get(&end_key).and_then(|candidates| {
-                candidates
-                    .iter()
-                    .find(|&&(idx, _)| !used[idx])
-                    .copied()
-            });
+            let next = start_map
+                .get(&end_key)
+                .and_then(|candidates| candidates.iter().find(|&&(idx, _)| !used[idx]).copied());
 
             match next {
                 Some((idx, end_pt)) => {
@@ -552,7 +549,9 @@ mod tests {
         let simplified = simplify_collinear(&points);
         assert_eq!(simplified.len(), 4, "should remove the collinear mid-point");
         // Verify the mid-point (2,0,0) was removed
-        assert!(!simplified.iter().any(|p| (p.x - 2.0).abs() < TOLERANCE && p.y.abs() < TOLERANCE));
+        assert!(!simplified
+            .iter()
+            .any(|p| (p.x - 2.0).abs() < TOLERANCE && p.y.abs() < TOLERANCE));
     }
 
     #[test]

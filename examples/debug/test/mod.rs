@@ -5,12 +5,13 @@
 
 pub mod boolean;
 pub mod face_creation;
+pub mod shell;
 pub mod wall_offset;
 
 use revion_ui::MeshStorage;
 
 /// All available test pattern names.
-pub const PATTERNS: &[&str] = &["wall_offset", "face_creation", "boolean"];
+pub const PATTERNS: &[&str] = &["wall_offset", "face_creation", "boolean", "shell"];
 
 /// Register meshes for the named test pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
@@ -25,6 +26,10 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "boolean" => {
             boolean::register(storage);
+            true
+        }
+        "shell" => {
+            shell::register(storage);
             true
         }
         _ => false,

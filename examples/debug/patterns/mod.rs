@@ -24,7 +24,19 @@ use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
 /// All available pattern names.
-pub const PATTERNS: &[&str] = &["stroke_joins", "wall_offset", "wall_self_intersect", "face_creation", "extrude", "revolve", "boolean", "wall_with_window", "primitives", "split", "shell"];
+pub const PATTERNS: &[&str] = &[
+    "stroke_joins",
+    "wall_offset",
+    "wall_self_intersect",
+    "face_creation",
+    "extrude",
+    "revolve",
+    "boolean",
+    "wall_with_window",
+    "primitives",
+    "split",
+    "shell",
+];
 
 /// Register meshes for the named pattern. Returns `true` if found.
 pub fn register(storage: &MeshStorage, name: &str) -> bool {
@@ -146,10 +158,7 @@ pub fn register_face(storage: &MeshStorage, mesh: TriangleMesh, color: Color) {
         RawMesh2DId::new(),
         Arc::new(into_raw_mesh_2d(mesh.clone(), color)),
     );
-    storage.upsert_3d(
-        RawMesh3DId::new(),
-        Arc::new(into_raw_mesh_3d(mesh, color)),
-    );
+    storage.upsert_3d(RawMesh3DId::new(), Arc::new(into_raw_mesh_3d(mesh, color)));
 }
 
 /// Collect unique edges from a shell and register them as a single GPU `Line3D`.
@@ -199,8 +208,7 @@ pub fn register_edges(
 
                 match &edge.curve {
                     EdgeCurve::Line(_) => {
-                        let (Ok(sv), Ok(ev)) =
-                            (topo.vertex(edge.start), topo.vertex(edge.end))
+                        let (Ok(sv), Ok(ev)) = (topo.vertex(edge.start), topo.vertex(edge.end))
                         else {
                             continue;
                         };
@@ -209,17 +217,29 @@ pub fn register_edges(
                     }
                     EdgeCurve::Arc(curve) => {
                         tessellate_curve_edge(
-                            &mut vertices, curve, edge.t_start, edge.t_end, CURVE_SEGMENTS,
+                            &mut vertices,
+                            curve,
+                            edge.t_start,
+                            edge.t_end,
+                            CURVE_SEGMENTS,
                         );
                     }
                     EdgeCurve::Circle(curve) => {
                         tessellate_curve_edge(
-                            &mut vertices, curve, edge.t_start, edge.t_end, CURVE_SEGMENTS,
+                            &mut vertices,
+                            curve,
+                            edge.t_start,
+                            edge.t_end,
+                            CURVE_SEGMENTS,
                         );
                     }
                     EdgeCurve::Ellipse(curve) => {
                         tessellate_curve_edge(
-                            &mut vertices, curve, edge.t_start, edge.t_end, CURVE_SEGMENTS,
+                            &mut vertices,
+                            curve,
+                            edge.t_start,
+                            edge.t_end,
+                            CURVE_SEGMENTS,
                         );
                     }
                 }

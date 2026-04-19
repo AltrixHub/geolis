@@ -35,10 +35,9 @@ impl MakeBox {
         let dz = self.max_corner.z - self.min_corner.z;
 
         if dx.abs() < TOLERANCE || dy.abs() < TOLERANCE || dz.abs() < TOLERANCE {
-            return Err(OperationError::InvalidInput(
-                "box dimensions must be non-zero".into(),
-            )
-            .into());
+            return Err(
+                OperationError::InvalidInput("box dimensions must be non-zero".into()).into(),
+            );
         }
 
         let (x0, y0, z0) = (self.min_corner.x, self.min_corner.y, self.min_corner.z);

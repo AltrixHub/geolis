@@ -126,12 +126,7 @@ fn build_slice_verts(
 ///
 /// For line segments (bulge=0): linear interpolation.
 /// For arc segments (bulge≠0): point on the arc.
-fn point_on_segment(
-    vertices: &[PlineVertex],
-    n: usize,
-    seg_idx: usize,
-    t: f64,
-) -> (f64, f64) {
+fn point_on_segment(vertices: &[PlineVertex], n: usize, seg_idx: usize, t: f64) -> (f64, f64) {
     let v0 = &vertices[seg_idx];
     let v1 = &vertices[(seg_idx + 1) % n];
 

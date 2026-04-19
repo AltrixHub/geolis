@@ -107,10 +107,10 @@ fn compute_plane_from_points(points: &[Point3]) -> Result<Plane> {
 
     let len = normal.norm();
     if len < TOLERANCE {
-        return Err(
-            OperationError::Failed("all points are collinear, cannot define a plane".into())
-                .into(),
-        );
+        return Err(OperationError::Failed(
+            "all points are collinear, cannot define a plane".into(),
+        )
+        .into());
     }
 
     // Centroid as origin
@@ -158,7 +158,12 @@ mod tests {
     #[test]
     fn square_xy_plane_normal_is_z() {
         let mut store = TopologyStore::new();
-        let pts = vec![p(0.0, 0.0, 0.0), p(4.0, 0.0, 0.0), p(4.0, 4.0, 0.0), p(0.0, 4.0, 0.0)];
+        let pts = vec![
+            p(0.0, 0.0, 0.0),
+            p(4.0, 0.0, 0.0),
+            p(4.0, 4.0, 0.0),
+            p(0.0, 4.0, 0.0),
+        ];
         let wire = make_closed_wire(&mut store, pts);
         let face_id = MakeFace::new(wire, vec![]).execute(&mut store).unwrap();
         let face = store.face(face_id).unwrap();
@@ -184,12 +189,16 @@ mod tests {
     fn face_with_inner_wire() {
         let mut store = TopologyStore::new();
         let outer = vec![
-            p(0.0, 0.0, 0.0), p(10.0, 0.0, 0.0),
-            p(10.0, 10.0, 0.0), p(0.0, 10.0, 0.0),
+            p(0.0, 0.0, 0.0),
+            p(10.0, 0.0, 0.0),
+            p(10.0, 10.0, 0.0),
+            p(0.0, 10.0, 0.0),
         ];
         let inner = vec![
-            p(2.0, 2.0, 0.0), p(8.0, 2.0, 0.0),
-            p(8.0, 8.0, 0.0), p(2.0, 8.0, 0.0),
+            p(2.0, 2.0, 0.0),
+            p(8.0, 2.0, 0.0),
+            p(8.0, 8.0, 0.0),
+            p(2.0, 8.0, 0.0),
         ];
         let outer_wire = make_closed_wire(&mut store, outer);
         let inner_wire = make_closed_wire(&mut store, inner);
@@ -222,8 +231,10 @@ mod tests {
     fn non_coplanar_points_fail() {
         let mut store = TopologyStore::new();
         let pts = vec![
-            p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0),
-            p(1.0, 1.0, 0.0), p(0.0, 1.0, 1.0),
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(0.0, 1.0, 1.0),
         ];
         let wire = make_closed_wire(&mut store, pts);
         let result = MakeFace::new(wire, vec![]).execute(&mut store);

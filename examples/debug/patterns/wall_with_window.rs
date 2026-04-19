@@ -31,9 +31,7 @@ fn render_solid(
     mesh_color: Color,
     edge_color: Color,
 ) {
-    if let Ok(mesh) =
-        TessellateSolid::new(solid, TessellationParams::default()).execute(store)
-    {
+    if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(store) {
         register_face(storage, mesh, mesh_color);
     }
     if let Ok(solid_data) = store.solid(solid) {
@@ -53,7 +51,13 @@ fn draw_centerline_and_offset(
         .iter()
         .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
         .collect();
-    register_stroke(storage, &center_pts, stroke_style(), centerline.closed, GRAY);
+    register_stroke(
+        storage,
+        &center_pts,
+        stroke_style(),
+        centerline.closed,
+        GRAY,
+    );
 
     let wall = WallOutline2D::new(vec![centerline.clone()], WALL_HALF_WIDTH);
     wall.execute().ok()
@@ -77,17 +81,16 @@ fn case_straight_wall(storage: &MeshStorage, bx: f64, by: f64) {
     let mut store = TopologyStore::new();
 
     let centerline = Pline {
-        vertices: vec![
-            PlineVertex::line(0.0, 0.0),
-            PlineVertex::line(8.0, 0.0),
-        ],
+        vertices: vec![PlineVertex::line(0.0, 0.0), PlineVertex::line(8.0, 0.0)],
         closed: false,
     };
 
     let Some(outlines) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
         return;
     };
-    let Some(outline) = outlines.into_iter().next() else { return };
+    let Some(outline) = outlines.into_iter().next() else {
+        return;
+    };
 
     let wall_pts: Vec<Point3> = outline
         .vertices
@@ -95,10 +98,14 @@ fn case_straight_wall(storage: &MeshStorage, bx: f64, by: f64) {
         .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
         .collect();
 
-    let Ok(wire) = MakeWire::new(wall_pts, true).execute(&mut store) else { return };
-    let Ok(face) = MakeFace::new(wire, vec![]).execute(&mut store) else { return };
-    let Ok(wall_solid) = Extrude::new(face, Vector3::new(0.0, 0.0, WALL_HEIGHT))
-        .execute(&mut store)
+    let Ok(wire) = MakeWire::new(wall_pts, true).execute(&mut store) else {
+        return;
+    };
+    let Ok(face) = MakeFace::new(wire, vec![]).execute(&mut store) else {
+        return;
+    };
+    let Ok(wall_solid) =
+        Extrude::new(face, Vector3::new(0.0, 0.0, WALL_HEIGHT)).execute(&mut store)
     else {
         return;
     };
@@ -107,8 +114,7 @@ fn case_straight_wall(storage: &MeshStorage, bx: f64, by: f64) {
         Point3::new(bx + 2.5, by - 1.0, 0.8),
         Point3::new(bx + 5.5, by + 1.0, 2.4),
     )
-    .execute(&mut store)
-    else {
+    .execute(&mut store) else {
         return;
     };
 
@@ -137,7 +143,9 @@ fn case_l_wall(storage: &MeshStorage, bx: f64, by: f64) {
     let Some(outlines) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
         return;
     };
-    let Some(outline) = outlines.into_iter().next() else { return };
+    let Some(outline) = outlines.into_iter().next() else {
+        return;
+    };
 
     let wall_pts: Vec<Point3> = outline
         .vertices
@@ -145,10 +153,14 @@ fn case_l_wall(storage: &MeshStorage, bx: f64, by: f64) {
         .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
         .collect();
 
-    let Ok(wire) = MakeWire::new(wall_pts, true).execute(&mut store) else { return };
-    let Ok(face) = MakeFace::new(wire, vec![]).execute(&mut store) else { return };
-    let Ok(wall_solid) = Extrude::new(face, Vector3::new(0.0, 0.0, WALL_HEIGHT))
-        .execute(&mut store)
+    let Ok(wire) = MakeWire::new(wall_pts, true).execute(&mut store) else {
+        return;
+    };
+    let Ok(face) = MakeFace::new(wire, vec![]).execute(&mut store) else {
+        return;
+    };
+    let Ok(wall_solid) =
+        Extrude::new(face, Vector3::new(0.0, 0.0, WALL_HEIGHT)).execute(&mut store)
     else {
         return;
     };
@@ -157,8 +169,7 @@ fn case_l_wall(storage: &MeshStorage, bx: f64, by: f64) {
         Point3::new(bx + 2.0, by - 1.0, 0.8),
         Point3::new(bx + 5.0, by + 1.0, 2.4),
     )
-    .execute(&mut store)
-    else {
+    .execute(&mut store) else {
         return;
     };
 
@@ -188,7 +199,9 @@ fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
     let Some(outlines) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
         return;
     };
-    let Some(outer) = outlines.first() else { return };
+    let Some(outer) = outlines.first() else {
+        return;
+    };
 
     let wall_pts: Vec<Point3> = outer
         .vertices
@@ -218,8 +231,8 @@ fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
     let Ok(face) = MakeFace::new(outer_wire, inner_wires).execute(&mut store) else {
         return;
     };
-    let Ok(wall_solid) = Extrude::new(face, Vector3::new(0.0, 0.0, WALL_HEIGHT))
-        .execute(&mut store)
+    let Ok(wall_solid) =
+        Extrude::new(face, Vector3::new(0.0, 0.0, WALL_HEIGHT)).execute(&mut store)
     else {
         return;
     };
@@ -228,8 +241,7 @@ fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
         Point3::new(bx + 3.0, by - 1.0, 0.8),
         Point3::new(bx + 7.0, by + 1.0, 2.4),
     )
-    .execute(&mut store)
-    else {
+    .execute(&mut store) else {
         return;
     };
 

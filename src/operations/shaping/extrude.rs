@@ -74,7 +74,8 @@ impl Extrude {
 
         let bottom_edges = create_loop_edges(store, &bottom_verts, &base_points)?;
         let top_edges = create_loop_edges(store, &top_verts, &top_points)?;
-        let vert_edges = create_vertical_edges(store, &bottom_verts, &top_verts, &base_points, &top_points)?;
+        let vert_edges =
+            create_vertical_edges(store, &bottom_verts, &top_verts, &base_points, &top_points)?;
 
         let mut all_faces = Vec::with_capacity(n + 2 + inner_wire_ids.len() * 4);
 
@@ -158,7 +159,8 @@ fn extrude_inner_wires(
 
         let ib_edges = create_loop_edges(store, &ib_verts, &inner_points)?;
         let it_edges = create_loop_edges(store, &it_verts, &it_points)?;
-        let iv_edges = create_vertical_edges(store, &ib_verts, &it_verts, &inner_points, &it_points)?;
+        let iv_edges =
+            create_vertical_edges(store, &ib_verts, &it_verts, &inner_points, &it_points)?;
 
         let bottom_inner_wire_edges: Vec<OrientedEdge> = (0..m)
             .map(|i| OrientedEdge::new(ib_edges[i], true))
@@ -191,7 +193,10 @@ fn extrude_inner_wires(
 }
 
 /// Collects vertex positions from a wire in traversal order.
-fn collect_wire_points(store: &TopologyStore, wire_id: crate::topology::WireId) -> Result<Vec<Point3>> {
+fn collect_wire_points(
+    store: &TopologyStore,
+    wire_id: crate::topology::WireId,
+) -> Result<Vec<Point3>> {
     let edges = store.wire(wire_id)?.edges.clone();
     let mut points = Vec::with_capacity(edges.len());
 
@@ -235,7 +240,9 @@ fn create_loop_edges(
     let mut edges = Vec::with_capacity(n);
     for i in 0..n {
         let j = (i + 1) % n;
-        edges.push(create_line_edge(store, verts[i], verts[j], points[i], points[j])?);
+        edges.push(create_line_edge(
+            store, verts[i], verts[j], points[i], points[j],
+        )?);
     }
     Ok(edges)
 }
@@ -316,7 +323,12 @@ mod tests {
         let mut store = TopologyStore::new();
         let face = make_face(
             &mut store,
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
         );
         let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
             .execute(&mut store)
@@ -354,8 +366,12 @@ mod tests {
         let face = make_face(
             &mut store,
             vec![
-                p(0.0, 0.0, 0.0), p(4.0, 0.0, 0.0), p(4.0, 2.0, 0.0),
-                p(2.0, 2.0, 0.0), p(2.0, 4.0, 0.0), p(0.0, 4.0, 0.0),
+                p(0.0, 0.0, 0.0),
+                p(4.0, 0.0, 0.0),
+                p(4.0, 2.0, 0.0),
+                p(2.0, 2.0, 0.0),
+                p(2.0, 4.0, 0.0),
+                p(0.0, 4.0, 0.0),
             ],
         );
         let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 3.0))
@@ -374,7 +390,12 @@ mod tests {
         let mut store = TopologyStore::new();
         let face = make_face(
             &mut store,
-            vec![p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 2.0, 0.0), p(0.0, 2.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(2.0, 2.0, 0.0),
+                p(0.0, 2.0, 0.0),
+            ],
         );
         let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 3.0))
             .execute(&mut store)
@@ -421,12 +442,16 @@ mod tests {
     fn face_with_hole_creates_solid() {
         let mut store = TopologyStore::new();
         let outer = vec![
-            p(0.0, 0.0, 0.0), p(10.0, 0.0, 0.0),
-            p(10.0, 10.0, 0.0), p(0.0, 10.0, 0.0),
+            p(0.0, 0.0, 0.0),
+            p(10.0, 0.0, 0.0),
+            p(10.0, 10.0, 0.0),
+            p(0.0, 10.0, 0.0),
         ];
         let inner = vec![
-            p(2.0, 2.0, 0.0), p(8.0, 2.0, 0.0),
-            p(8.0, 8.0, 0.0), p(2.0, 8.0, 0.0),
+            p(2.0, 2.0, 0.0),
+            p(8.0, 2.0, 0.0),
+            p(8.0, 8.0, 0.0),
+            p(2.0, 8.0, 0.0),
         ];
         let outer_wire = MakeWire::new(outer, true).execute(&mut store).unwrap();
         let inner_wire = MakeWire::new(inner, true).execute(&mut store).unwrap();
@@ -449,12 +474,16 @@ mod tests {
     fn face_with_hole_all_edges_shared() {
         let mut store = TopologyStore::new();
         let outer = vec![
-            p(0.0, 0.0, 0.0), p(10.0, 0.0, 0.0),
-            p(10.0, 10.0, 0.0), p(0.0, 10.0, 0.0),
+            p(0.0, 0.0, 0.0),
+            p(10.0, 0.0, 0.0),
+            p(10.0, 10.0, 0.0),
+            p(0.0, 10.0, 0.0),
         ];
         let inner = vec![
-            p(3.0, 3.0, 0.0), p(7.0, 3.0, 0.0),
-            p(7.0, 7.0, 0.0), p(3.0, 7.0, 0.0),
+            p(3.0, 3.0, 0.0),
+            p(7.0, 3.0, 0.0),
+            p(7.0, 7.0, 0.0),
+            p(3.0, 7.0, 0.0),
         ];
         let outer_wire = MakeWire::new(outer, true).execute(&mut store).unwrap();
         let inner_wire = MakeWire::new(inner, true).execute(&mut store).unwrap();
@@ -484,7 +513,12 @@ mod tests {
         let mut store = TopologyStore::new();
         let face = make_face(
             &mut store,
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
         );
         let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
             .execute(&mut store)
@@ -599,7 +633,12 @@ mod tests {
         let mut store = TopologyStore::new();
         let face = make_face(
             &mut store,
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
         );
         let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
             .execute(&mut store)
@@ -616,7 +655,12 @@ mod tests {
         let mut store = TopologyStore::new();
         let face = make_face(
             &mut store,
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
         );
         let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
             .execute(&mut store)
@@ -633,7 +677,12 @@ mod tests {
         let mut store = TopologyStore::new();
         let face = make_face(
             &mut store,
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
         );
         let solid = Extrude::new(face, Vector3::new(0.0, 0.0, 1.0))
             .execute(&mut store)

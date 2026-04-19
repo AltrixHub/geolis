@@ -146,9 +146,7 @@ mod tests {
         let edge_id = store.wire(wire).unwrap().edges[0].edge;
 
         // Trim to the middle third [3.333, 6.666]
-        let trimmed = Trim::new(edge_id, 3.0, 7.0)
-            .execute(&mut store)
-            .unwrap();
+        let trimmed = Trim::new(edge_id, 3.0, 7.0).execute(&mut store).unwrap();
 
         let edge = store.edge(trimmed).unwrap();
         let start = store.vertex(edge.start).unwrap().point;

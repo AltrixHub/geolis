@@ -60,8 +60,7 @@ pub fn assemble_result(
             frag.inner_boundaries.clone()
         };
 
-        let face_id =
-            create_face_from_polygon(store, &boundary, &inner_boundaries, &mut merger)?;
+        let face_id = create_face_from_polygon(store, &boundary, &inner_boundaries, &mut merger)?;
         all_faces.push(face_id);
     }
 
@@ -257,32 +256,62 @@ mod tests {
         let fragments = vec![
             // Bottom (z=0)
             make_fragment(
-                vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+                vec![
+                    p(0.0, 0.0, 0.0),
+                    p(1.0, 0.0, 0.0),
+                    p(1.0, 1.0, 0.0),
+                    p(0.0, 1.0, 0.0),
+                ],
                 false,
             ),
             // Top (z=1)
             make_fragment(
-                vec![p(0.0, 0.0, 1.0), p(1.0, 0.0, 1.0), p(1.0, 1.0, 1.0), p(0.0, 1.0, 1.0)],
+                vec![
+                    p(0.0, 0.0, 1.0),
+                    p(1.0, 0.0, 1.0),
+                    p(1.0, 1.0, 1.0),
+                    p(0.0, 1.0, 1.0),
+                ],
                 false,
             ),
             // Front (y=0)
             make_fragment(
-                vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 0.0, 1.0), p(0.0, 0.0, 1.0)],
+                vec![
+                    p(0.0, 0.0, 0.0),
+                    p(1.0, 0.0, 0.0),
+                    p(1.0, 0.0, 1.0),
+                    p(0.0, 0.0, 1.0),
+                ],
                 false,
             ),
             // Back (y=1)
             make_fragment(
-                vec![p(0.0, 1.0, 0.0), p(1.0, 1.0, 0.0), p(1.0, 1.0, 1.0), p(0.0, 1.0, 1.0)],
+                vec![
+                    p(0.0, 1.0, 0.0),
+                    p(1.0, 1.0, 0.0),
+                    p(1.0, 1.0, 1.0),
+                    p(0.0, 1.0, 1.0),
+                ],
                 false,
             ),
             // Left (x=0)
             make_fragment(
-                vec![p(0.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 1.0, 1.0), p(0.0, 0.0, 1.0)],
+                vec![
+                    p(0.0, 0.0, 0.0),
+                    p(0.0, 1.0, 0.0),
+                    p(0.0, 1.0, 1.0),
+                    p(0.0, 0.0, 1.0),
+                ],
                 false,
             ),
             // Right (x=1)
             make_fragment(
-                vec![p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(1.0, 1.0, 1.0), p(1.0, 0.0, 1.0)],
+                vec![
+                    p(1.0, 0.0, 0.0),
+                    p(1.0, 1.0, 0.0),
+                    p(1.0, 1.0, 1.0),
+                    p(1.0, 0.0, 1.0),
+                ],
                 false,
             ),
         ];
@@ -300,7 +329,12 @@ mod tests {
 
         let fragments = vec![
             make_fragment(
-                vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+                vec![
+                    p(0.0, 0.0, 0.0),
+                    p(1.0, 0.0, 0.0),
+                    p(1.0, 1.0, 0.0),
+                    p(0.0, 1.0, 0.0),
+                ],
                 false,
             ),
             (

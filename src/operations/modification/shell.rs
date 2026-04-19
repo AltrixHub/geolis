@@ -101,10 +101,7 @@ impl Shell {
         }
 
         // Validate that the inner box is non-degenerate
-        if inner_min.x >= inner_max.x
-            || inner_min.y >= inner_max.y
-            || inner_min.z >= inner_max.z
-        {
+        if inner_min.x >= inner_max.x || inner_min.y >= inner_max.y || inner_min.z >= inner_max.z {
             return Err(OperationError::InvalidInput(
                 "shell thickness too large for solid dimensions".into(),
             )
@@ -131,7 +128,6 @@ fn dominant_axis(normal: &crate::math::Vector3) -> (usize, bool) {
         (2, normal.z > 0.0)
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

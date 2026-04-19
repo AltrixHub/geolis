@@ -51,7 +51,12 @@ mod tests {
     fn translate_shifts_vertices() {
         let mut store = TopologyStore::new();
         let wire = MakeWire::new(
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
             true,
         )
         .execute(&mut store)

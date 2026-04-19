@@ -70,7 +70,7 @@ impl MakeCylinder {
         // when viewed from outside looking toward the axis.
         // The profile lies in the half-plane containing ref_dir.
         let profile = vec![
-            p0,                                  // (r, 0)
+            p0,                                   // (r, 0)
             self.center + ref_dir * r + axis * h, // (r, h)
             self.center + axis * h,               // (0, h) - on axis
             self.center,                          // (0, 0) - on axis
@@ -174,16 +174,16 @@ mod tests {
     #[test]
     fn zero_radius_fails() {
         let mut store = TopologyStore::new();
-        let result = MakeCylinder::new(p(0.0, 0.0, 0.0), 0.0, Vector3::z(), 5.0)
-            .execute(&mut store);
+        let result =
+            MakeCylinder::new(p(0.0, 0.0, 0.0), 0.0, Vector3::z(), 5.0).execute(&mut store);
         assert!(result.is_err());
     }
 
     #[test]
     fn zero_height_fails() {
         let mut store = TopologyStore::new();
-        let result = MakeCylinder::new(p(0.0, 0.0, 0.0), 3.0, Vector3::z(), 0.0)
-            .execute(&mut store);
+        let result =
+            MakeCylinder::new(p(0.0, 0.0, 0.0), 3.0, Vector3::z(), 0.0).execute(&mut store);
         assert!(result.is_err());
     }
 }

@@ -1,7 +1,9 @@
 use crate::error::{OperationError, Result};
 use crate::geometry::curve::Line;
 use crate::math::{Point3, TOLERANCE};
-use crate::topology::{EdgeCurve, EdgeData, OrientedEdge, TopologyStore, VertexData, WireData, WireId};
+use crate::topology::{
+    EdgeCurve, EdgeData, OrientedEdge, TopologyStore, VertexData, WireData, WireId,
+};
 
 /// Creates a wire from a sequence of 3D points.
 pub struct MakeWire {
