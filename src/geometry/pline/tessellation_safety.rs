@@ -72,10 +72,6 @@ pub(crate) const MAX_SET_SPLIT_ITERATIONS: usize = 1000;
     dead_code,
     reason = "Wired into WallOutline2D::execute in plan-13k T10."
 )]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "T7 cleanup never errors today (only filters degenerate boundaries); T9 will add the CDT dry-run Err path."
-)]
 pub(crate) fn make_tessellation_safe(boundaries: Vec<Pline>) -> Result<Vec<Pline>> {
     // T7 — per-boundary cleanup. Each phase mutates the boundary in place
     // (or replaces it). Boundaries that collapse to < 3 vertices are
@@ -115,7 +111,11 @@ pub(crate) fn make_tessellation_safe(boundaries: Vec<Pline>) -> Result<Vec<Pline
         out = split_at_crossing(out, &crossing)?;
     }
 
-    // T9 (CDT dry-run) lands in a subsequent commit.
+    // T9 — CDT dry-run verification (defense-in-depth). Catches
+    // spade-reject configurations that our transverse-crossing detection
+    // missed (e.g. floating-point noise putting a near-crossing just
+    // outside the PARAM_EPS interior bound).
+    verify_cdt_safe(&out)?;
 
     Ok(out)
 }
@@ -447,6 +447,82 @@ fn insert_vertex_after_edge(pline: &mut Pline, edge: usize, p: PlineVertex) {
     pline.vertices.insert(insert_at, p);
 }
 
+// ---------------------------------------------------------------------------
+// T9: CDT dry-run verification
+// ---------------------------------------------------------------------------
+
+/// Defense-in-depth: build a fresh
+/// [`spade::ConstrainedDelaunayTriangulation`], insert every vertex of
+/// every boundary, then attempt to add each boundary edge as a constraint
+/// via `try_add_constraint`. Return `Err` on the first vertex insertion
+/// or constraint-edge rejection.
+///
+/// This catches spade-reject cases that our transverse-crossing detection
+/// missed (e.g. due to floating-point noise putting a near-crossing just
+/// outside the `PARAM_EPS` interior bound). Cheap relative to a full
+/// tessellation; expensive enough that we run it only once at the end of
+/// [`make_tessellation_safe`] after all cleanup + splitting.
+///
+/// Uses spade's [`try_add_constraint`](spade::ConstrainedDelaunayTriangulation::try_add_constraint)
+/// rather than the panicking `add_constraint`. On a constraint conflict
+/// `try_add_constraint` returns an empty `Vec<FixedDirectedEdgeHandle>`
+/// without modifying the triangulation, which we surface as
+/// `OperationError::Failed`.
+fn verify_cdt_safe(boundaries: &[Pline]) -> Result<()> {
+    use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
+
+    let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
+        ConstrainedDelaunayTriangulation::new();
+
+    for (bi, b) in boundaries.iter().enumerate() {
+        let n = b.vertices.len();
+        if n < 3 {
+            continue;
+        }
+
+        // Insert every vertex first. Spade's insert tolerates duplicates
+        // (returns the existing handle for a coincident point), so this
+        // is safe even when separate boundaries share a T-junction
+        // vertex inserted by T8.
+        let mut handles = Vec::with_capacity(n);
+        for (vi, v) in b.vertices.iter().enumerate() {
+            match cdt.insert(Point2::new(v.x, v.y)) {
+                Ok(h) => handles.push(h),
+                Err(e) => {
+                    return Err(OperationError::Failed(format!(
+                        "tessellation_safety: CDT dry-run rejected vertex \
+                         insert (boundary {bi}, vertex {vi}): {e:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+
+        // Add each boundary edge as a constraint. Edge k connects
+        // vertices[k] to vertices[(k+1) % n].
+        for k in 0..n {
+            let from = handles[k];
+            let to = handles[(k + 1) % n];
+            if from == to {
+                // Coincident vertices map to the same handle — skip
+                // (zero-length edge, not a constraint).
+                continue;
+            }
+            let added = cdt.try_add_constraint(from, to);
+            if added.is_empty() {
+                return Err(OperationError::Failed(format!(
+                    "tessellation_safety: CDT dry-run rejected constraint edge \
+                     (boundary {bi}, edge {k}): would intersect an existing \
+                     constraint edge"
+                ))
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +827,30 @@ mod tests {
             count_remaining_crossings(&result),
             0,
             "output should have zero remaining crossings"
+        );
+    }
+
+    // --- T9: verify_cdt_safe ---
+
+    #[test]
+    fn verify_cdt_safe_passes_simple_unit_square() {
+        // A single simple unit square — must pass the CDT dry-run.
+        let s = closed_unit_square();
+        verify_cdt_safe(&[s]).expect("simple unit square should pass CDT dry-run");
+    }
+
+    #[test]
+    fn verify_cdt_safe_rejects_unresolved_crossing() {
+        // Manually constructed figure-8 — has a transverse self-crossing.
+        // Bypass T7+T8 by calling verify_cdt_safe directly to confirm the
+        // CDT dry-run rejects the unresolved crossing.
+        let figure_eight = closed_pline_xy(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)]);
+        let err = verify_cdt_safe(&[figure_eight])
+            .expect_err("figure-8 with unresolved crossing should be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("CDT dry-run rejected"),
+            "error message should mention CDT dry-run rejection; got {msg}"
         );
     }
 }
