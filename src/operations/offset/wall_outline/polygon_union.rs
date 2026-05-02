@@ -60,11 +60,18 @@ pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> UnionResult {
 
             let mut params: Vec<f64> = vec![0.0, 1.0];
             for (other_idx, other_ring) in all_rings.iter().enumerate() {
-                if other_idx == ring_idx {
-                    continue;
-                }
                 let m = other_ring.len();
                 for ej in 0..m {
+                    // Skip only the SAME edge — same-ring non-adjacent edges
+                    // can transversely cross (e.g. a self-intersecting band
+                    // produced by `stroke_expand` over a self-crossing
+                    // centerline). Skipping the entire same-ring case (as
+                    // before) leaves self-crossings unsplit, which preserves
+                    // the interior wall-material seam in the trace output —
+                    // the very seam this union is supposed to remove.
+                    if other_idx == ring_idx && ej == ei {
+                        continue;
+                    }
                     let b0 = other_ring[ej];
                     let b1 = other_ring[(ej + 1) % m];
                     if let Some((t, _u)) = seg_seg_intersect(a0, a1, b0, b1) {
@@ -521,13 +528,13 @@ fn seg_seg_intersect(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PointClass {
+pub(crate) enum PointClass {
     Inside,
     Outside,
     Boundary,
 }
 
-fn point_in_polygon_class(p: (f64, f64), poly: &Polygon) -> PointClass {
+pub(crate) fn point_in_polygon_class(p: (f64, f64), poly: &Polygon) -> PointClass {
     let n = poly.len();
     // First check if on any edge
     for i in 0..n {

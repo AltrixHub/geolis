@@ -555,25 +555,10 @@ mod tests {
         }
     }
 
-    /// Pathological double-cross stress case: 11-vertex comb pattern with
-    /// many self-intersections. Currently fails because make_tessellation_safe's
-    /// T8 cross-boundary split misses some residual crossings that
-    /// `verify_cdt_safe` then catches and rejects with `Err`.
-    ///
-    /// **Status:** known-failing, kept as a regression target for future
-    /// investigation. The current pipeline correctly returns a clean
-    /// `Err(OperationError::Failed)` instead of panicking, but the
-    /// rendering stays empty for this specific pathological input. The
-    /// simpler `multi_self_intersecting_centerline_returns_cdt_safe_set`
-    /// case (6-vertex figure-8-like) passes — this proves the T7+T8+T9
-    /// pipeline is correct in concept; what remains is tightening
-    /// `find_first_set_crossing` to catch residual numerically-borderline
-    /// crossings that spade's CDT detects via different precision.
-    ///
-    /// Marked `#[ignore]` so the rest of the suite runs green; remove
-    /// the attribute to reproduce locally.
+    /// 11-vertex comb pattern with many self-intersections. Previously
+    /// failed before the `union_all_with_holes` fix that now detects
+    /// same-ring self-crossings; passes after that fix.
     #[test]
-    #[ignore = "plan-13k known gap: 11-vertex multi-cross input produces residual crossings that find_first_set_crossing misses but verify_cdt_safe rejects. Foundation is in place; gap is in detection coverage. See commit message for details."]
     fn double_cross() {
         let pline = Pline {
             vertices: vec![
@@ -695,5 +680,93 @@ mod tests {
                 b.vertices.len()
             );
         }
+    }
+
+    /// Semantic union check: a self-crossing OPEN centerline (the user's
+    /// continuous-Wall click sequence in revion) must produce a merged
+    /// outline whose interior contains the crossing region. For an open
+    /// polyline `[(0,0)→(2,2)→(0,2)→(2,0)]` stroked at width 0.3 (each
+    /// side), segment 0 crosses segment 2 at (1, 1). The merged outline
+    /// must:
+    /// - contain (1, 1) as Inside (the crossing point is wall material)
+    /// - contain (0.5, 0.5) as Inside (centerline of segment 0)
+    /// - have NO self-intersection in any output boundary
+    #[test]
+    fn self_crossing_open_centerline_unions_to_merged_filled_region() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(2.0, 2.0),
+                PlineVertex::line(0.0, 2.0),
+                PlineVertex::line(2.0, 0.0),
+            ],
+            closed: false,
+        };
+        let result = run_outline(vec![pline], 0.3);
+        assert!(!result.is_empty());
+
+        // The crossing point (1, 1) and a band-arm interior (0.5, 0.5)
+        // must both be classified as Inside the union region (i.e.
+        // covered by an outer boundary and not punched out by a hole).
+        let xs = [(1.0, 1.0), (0.5, 0.5)];
+        for (x, y) in xs {
+            let mut inside = false;
+            for b in &result {
+                let pts: Vec<(f64, f64)> = b.vertices.iter().map(|v| (v.x, v.y)).collect();
+                let cls = polygon_union::point_in_polygon_class((x, y), &pts);
+                let area = polygon_union::signed_area(&pts);
+                if cls == polygon_union::PointClass::Inside {
+                    if area > 0.0 {
+                        inside = true; // outer boundary covers this point
+                    } else {
+                        inside = false; // hole punches it out → seam still present
+                        break;
+                    }
+                }
+            }
+            assert!(
+                inside,
+                "({x}, {y}) should be Inside the merged wall material; \
+                 internal seam still present?"
+            );
+        }
+    }
+
+    /// Two crossing wall polylines (X shape) must merge into a single
+    /// connected wall region. The crossing-center diamond should be
+    /// covered by wall material — not represented as a hole that punches
+    /// it out.
+    #[test]
+    fn two_crossing_walls_merge_with_filled_center() {
+        let h = Pline {
+            vertices: vec![PlineVertex::line(0.0, 1.0), PlineVertex::line(2.0, 1.0)],
+            closed: false,
+        };
+        let v = Pline {
+            vertices: vec![PlineVertex::line(1.0, 0.0), PlineVertex::line(1.0, 2.0)],
+            closed: false,
+        };
+        let result = run_outline(vec![h, v], 0.2);
+        assert!(!result.is_empty());
+
+        // The crossing center (1, 1) must be Inside the wall material.
+        let center = (1.0, 1.0);
+        let mut covered_by_outer = false;
+        for b in &result {
+            let pts: Vec<(f64, f64)> = b.vertices.iter().map(|v| (v.x, v.y)).collect();
+            let cls = polygon_union::point_in_polygon_class(center, &pts);
+            let area = polygon_union::signed_area(&pts);
+            if cls == polygon_union::PointClass::Inside {
+                if area > 0.0 {
+                    covered_by_outer = true;
+                } else {
+                    panic!("(1, 1) is Inside a CW boundary (hole) — center is punched out");
+                }
+            }
+        }
+        assert!(
+            covered_by_outer,
+            "X-crossing center (1, 1) should be wall material, but no outer boundary covers it"
+        );
     }
 }
