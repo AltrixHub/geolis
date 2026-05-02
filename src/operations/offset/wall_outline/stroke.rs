@@ -41,9 +41,23 @@ pub fn stroke_expand(
     let mut right_pts: Vec<(f64, f64)> = Vec::new();
 
     if closed {
-        build_closed_offsets(&verts, &dirs, left_w, right_w, &mut left_pts, &mut right_pts);
+        build_closed_offsets(
+            &verts,
+            &dirs,
+            left_w,
+            right_w,
+            &mut left_pts,
+            &mut right_pts,
+        );
     } else {
-        build_open_offsets(&verts, &dirs, left_w, right_w, &mut left_pts, &mut right_pts);
+        build_open_offsets(
+            &verts,
+            &dirs,
+            left_w,
+            right_w,
+            &mut left_pts,
+            &mut right_pts,
+        );
     }
 
     if closed {
@@ -308,15 +322,15 @@ mod tests {
         assert!(result.holes.is_empty());
         let area = signed_area_tuples(&result.outer).abs();
         let expected = 5.0 * 0.6;
-        assert!((area - expected).abs() < 0.1, "area={area}, expected={expected}");
+        assert!(
+            (area - expected).abs() < 0.1,
+            "area={area}, expected={expected}"
+        );
     }
 
     #[test]
     fn l_shape_open() {
-        let result = stroke_expand(
-            &[(0.0, 0.0), (3.0, 0.0), (3.0, 3.0)],
-            false, 0.3, 0.3,
-        );
+        let result = stroke_expand(&[(0.0, 0.0), (3.0, 0.0), (3.0, 3.0)], false, 0.3, 0.3);
         assert!(result.holes.is_empty());
         let area = signed_area_tuples(&result.outer).abs();
         assert!(area > 3.0, "area={area} too small");
@@ -326,7 +340,9 @@ mod tests {
     fn closed_square() {
         let result = stroke_expand(
             &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
-            true, 0.3, 0.3,
+            true,
+            0.3,
+            0.3,
         );
         assert_eq!(result.holes.len(), 1, "closed square should have 1 hole");
         let outer_area = signed_area_tuples(&result.outer);
@@ -334,7 +350,10 @@ mod tests {
         assert!(outer_area > 0.0, "outer should be CCW (positive area)");
         assert!(hole_area < 0.0, "hole should be CW (negative area)");
         let wall_area = outer_area + hole_area;
-        assert!(wall_area > 15.0 && wall_area < 30.0, "wall_area={wall_area}");
+        assert!(
+            wall_area > 15.0 && wall_area < 30.0,
+            "wall_area={wall_area}"
+        );
     }
 
     #[test]
@@ -342,7 +361,9 @@ mod tests {
         // CW input should be normalized to CCW.
         let result = stroke_expand(
             &[(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)],
-            true, 0.3, 0.3,
+            true,
+            0.3,
+            0.3,
         );
         assert_eq!(result.holes.len(), 1);
         let outer_area = signed_area_tuples(&result.outer);
@@ -355,16 +376,16 @@ mod tests {
         assert!(result.holes.is_empty());
         let area = signed_area_tuples(&result.outer).abs();
         let expected = 5.0 * 0.3;
-        assert!((area - expected).abs() < 0.1, "area={area}, expected={expected}");
+        assert!(
+            (area - expected).abs() < 0.1,
+            "area={area}, expected={expected}"
+        );
     }
 
     #[test]
     fn acute_angle_bevel() {
         // Very sharp turn should trigger bevel fallback on the outer side.
-        let result = stroke_expand(
-            &[(0.0, 0.0), (5.0, 0.0), (4.9, 0.1)],
-            false, 0.3, 0.3,
-        );
+        let result = stroke_expand(&[(0.0, 0.0), (5.0, 0.0), (4.9, 0.1)], false, 0.3, 0.3);
         assert!(result.holes.is_empty());
         assert!(result.outer.len() >= 4);
     }
@@ -421,15 +442,13 @@ mod tests {
     fn join_result_convex_miter() {
         // Convex CCW corner under miter limit → single-point miters on both
         // sides. Verifies compute_join's local chain contract.
-        let join = compute_join(
-            (0.0, 0.0),
-            (1.0, 0.0),
-            (0.0, 1.0),
-            0.3,
-            0.3,
-        );
+        let join = compute_join((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), 0.3, 0.3);
         assert_eq!(join.left.len(), 1, "inner miter is a single point");
-        assert_eq!(join.right.len(), 1, "outer miter under limit is a single point");
+        assert_eq!(
+            join.right.len(),
+            1,
+            "outer miter under limit is a single point"
+        );
     }
 
     #[test]
@@ -444,12 +463,13 @@ mod tests {
         };
         let join = compute_join((0.0, 0.0), (1.0, 0.0), dir_out, 0.3, 0.3);
         // One of the sides must bevel; the other must stay a single miter point.
-        let bevel_count =
-            usize::from(join.left.len() == 2) + usize::from(join.right.len() == 2);
-        let miter_count =
-            usize::from(join.left.len() == 1) + usize::from(join.right.len() == 1);
+        let bevel_count = usize::from(join.left.len() == 2) + usize::from(join.right.len() == 2);
+        let miter_count = usize::from(join.left.len() == 1) + usize::from(join.right.len() == 1);
         assert_eq!(bevel_count, 1, "exactly one side should bevel (the outer)");
-        assert_eq!(miter_count, 1, "the other side should stay a single miter point");
+        assert_eq!(
+            miter_count, 1,
+            "the other side should stay a single miter point"
+        );
     }
 
     #[test]

@@ -41,11 +41,7 @@ pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> UnionResult {
     }
 
     // Collect all rings as polygons for edge splitting
-    let all_rings: Vec<&Polygon> = outers
-        .iter()
-        .chain(holes.iter())
-        .map(|(_, p)| *p)
-        .collect();
+    let all_rings: Vec<&Polygon> = outers.iter().chain(holes.iter()).map(|(_, p)| *p).collect();
 
     // Build sub-edges from all rings
     let mut all_sub_edges: Vec<(usize, bool, (f64, f64), (f64, f64))> = Vec::new(); // (input_idx, is_outer, start, end)
@@ -128,10 +124,8 @@ pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> UnionResult {
         true
     });
 
-    let mut edges: Vec<((f64, f64), (f64, f64))> = all_sub_edges
-        .iter()
-        .map(|&(_, _, s, e)| (s, e))
-        .collect();
+    let mut edges: Vec<((f64, f64), (f64, f64))> =
+        all_sub_edges.iter().map(|&(_, _, s, e)| (s, e)).collect();
     dedup_edges(&mut edges);
 
     let mut boundaries = trace_loops(&edges);
@@ -387,8 +381,7 @@ fn trace_one_loop(
         boundary.push(points[si]);
 
         // Pick next edge: minimum CCW angle
-        let incoming_angle =
-            (points[ei].1 - points[si].1).atan2(points[ei].0 - points[si].0);
+        let incoming_angle = (points[ei].1 - points[si].1).atan2(points[ei].0 - points[si].0);
         let reverse_angle = normalize_angle(incoming_angle + std::f64::consts::PI);
 
         let mut best: Option<(usize, f64)> = None;
@@ -396,8 +389,8 @@ fn trace_one_loop(
             if used[next_edge] {
                 continue;
             }
-            let next_angle = (points[next_target].1 - points[ei].1)
-                .atan2(points[next_target].0 - points[ei].0);
+            let next_angle =
+                (points[next_target].1 - points[ei].1).atan2(points[next_target].0 - points[ei].0);
             let mut delta = normalize_angle(next_angle - reverse_angle);
             if delta.abs() < WALL_EPS {
                 delta = 2.0 * std::f64::consts::PI;
@@ -636,10 +629,7 @@ mod tests {
         let result = union_all(&[a, b]);
         assert_eq!(result.boundaries.len(), 1);
         let area = signed_area(&result.boundaries[0]);
-        assert!(
-            (area - 10.0).abs() < 0.1,
-            "expected area ~10, got {area}"
-        );
+        assert!((area - 10.0).abs() < 0.1, "expected area ~10, got {area}");
     }
 
     #[test]
@@ -649,10 +639,7 @@ mod tests {
         let result = union_all(&[a, b]);
         assert_eq!(result.boundaries.len(), 1);
         let area = signed_area(&result.boundaries[0]);
-        assert!(
-            (area - 24.0).abs() < 0.1,
-            "expected area ~24, got {area}"
-        );
+        assert!((area - 24.0).abs() < 0.1, "expected area ~24, got {area}");
     }
 
     #[test]
@@ -662,10 +649,7 @@ mod tests {
         let result = union_all(&[a, b]);
         assert_eq!(result.boundaries.len(), 1);
         let area = signed_area(&result.boundaries[0]);
-        assert!(
-            (area - 36.0).abs() < 0.1,
-            "expected area ~36, got {area}"
-        );
+        assert!((area - 36.0).abs() < 0.1, "expected area ~36, got {area}");
     }
 
     #[test]
@@ -701,13 +685,15 @@ mod tests {
         // Four rectangles forming a closed square wall → should produce
         // an outer boundary (CCW) and a hole (CW). Exercises the production
         // `union_all_with_holes` path with hole-free inputs.
-        fn segment_to_rect(a: (f64,f64), b: (f64,f64), lw: f64, rw: f64) -> Polygon {
-            let (dx, dy) = (b.0-a.0, b.1-a.1);
-            let len = (dx*dx+dy*dy).sqrt();
-            let (nx, ny) = (-dy/len, dx/len);
+        fn segment_to_rect(a: (f64, f64), b: (f64, f64), lw: f64, rw: f64) -> Polygon {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = (dx * dx + dy * dy).sqrt();
+            let (nx, ny) = (-dy / len, dx / len);
             vec![
-                (a.0+lw*nx, a.1+lw*ny), (b.0+lw*nx, b.1+lw*ny),
-                (b.0-rw*nx, b.1-rw*ny), (a.0-rw*nx, a.1-rw*ny),
+                (a.0 + lw * nx, a.1 + lw * ny),
+                (b.0 + lw * nx, b.1 + lw * ny),
+                (b.0 - rw * nx, b.1 - rw * ny),
+                (a.0 - rw * nx, a.1 - rw * ny),
             ]
         }
         let d = 0.3;
@@ -734,21 +720,20 @@ mod tests {
             areas.iter().any(|a| *a > 0.0),
             "should have a CCW outer boundary"
         );
-        assert!(
-            areas.iter().any(|a| *a < 0.0),
-            "should have a CW hole"
-        );
+        assert!(areas.iter().any(|a| *a < 0.0), "should have a CW hole");
     }
 
     #[test]
     fn union_wall_segments_t_junction() {
-        fn segment_to_rect(a: (f64,f64), b: (f64,f64), lw: f64, rw: f64) -> Polygon {
-            let (dx, dy) = (b.0-a.0, b.1-a.1);
-            let len = (dx*dx+dy*dy).sqrt();
-            let (nx, ny) = (-dy/len, dx/len);
+        fn segment_to_rect(a: (f64, f64), b: (f64, f64), lw: f64, rw: f64) -> Polygon {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = (dx * dx + dy * dy).sqrt();
+            let (nx, ny) = (-dy / len, dx / len);
             vec![
-                (a.0+lw*nx, a.1+lw*ny), (b.0+lw*nx, b.1+lw*ny),
-                (b.0-rw*nx, b.1-rw*ny), (a.0-rw*nx, a.1-rw*ny),
+                (a.0 + lw * nx, a.1 + lw * ny),
+                (b.0 + lw * nx, b.1 + lw * ny),
+                (b.0 - rw * nx, b.1 - rw * ny),
+                (a.0 - rw * nx, a.1 - rw * ny),
             ]
         }
         let d = 0.15;
@@ -770,13 +755,15 @@ mod tests {
 
     #[test]
     fn union_angled_wall_segments() {
-        fn segment_to_rect(a: (f64,f64), b: (f64,f64), lw: f64, rw: f64) -> Polygon {
-            let (dx, dy) = (b.0-a.0, b.1-a.1);
-            let len = (dx*dx+dy*dy).sqrt();
-            let (nx, ny) = (-dy/len, dx/len);
+        fn segment_to_rect(a: (f64, f64), b: (f64, f64), lw: f64, rw: f64) -> Polygon {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = (dx * dx + dy * dy).sqrt();
+            let (nx, ny) = (-dy / len, dx / len);
             vec![
-                (a.0+lw*nx, a.1+lw*ny), (b.0+lw*nx, b.1+lw*ny),
-                (b.0-rw*nx, b.1-rw*ny), (a.0-rw*nx, a.1-rw*ny),
+                (a.0 + lw * nx, a.1 + lw * ny),
+                (b.0 + lw * nx, b.1 + lw * ny),
+                (b.0 - rw * nx, b.1 - rw * ny),
+                (a.0 - rw * nx, a.1 - rw * ny),
             ]
         }
         let d = 0.15;
@@ -859,7 +846,11 @@ mod tests {
         let result = union_all_with_holes(&[a, b]);
         assert!(!result.boundaries.is_empty());
         // Should have outers and potentially holes
-        let ccw_count = result.boundaries.iter().filter(|b| signed_area(b) > 0.0).count();
+        let ccw_count = result
+            .boundaries
+            .iter()
+            .filter(|b| signed_area(b) > 0.0)
+            .count();
         assert!(ccw_count >= 1, "needs at least one outer");
     }
 
@@ -941,12 +932,7 @@ mod tests {
         let d = 0.15;
         // Zone A: (0, 0) to (5, 3) → stroke outer (-d, -d) to (5+d, 3+d), hole CW.
         let a = PolygonWithHoles {
-            outer: vec![
-                (-d, -d),
-                (5.0 + d, -d),
-                (5.0 + d, 3.0 + d),
-                (-d, 3.0 + d),
-            ],
+            outer: vec![(-d, -d), (5.0 + d, -d), (5.0 + d, 3.0 + d), (-d, 3.0 + d)],
             // Hole must be CW for polygon_union to treat it as a hole.
             holes: vec![vec![(d, d), (d, 3.0 - d), (5.0 - d, 3.0 - d), (5.0 - d, d)]],
         };
@@ -1000,7 +986,11 @@ mod tests {
         };
         let result = union_all_with_holes(&[a, b]);
         assert_eq!(result.boundaries.len(), 2, "two separate outers");
-        let ccw_count = result.boundaries.iter().filter(|b| signed_area(b) > 0.0).count();
+        let ccw_count = result
+            .boundaries
+            .iter()
+            .filter(|b| signed_area(b) > 0.0)
+            .count();
         assert_eq!(ccw_count, 2, "both should be CCW outers");
     }
 }

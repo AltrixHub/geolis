@@ -100,7 +100,8 @@ impl WallOutline2D {
                     verts.pop();
                 }
             }
-            let pwh = stroke::stroke_expand(&verts, pline.closed, self.left_width, self.right_width);
+            let pwh =
+                stroke::stroke_expand(&verts, pline.closed, self.left_width, self.right_width);
             if pwh.outer.len() >= 3 {
                 wall_polys.push(pwh);
             }
@@ -148,7 +149,6 @@ impl WallOutline2D {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -176,7 +176,10 @@ mod tests {
             .sum()
     }
 
-    fn max_dist_to_centerlines(boundaries: &[Pline], centerlines: &[((f64,f64),(f64,f64))]) -> f64 {
+    fn max_dist_to_centerlines(
+        boundaries: &[Pline],
+        centerlines: &[((f64, f64), (f64, f64))],
+    ) -> f64 {
         let mut max_d = 0.0_f64;
         for b in boundaries {
             for v in &b.vertices {
@@ -190,7 +193,7 @@ mod tests {
         max_d
     }
 
-    fn pline_to_centerlines(pline: &Pline) -> Vec<((f64,f64),(f64,f64))> {
+    fn pline_to_centerlines(pline: &Pline) -> Vec<((f64, f64), (f64, f64))> {
         let n = pline.vertices.len();
         let seg_count = if pline.closed { n } else { n.saturating_sub(1) };
         (0..seg_count)
@@ -213,7 +216,10 @@ mod tests {
         assert!(!result.is_empty());
         let area = total_area(&result);
         let expected = 5.0 * 0.6; // length * thickness
-        assert!((area.abs() - expected).abs() < 0.5, "area={area}, expected≈{expected}");
+        assert!(
+            (area.abs() - expected).abs() < 0.5,
+            "area={area}, expected≈{expected}"
+        );
     }
 
     #[test]
@@ -370,20 +376,19 @@ mod tests {
         // polygon_union may leave extra colinear split vertices, but the
         // crease filter in WallLayer must drop those from the 3D wireframe.
         for (i, b) in result.iter().enumerate() {
-            eprintln!(
-                "boundary[{i}] verts={} area_sign={:+}",
-                b.vertices.len(),
-                {
-                    let n = b.vertices.len();
-                    let mut a = 0.0;
-                    for k in 0..n {
-                        let j = (k + 1) % n;
-                        a += b.vertices[k].x * b.vertices[j].y
-                            - b.vertices[j].x * b.vertices[k].y;
-                    }
-                    if a > 0.0 { 1 } else { -1 }
+            eprintln!("boundary[{i}] verts={} area_sign={:+}", b.vertices.len(), {
+                let n = b.vertices.len();
+                let mut a = 0.0;
+                for k in 0..n {
+                    let j = (k + 1) % n;
+                    a += b.vertices[k].x * b.vertices[j].y - b.vertices[j].x * b.vertices[k].y;
                 }
-            );
+                if a > 0.0 {
+                    1
+                } else {
+                    -1
+                }
+            });
             for (k, v) in b.vertices.iter().enumerate() {
                 eprintln!("  v[{k}] = ({:.3}, {:.3})", v.x, v.y);
             }
@@ -446,13 +451,55 @@ mod tests {
     fn angled_per_segment_walls() {
         let d = 0.15;
         let plines = vec![
-            Pline::from_points(&[Point3::new(-3.217, -4.144, 0.0), Point3::new(-2.635, 2.085, 0.0)], false),
-            Pline::from_points(&[Point3::new(-3.217, -4.144, 0.0), Point3::new(2.002, -4.631, 0.0)], false),
-            Pline::from_points(&[Point3::new(-2.635, 2.085, 0.0), Point3::new(2.578, 1.534, 0.0)], false),
-            Pline::from_points(&[Point3::new(2.002, -4.631, 0.0), Point3::new(2.578, 1.534, 0.0)], false),
-            Pline::from_points(&[Point3::new(2.002, -4.631, 0.0), Point3::new(6.473, -5.049, 0.0)], false),
-            Pline::from_points(&[Point3::new(2.578, 1.534, 0.0), Point3::new(6.861, -0.896, 0.0)], false),
-            Pline::from_points(&[Point3::new(6.473, -5.049, 0.0), Point3::new(6.861, -0.896, 0.0)], false),
+            Pline::from_points(
+                &[
+                    Point3::new(-3.217, -4.144, 0.0),
+                    Point3::new(-2.635, 2.085, 0.0),
+                ],
+                false,
+            ),
+            Pline::from_points(
+                &[
+                    Point3::new(-3.217, -4.144, 0.0),
+                    Point3::new(2.002, -4.631, 0.0),
+                ],
+                false,
+            ),
+            Pline::from_points(
+                &[
+                    Point3::new(-2.635, 2.085, 0.0),
+                    Point3::new(2.578, 1.534, 0.0),
+                ],
+                false,
+            ),
+            Pline::from_points(
+                &[
+                    Point3::new(2.002, -4.631, 0.0),
+                    Point3::new(2.578, 1.534, 0.0),
+                ],
+                false,
+            ),
+            Pline::from_points(
+                &[
+                    Point3::new(2.002, -4.631, 0.0),
+                    Point3::new(6.473, -5.049, 0.0),
+                ],
+                false,
+            ),
+            Pline::from_points(
+                &[
+                    Point3::new(2.578, 1.534, 0.0),
+                    Point3::new(6.861, -0.896, 0.0),
+                ],
+                false,
+            ),
+            Pline::from_points(
+                &[
+                    Point3::new(6.473, -5.049, 0.0),
+                    Point3::new(6.861, -0.896, 0.0),
+                ],
+                false,
+            ),
         ];
         let result = run_outline(plines, d);
         assert!(!result.is_empty());
@@ -461,7 +508,8 @@ mod tests {
                 assert!(
                     v.x >= -4.0 && v.x <= 8.0 && v.y >= -6.0 && v.y <= 3.0,
                     "vertex ({:.3}, {:.3}) out of range",
-                    v.x, v.y,
+                    v.x,
+                    v.y,
                 );
             }
         }
