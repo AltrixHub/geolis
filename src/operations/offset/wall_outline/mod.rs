@@ -51,10 +51,35 @@ impl WallOutline2D {
 
     /// Executes the wall outline generation.
     ///
+    /// # Output guarantee
+    ///
+    /// Each returned [`Pline`] is **simple** — its vertices contain no pair
+    /// of non-adjacent edges that cross at strictly-interior parameters.
+    /// Self-intersecting offset boundaries — which can arise from sharp
+    /// zigzag or self-crossing centerlines — are split at crossing points
+    /// into multiple simple boundaries before return; the resulting
+    /// boundaries may touch each other at the original crossing points.
+    /// This guarantee is required so callers (e.g. `spade::cdt`-based
+    /// tessellation) do not panic on transversely-crossing constraint
+    /// edges.
+    ///
+    /// # Winding is unconstrained
+    ///
+    /// Prior to the simplicity guarantee, this function implicitly
+    /// returned CCW outer boundaries and CW hole boundaries (inherited
+    /// from `polygon_union::union_all_with_holes`). After self-intersection
+    /// resolution, child loops produced from a self-intersecting parent
+    /// inherit unrelated signed areas and may be either orientation
+    /// (worked example: a figure-8 centerline yields one CCW + one CW
+    /// child). Callers needing CCW-or-CW classification must re-derive
+    /// it from the shoelace area of each output.
+    ///
     /// # Errors
     ///
-    /// Returns `OperationError::InvalidInput` if no polyline has at least
-    /// 2 vertices, or `OperationError::Failed` if no outline can be generated.
+    /// - `OperationError::InvalidInput` — no polyline has at least 2 vertices.
+    /// - `OperationError::Failed` — no outline can be generated, or the
+    ///   self-intersection splitter bailed at its safety bound (input
+    ///   was pathologically self-intersecting).
     pub fn execute(&self) -> Result<Vec<Pline>> {
         let valid: Vec<&Pline> = self
             .plines
@@ -121,22 +146,27 @@ impl WallOutline2D {
             .into());
         }
 
-        // Step 3: Convert to Pline boundaries.
-        let outlines: Vec<Pline> = union_result
-            .boundaries
-            .into_iter()
-            .filter(|b| b.len() >= 3)
-            .map(|b| {
-                let vertices = b
+        // Step 3: Convert to Pline boundaries, then split any
+        // self-intersecting boundary into simple loops so the output is
+        // tessellation-safe (see `pline::self_intersection` doc-comment).
+        // Any pathological input that exceeds MAX_SPLIT_ITERATIONS in the
+        // resolver propagates as Err here via `?`.
+        let mut outlines: Vec<Pline> = Vec::new();
+        for b in union_result.boundaries {
+            if b.len() < 3 {
+                continue;
+            }
+            let pline = Pline {
+                vertices: b
                     .into_iter()
                     .map(|(x, y)| PlineVertex::line(x, y))
-                    .collect();
-                Pline {
-                    vertices,
-                    closed: true,
-                }
-            })
-            .collect();
+                    .collect(),
+                closed: true,
+            };
+            let resolved =
+                crate::geometry::pline::self_intersection::split_at_self_intersections(pline)?;
+            outlines.extend(resolved.into_iter().filter(|p| p.vertices.len() >= 3));
+        }
 
         if outlines.is_empty() {
             return Err(OperationError::Failed(
@@ -553,5 +583,51 @@ mod tests {
         let d = 0.5;
         let result = run_outline(vec![pline], d);
         assert!(!result.is_empty());
+    }
+
+    /// Integration: a centerline that crosses itself must yield only
+    /// simple boundaries. Without the `split_at_self_intersections` step
+    /// in `execute()`, this output would self-intersect and panic any
+    /// downstream `spade::cdt`-based tessellation.
+    #[test]
+    fn closed_self_intersecting_centerline_returns_simple_boundaries() {
+        // Figure-8 closed centerline.
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(2.0, 2.0),
+                PlineVertex::line(0.0, 2.0),
+                PlineVertex::line(2.0, 0.0),
+            ],
+            closed: true,
+        };
+        let result = run_outline(vec![pline], 0.1);
+
+        assert!(
+            !result.is_empty(),
+            "self-intersecting centerline should still produce boundaries"
+        );
+
+        // Use the crate-rooted path — `wall_outline/tests` is at
+        // `crate::operations::offset::wall_outline::tests`; its `super`
+        // is `wall_outline`, not `pline`. Only `crate::geometry::pline::*`
+        // resolves correctly.
+        for (idx, b) in result.iter().enumerate() {
+            assert!(
+                b.closed,
+                "boundary[{idx}] should be closed; got open with {} vertices",
+                b.vertices.len()
+            );
+            assert!(
+                b.vertices.len() >= 3,
+                "boundary[{idx}] should have >=3 vertices; got {}",
+                b.vertices.len()
+            );
+            assert!(
+                crate::geometry::pline::self_intersection::find_self_intersection(b).is_none(),
+                "boundary[{idx}] should be simple after split; \
+                 still contains a self-intersection"
+            );
+        }
     }
 }
