@@ -8,27 +8,16 @@
 //! **Scope: closed plines only.** Open plines are out of scope because
 //! `WallOutline2D` always produces closed boundaries.
 
-use super::Pline;
+use super::{Pline, PlineVertex};
+use crate::error::{OperationError, Result};
 
 /// Tolerance for cross-product parallelism / degeneracy checks.
-#[allow(
-    dead_code,
-    reason = "directly consumed by segment_segment_intersection_2d below; warning is for the constant's pub(crate) reach in plan-13k T3"
-)]
 pub(crate) const CROSS_EPS: f64 = 1e-12;
 
 /// Tolerance for segment parameter interior bounds.
-#[allow(
-    dead_code,
-    reason = "directly consumed by segment_segment_intersection_2d below; warning is for the constant's pub(crate) reach in plan-13k T3"
-)]
 pub(crate) const PARAM_EPS: f64 = 1e-9;
 
-/// Work-queue safety bound for the splitter (used in T2 of plan-13k).
-#[allow(
-    dead_code,
-    reason = "consumed by split_at_self_intersections in plan-13k T2"
-)]
+/// Work-queue safety bound for `split_at_self_intersections`.
 pub(crate) const MAX_SPLIT_ITERATIONS: usize = 100;
 
 // ---------------------------------------------------------------------------
@@ -50,10 +39,6 @@ pub(crate) const MAX_SPLIT_ITERATIONS: usize = 100;
 /// overlap and endpoint-touching are not flagged because they do not
 /// trigger `spade::cdt` panics — those are the failure mode this module
 /// is designed to prevent.
-#[allow(
-    dead_code,
-    reason = "consumed by find_self_intersection below + WallOutline2D::execute in plan-13k T3"
-)]
 #[allow(
     clippy::many_single_char_names,
     reason = "a/b/c/d are the standard segment-endpoint convention in computational geometry"
@@ -118,10 +103,6 @@ pub(crate) fn segment_segment_intersection_2d(
 /// — the only caller in this crate — bulges are always 0, so the
 /// approximation is exact for that pipeline.
 #[allow(
-    dead_code,
-    reason = "consumed by split_at_self_intersections (T2) and WallOutline2D::execute (T3) in plan-13k"
-)]
-#[allow(
     clippy::many_single_char_names,
     reason = "a/b/c/d (segment endpoints), i/j (edge indices), n (vertex count), x/y (intersection coords) are domain-standard names in 2D segment intersection geometry"
 )]
@@ -152,6 +133,139 @@ pub(crate) fn find_self_intersection(pline: &Pline) -> Option<(usize, usize, f64
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Recursive split at self-intersections
+// ---------------------------------------------------------------------------
+
+/// Recursively split a **closed** `pline` at every transverse self-intersection
+/// until each output pline is simple. Returns one or more simple closed plines.
+///
+/// **Returning `Result` is intentional**, not stylistic: the caller
+/// (`WallOutline2D::execute`) cannot honor its "simplicity guaranteed"
+/// contract if the resolver returned a partial result containing
+/// unresolved Plines. Bailing must be a hard failure that propagates up.
+///
+/// **Precondition:** `pline.closed == true`. The function asserts this
+/// (`debug_assert!`) and returns `Ok(vec![pline])` unchanged in release
+/// builds when called on an open pline (defensive no-op).
+///
+/// **Split contract** (formal). Given the first crossing at edges `i` and
+/// `j` (`i < j`) with intersection point `P = (x, y)`, and the input
+/// `pline.vertices = [v_0, ..., v_{n-1}]`:
+///
+/// - Loop A (length `j - i + 1`, closed): `[v_{i+1}, ..., v_j, P]`
+/// - Loop B (length `n - j + i + 1`, closed):
+///   `[v_{j+1}, ..., v_{n-1}, v_0, ..., v_i, P]`
+///
+/// (Sum of loop sizes is `n + 2`: every original vertex appears in exactly
+/// one loop, P appears once per loop.) Both loops share P; they touch
+/// geometrically at P but otherwise have disjoint interiors.
+///
+/// **Winding is NOT preserved.** Worked example: figure-8
+/// `[(0,0), (2,2), (0,2), (2,0)]` with crossing at (1,1) splits into Loop A
+/// `[(2,2), (0,2), (1,1)]` (signed area +1, CCW) and Loop B
+/// `[(2,0), (0,0), (1,1)]` (signed area −1, CW). The original is a
+/// degenerate figure-8 with signed area 0; both signs appear in the
+/// children regardless of any "parent winding" notion. Callers needing
+/// signed orientation must re-derive via shoelace area on the output.
+///
+/// **Termination guard.** Bails after `MAX_SPLIT_ITERATIONS = 100`
+/// work-queue iterations and returns
+/// `Err(OperationError::Failed("split_at_self_intersections: ..."))`.
+/// The unresolved work queue is dropped — never returned, never silently
+/// merged into output — so the simplicity guarantee is never violated.
+///
+/// **Output filter.** Loops with `< 3` vertices after split are dropped
+/// (degenerate slivers). If, after termination, no simple loops were
+/// produced (e.g. every split produced only degenerate children), returns
+/// `Ok(vec![])`; the caller (`WallOutline2D::execute`) handles the empty
+/// case via its existing `if outlines.is_empty()` check.
+///
+/// **Bulge handling.** Output `PlineVertex`s are constructed via
+/// `PlineVertex::line(x, y)` (no bulge). Input vertices are read for x/y
+/// only; any bulge on the input is dropped. For wall-outline boundaries
+/// from `polygon_union::union_all_with_holes` (the only consumer in this
+/// crate) bulges are always 0 on input, so this is a no-op for that path.
+#[allow(
+    dead_code,
+    reason = "consumed by WallOutline2D::execute in plan-13k T3"
+)]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "i/j (edge indices), x/y (intersection coords), n (vertex count), k (loop index), p (intersection vertex) match the formal split contract in this fn's doc-comment"
+)]
+pub(crate) fn split_at_self_intersections(pline: Pline) -> Result<Vec<Pline>> {
+    debug_assert!(
+        pline.closed,
+        "split_at_self_intersections: open plines are out of scope"
+    );
+    if !pline.closed {
+        return Ok(vec![pline]);
+    }
+
+    let mut work: Vec<Pline> = vec![pline];
+    let mut output: Vec<Pline> = Vec::new();
+    let mut iter: usize = 0;
+
+    while let Some(current) = work.pop() {
+        if iter >= MAX_SPLIT_ITERATIONS {
+            return Err(OperationError::Failed(format!(
+                "split_at_self_intersections: bailed at MAX_SPLIT_ITERATIONS={MAX_SPLIT_ITERATIONS}; \
+                 input may be pathologically self-intersecting"
+            ))
+            .into());
+        }
+        iter += 1;
+
+        match find_self_intersection(&current) {
+            None => {
+                if current.vertices.len() >= 3 {
+                    output.push(current);
+                }
+            }
+            Some((i, j, x, y)) => {
+                let n = current.vertices.len();
+                let p = PlineVertex::line(x, y);
+
+                // Loop A: [v_{i+1}, ..., v_j, P]  (length j - i + 1)
+                let mut loop_a: Vec<PlineVertex> = Vec::with_capacity(j - i + 1);
+                for k in (i + 1)..=j {
+                    loop_a.push(current.vertices[k]);
+                }
+                loop_a.push(p);
+
+                // Loop B: [v_{j+1}, ..., v_{n-1}, v_0, ..., v_i, P]
+                //         (length n - j + i + 1)
+                let mut loop_b: Vec<PlineVertex> = Vec::with_capacity(n - j + i + 1);
+                for k in (j + 1)..n {
+                    loop_b.push(current.vertices[k]);
+                }
+                for k in 0..=i {
+                    loop_b.push(current.vertices[k]);
+                }
+                loop_b.push(p);
+
+                // Both loops are pushed back into the work queue; only loops with
+                // < 3 vertices are dropped (degenerate slivers).
+                if loop_a.len() >= 3 {
+                    work.push(Pline {
+                        vertices: loop_a,
+                        closed: true,
+                    });
+                }
+                if loop_b.len() >= 3 {
+                    work.push(Pline {
+                        vertices: loop_b,
+                        closed: true,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 // ---------------------------------------------------------------------------
@@ -240,5 +354,97 @@ mod tests {
             closed: false,
         };
         assert!(find_self_intersection(&p).is_none());
+    }
+
+    // --- split_at_self_intersections ---
+
+    /// Helper: assert all output plines are simple, closed, and have ≥3 vertices.
+    fn assert_all_simple_and_well_formed(output: &[Pline]) {
+        for (idx, p) in output.iter().enumerate() {
+            assert!(
+                p.closed,
+                "output[{idx}] should be closed; got open pline with {} vertices",
+                p.vertices.len()
+            );
+            assert!(
+                p.vertices.len() >= 3,
+                "output[{idx}] should have >=3 vertices; got {}",
+                p.vertices.len()
+            );
+            assert!(
+                find_self_intersection(p).is_none(),
+                "output[{idx}] should be simple; found a self-intersection"
+            );
+        }
+    }
+
+    #[test]
+    fn split_simple_closed_pline_returns_input_unchanged() {
+        // Unit square. Already simple → output is one pline of length 4.
+        let p = closed_pline_xy(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
+        let original_xy: Vec<(f64, f64)> = p.vertices.iter().map(|v| (v.x, v.y)).collect();
+        let out = split_at_self_intersections(p).expect("should not bail");
+        assert_eq!(out.len(), 1, "simple pline should not be split");
+        assert!(out[0].closed);
+        let result_xy: Vec<(f64, f64)> = out[0].vertices.iter().map(|v| (v.x, v.y)).collect();
+        assert_eq!(result_xy, original_xy, "vertex order should be preserved");
+    }
+
+    #[test]
+    fn split_figure_eight_yields_two_simple_loops_touching_at_crossing() {
+        // Figure-8 with crossing at (1, 1).
+        let p = closed_pline_xy(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)]);
+        let out = split_at_self_intersections(p).expect("should not bail");
+
+        assert_eq!(out.len(), 2, "figure-8 should split into 2 loops");
+        assert_all_simple_and_well_formed(&out);
+
+        // Both output plines must contain the crossing point (1, 1).
+        let count_with_crossing = out
+            .iter()
+            .filter(|p| {
+                p.vertices
+                    .iter()
+                    .any(|v| (v.x - 1.0).abs() < 1e-9 && (v.y - 1.0).abs() < 1e-9)
+            })
+            .count();
+        assert_eq!(
+            count_with_crossing, 2,
+            "both loops should share the crossing vertex (1, 1)"
+        );
+    }
+
+    #[test]
+    fn split_double_zigzag_yields_only_simple_outputs() {
+        // 6-vertex closed pline with two non-overlapping crossings.
+        // Layout: alternating-up zigzag designed so edges 0–2 cross AND
+        // edges 1–4 cross (when read with closed wrap).
+        //
+        //   v0 = (0, 0)
+        //   v1 = (4, 4)
+        //   v2 = (1, 4)   ← edge 1 (v1→v2) is the top horizontal-ish
+        //   v3 = (4, 0)   ← edge 2 (v2→v3) crosses edge 0 (v0→v1) at (2, 2)
+        //   v4 = (3, 4)
+        //   v5 = (0, 2)   ← edge 5 (v5→v0) and edge 4 (v4→v5) close the loop
+        let p = closed_pline_xy(&[
+            (0.0, 0.0),
+            (4.0, 4.0),
+            (1.0, 4.0),
+            (4.0, 0.0),
+            (3.0, 4.0),
+            (0.0, 2.0),
+        ]);
+        let out = split_at_self_intersections(p).expect("should not bail");
+
+        assert!(
+            !out.is_empty(),
+            "double-crossing pline should yield at least one simple loop"
+        );
+        assert!(
+            out.len() <= 4,
+            "double-crossing pline should yield at most 4 loops; got {}",
+            out.len()
+        );
+        assert_all_simple_and_well_formed(&out);
     }
 }
