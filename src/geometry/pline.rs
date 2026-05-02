@@ -5,6 +5,10 @@ use crate::math::Point3;
 /// Used by `WallOutline2D::execute` to guarantee output simplicity.
 pub(crate) mod self_intersection;
 
+/// Final-contract enforcement pass: normalizes a set of polygon-union
+/// candidate boundaries into a CDT-safe set. See module doc-comment.
+pub(crate) mod tessellation_safety;
+
 /// Bulge-encoded polyline vertex for mixed line/arc segments.
 ///
 /// `bulge = tan(sweep_angle / 4)`:
