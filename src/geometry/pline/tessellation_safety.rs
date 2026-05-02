@@ -36,9 +36,17 @@
 //! remain useful within `make_tessellation_safe` as the same-boundary
 //! case of step 4. They are NOT removed; they are reused.
 
+use super::self_intersection::{segment_segment_intersection_2d, split_at_self_intersections};
 use super::{Pline, PlineVertex};
-use crate::error::Result;
+use crate::error::{OperationError, Result};
 use crate::operations::offset::wall_outline::polygon_union::WALL_EPS;
+
+/// Maximum work-loop iterations before bailing. Mirrors
+/// `MAX_SPLIT_ITERATIONS` in `self_intersection` but at the boundary-set
+/// scope. The set-scope bound is 10x the per-boundary bound: a real wall
+/// network can produce many crossings legitimately, so we want headroom
+/// while still defending against pathological inputs.
+pub(crate) const MAX_SET_SPLIT_ITERATIONS: usize = 1000;
 
 /// Final-contract enforcement pass for `WallOutline2D::execute` output.
 ///
@@ -66,7 +74,7 @@ use crate::operations::offset::wall_outline::polygon_union::WALL_EPS;
 )]
 #[allow(
     clippy::unnecessary_wraps,
-    reason = "T7 cleanup never errors today (only filters degenerate boundaries); T8-T9 add real Err paths (work-loop bail, CDT dry-run rejection)."
+    reason = "T7 cleanup never errors today (only filters degenerate boundaries); T9 will add the CDT dry-run Err path."
 )]
 pub(crate) fn make_tessellation_safe(boundaries: Vec<Pline>) -> Result<Vec<Pline>> {
     // T7 — per-boundary cleanup. Each phase mutates the boundary in place
@@ -86,8 +94,28 @@ pub(crate) fn make_tessellation_safe(boundaries: Vec<Pline>) -> Result<Vec<Pline
         }
     }
 
-    // T8 (cross-boundary crossing split) and T9 (CDT dry-run) land in
-    // subsequent commits.
+    // T8 — cross-boundary transverse crossing split. Iterate until the
+    // entire set has no remaining transverse crossings (intra- or inter-
+    // boundary). Bails after MAX_SET_SPLIT_ITERATIONS to defend against
+    // pathological inputs.
+    let mut iter = 0usize;
+    loop {
+        if iter >= MAX_SET_SPLIT_ITERATIONS {
+            return Err(OperationError::Failed(format!(
+                "tessellation_safety: cross-boundary split bailed at \
+                 MAX_SET_SPLIT_ITERATIONS={MAX_SET_SPLIT_ITERATIONS}; \
+                 input may be pathologically self-intersecting"
+            ))
+            .into());
+        }
+        iter += 1;
+        let Some(crossing) = find_first_set_crossing(&out) else {
+            break;
+        };
+        out = split_at_crossing(out, &crossing)?;
+    }
+
+    // T9 (CDT dry-run) lands in a subsequent commit.
 
     Ok(out)
 }
@@ -229,6 +257,194 @@ pub(crate) fn validate_and_close(pline: &mut Pline, eps: f64) -> bool {
         pline.vertices.pop();
     }
     pline.vertices.len() >= 3
+}
+
+// ---------------------------------------------------------------------------
+// T8: cross-boundary transverse crossing split
+// ---------------------------------------------------------------------------
+
+/// A transverse crossing between two edges in a boundary set, identified
+/// by the boundary index, the edge index within that boundary, and the
+/// 2D crossing point.
+///
+/// Invariant: `boundary_a <= boundary_b`. When `boundary_a == boundary_b`
+/// (intra-boundary same-loop crossing), `edge_a < edge_b`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SetCrossing {
+    boundary_a: usize,
+    edge_a: usize,
+    boundary_b: usize,
+    edge_b: usize,
+    x: f64,
+    y: f64,
+}
+
+/// Find the first transverse crossing between any pair of edges in the
+/// boundary set. Returns `None` when the set is CDT-safe with respect
+/// to transverse crossings.
+///
+/// Scans:
+/// - All non-adjacent edge pairs WITHIN each boundary (intra-boundary;
+///   reuses the same conditions as
+///   [`super::self_intersection::find_self_intersection`]).
+/// - All edge pairs ACROSS distinct boundaries (inter-boundary).
+///
+/// Determinism: outer loop over `boundary_a` ascending; inner loop over
+/// `boundary_b >= boundary_a` ascending; then edge indices ascending.
+/// The first crossing found in this scan order is returned.
+#[allow(
+    clippy::many_single_char_names,
+    reason = "i/j/n/k are domain-standard polygon-loop indexing"
+)]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "ba/bb are paired indices into a common slice; constructing a SetCrossing requires both indices, which iterator+enumerate would obscure"
+)]
+fn find_first_set_crossing(boundaries: &[Pline]) -> Option<SetCrossing> {
+    for ba in 0..boundaries.len() {
+        let pa = &boundaries[ba];
+        if !pa.closed {
+            continue;
+        }
+        let na = pa.vertices.len();
+        if na < 3 {
+            continue;
+        }
+
+        for bb in ba..boundaries.len() {
+            let pb = &boundaries[bb];
+            if !pb.closed {
+                continue;
+            }
+            let nb = pb.vertices.len();
+            if nb < 3 {
+                continue;
+            }
+
+            if ba == bb {
+                // Intra-boundary scan: non-adjacent pairs in the same
+                // closed loop (mirrors find_self_intersection).
+                if na < 4 {
+                    continue;
+                }
+                for i in 0..na {
+                    let a = (pa.vertices[i].x, pa.vertices[i].y);
+                    let b = (pa.vertices[(i + 1) % na].x, pa.vertices[(i + 1) % na].y);
+                    for j in (i + 2)..na {
+                        if i == 0 && j == na - 1 {
+                            continue; // wrap-around adjacency
+                        }
+                        let c = (pa.vertices[j].x, pa.vertices[j].y);
+                        let d = (pa.vertices[(j + 1) % na].x, pa.vertices[(j + 1) % na].y);
+                        if let Some((t, _u)) = segment_segment_intersection_2d(a, b, c, d) {
+                            let x = a.0 + t * (b.0 - a.0);
+                            let y = a.1 + t * (b.1 - a.1);
+                            return Some(SetCrossing {
+                                boundary_a: ba,
+                                edge_a: i,
+                                boundary_b: bb,
+                                edge_b: j,
+                                x,
+                                y,
+                            });
+                        }
+                    }
+                }
+            } else {
+                // Inter-boundary scan: every edge of pa vs every edge of pb.
+                // No adjacency to skip — distinct boundaries share no
+                // vertices by index.
+                for i in 0..na {
+                    let a = (pa.vertices[i].x, pa.vertices[i].y);
+                    let b = (pa.vertices[(i + 1) % na].x, pa.vertices[(i + 1) % na].y);
+                    for j in 0..nb {
+                        let c = (pb.vertices[j].x, pb.vertices[j].y);
+                        let d = (pb.vertices[(j + 1) % nb].x, pb.vertices[(j + 1) % nb].y);
+                        if let Some((t, _u)) = segment_segment_intersection_2d(a, b, c, d) {
+                            let x = a.0 + t * (b.0 - a.0);
+                            let y = a.1 + t * (b.1 - a.1);
+                            return Some(SetCrossing {
+                                boundary_a: ba,
+                                edge_a: i,
+                                boundary_b: bb,
+                                edge_b: j,
+                                x,
+                                y,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Split the affected boundaries at the crossing point.
+///
+/// - **Same-boundary case** (`boundary_a == boundary_b`): replace that
+///   single boundary with the two simple loops produced by
+///   [`super::self_intersection::split_at_self_intersections`] on it.
+///   That function already handles the formal split contract correctly
+///   for the same-boundary case.
+/// - **Different-boundary case** (`boundary_a != boundary_b`): split each
+///   boundary by INSERTING the crossing vertex P at the appropriate
+///   position. This converts the transverse crossing into a T-junction
+///   at P, which `spade::cdt` handles non-fatally.
+///
+/// Returns the rebuilt boundary set. The crossing is consumed from the
+/// set in the sense that the geometric configuration that produced it
+/// is replaced by either a split or a T-junction; the next call to
+/// [`find_first_set_crossing`] will see fewer transverse crossings (or
+/// none, if this was the only one).
+fn split_at_crossing(boundaries: Vec<Pline>, crossing: &SetCrossing) -> Result<Vec<Pline>> {
+    if crossing.boundary_a == crossing.boundary_b {
+        // Same-boundary: delegate to the per-boundary splitter, which
+        // produces two simple loops (or more, if the loop had multiple
+        // self-intersections — though we resolve the first crossing
+        // each work-loop iteration, so at most two).
+        let mut out = Vec::with_capacity(boundaries.len() + 1);
+        for (idx, b) in boundaries.into_iter().enumerate() {
+            if idx == crossing.boundary_a {
+                let split = split_at_self_intersections(b)?;
+                out.extend(split.into_iter().filter(|p| p.vertices.len() >= 3));
+            } else {
+                out.push(b);
+            }
+        }
+        Ok(out)
+    } else {
+        // Different boundaries: insert the crossing vertex into both.
+        // Preserve the order of all other boundaries.
+        let p = PlineVertex::line(crossing.x, crossing.y);
+        let mut out = Vec::with_capacity(boundaries.len());
+        for (idx, mut b) in boundaries.into_iter().enumerate() {
+            if idx == crossing.boundary_a {
+                insert_vertex_after_edge(&mut b, crossing.edge_a, p);
+            } else if idx == crossing.boundary_b {
+                insert_vertex_after_edge(&mut b, crossing.edge_b, p);
+            }
+            out.push(b);
+        }
+        Ok(out)
+    }
+}
+
+/// Insert vertex `p` into `pline.vertices` immediately after the start
+/// of edge `k`. Edge `k` connects `vertices[k]` to `vertices[(k+1) % n]`,
+/// so the inserted vertex lands at index `k + 1` (i.e. between the
+/// edge's two endpoints).
+///
+/// For closed plines (which is always the case in `make_tessellation_safe`),
+/// this works for every edge index `0..n` because `Vec::insert` accepts
+/// indices up to `len`.
+fn insert_vertex_after_edge(pline: &mut Pline, edge: usize, p: PlineVertex) {
+    let insert_at = edge + 1;
+    debug_assert!(
+        insert_at <= pline.vertices.len(),
+        "insert_vertex_after_edge: edge index out of range"
+    );
+    pline.vertices.insert(insert_at, p);
 }
 
 #[cfg(test)]
@@ -418,6 +634,123 @@ mod tests {
             result[0].vertices.len(),
             4,
             "all three cleanup phases should reduce to 4 unit-square corners"
+        );
+    }
+
+    // --- T8: find_first_set_crossing ---
+
+    fn closed_pline_xy(pts: &[(f64, f64)]) -> Pline {
+        Pline {
+            vertices: pts.iter().map(|&(x, y)| PlineVertex::line(x, y)).collect(),
+            closed: true,
+        }
+    }
+
+    /// Run `find_first_set_crossing` until it returns `None`, counting
+    /// the iterations needed. Used by T8 integration tests to verify the
+    /// output of `make_tessellation_safe` is fully crossing-free.
+    fn count_remaining_crossings(boundaries: &[Pline]) -> usize {
+        let mut count = 0;
+        let mut bs: Vec<Pline> = boundaries.to_vec();
+        while let Some(c) = find_first_set_crossing(&bs) {
+            count += 1;
+            // Sanity guard so a buggy splitter cannot loop forever in a
+            // test helper.
+            if count > 10_000 {
+                panic!("count_remaining_crossings: runaway");
+            }
+            bs = split_at_crossing(bs, &c).expect("split should not error in helper");
+        }
+        count
+    }
+
+    #[test]
+    fn find_first_set_crossing_simple_set_returns_none() {
+        // Two disjoint unit squares, well separated.
+        let s0 = closed_pline_xy(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
+        let s1 = closed_pline_xy(&[(5.0, 5.0), (6.0, 5.0), (6.0, 6.0), (5.0, 6.0)]);
+        assert!(find_first_set_crossing(&[s0, s1]).is_none());
+    }
+
+    #[test]
+    fn find_first_set_crossing_intra_boundary_figure_eight() {
+        // Single closed figure-8 pline: edges 0 and 2 cross at (1,1).
+        let p = closed_pline_xy(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)]);
+        let c = find_first_set_crossing(&[p]).expect("figure-8 should self-cross");
+        assert_eq!(c.boundary_a, 0);
+        assert_eq!(c.boundary_b, 0);
+        assert_eq!(c.edge_a, 0);
+        assert_eq!(c.edge_b, 2);
+        assert!((c.x - 1.0).abs() < 1e-9, "x expected 1.0, got {}", c.x);
+        assert!((c.y - 1.0).abs() < 1e-9, "y expected 1.0, got {}", c.y);
+    }
+
+    #[test]
+    fn find_first_set_crossing_inter_boundary_two_overlapping_squares() {
+        // Two unit squares: square 0 at (0,0)-(2,2), square 1 at (1,1)-(3,3).
+        // Edge 1 of square 0 (right side, (2,0)→(2,2)) crosses edge 0 of
+        // square 1 (bottom, (1,1)→(3,1)) at (2,1).
+        // Edge 2 of square 0 (top, (2,2)→(0,2)) crosses edge 3 of square 1
+        // (left, (1,3)→(1,1)) at (1,2).
+        // Scan order: ba=0, bb=1, then i ascending, then j ascending.
+        // For i=1 (the right side of square 0), the first j hit is j=0
+        // (bottom of square 1) → crossing at (2, 1).
+        let s0 = closed_pline_xy(&[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]);
+        let s1 = closed_pline_xy(&[(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)]);
+        let c = find_first_set_crossing(&[s0, s1]).expect("squares should cross");
+        assert_eq!(c.boundary_a, 0);
+        assert_eq!(c.boundary_b, 1);
+        // Earlier i (right side, i=1) is hit before later i (top, i=2).
+        assert_eq!(c.edge_a, 1);
+        assert_eq!(c.edge_b, 0);
+        assert!((c.x - 2.0).abs() < 1e-9, "x expected 2.0, got {}", c.x);
+        assert!((c.y - 1.0).abs() < 1e-9, "y expected 1.0, got {}", c.y);
+    }
+
+    #[test]
+    fn make_tessellation_safe_resolves_intra_figure_eight() {
+        // Figure-8 alone — the per-boundary case.
+        let p = closed_pline_xy(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)]);
+        // Sanity: input has at least one crossing.
+        assert!(
+            find_first_set_crossing(&[p.clone()]).is_some(),
+            "figure-8 input should have a detectable crossing"
+        );
+
+        let result = make_tessellation_safe(vec![p]).expect("figure-8 should resolve");
+        assert!(
+            result.len() > 1,
+            "figure-8 should split into more than one boundary; got {}",
+            result.len()
+        );
+        for (idx, b) in result.iter().enumerate() {
+            assert!(b.closed, "output[{idx}] should be closed");
+        }
+        assert_eq!(
+            count_remaining_crossings(&result),
+            0,
+            "output should have zero remaining crossings"
+        );
+    }
+
+    #[test]
+    fn make_tessellation_safe_resolves_inter_overlapping_squares() {
+        // Two overlapping unit squares (same as inter-boundary test above).
+        let s0 = closed_pline_xy(&[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]);
+        let s1 = closed_pline_xy(&[(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)]);
+        // Sanity: input has at least one crossing.
+        assert!(
+            find_first_set_crossing(&[s0.clone(), s1.clone()]).is_some(),
+            "overlapping squares should have a detectable crossing"
+        );
+
+        let result =
+            make_tessellation_safe(vec![s0, s1]).expect("overlapping squares should resolve");
+        assert!(!result.is_empty());
+        assert_eq!(
+            count_remaining_crossings(&result),
+            0,
+            "output should have zero remaining crossings"
         );
     }
 }
