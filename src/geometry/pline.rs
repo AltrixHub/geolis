@@ -1,6 +1,10 @@
 use crate::math::arc_2d::{arc_from_bulge, arc_point_at};
 use crate::math::Point3;
 
+/// Self-intersection detection and resolution for closed plines.
+/// Used by `WallOutline2D::execute` to guarantee output simplicity.
+pub(crate) mod self_intersection;
+
 /// Bulge-encoded polyline vertex for mixed line/arc segments.
 ///
 /// `bulge = tan(sweep_angle / 4)`:
