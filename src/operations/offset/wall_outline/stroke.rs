@@ -41,9 +41,23 @@ pub fn stroke_expand(
     let mut right_pts: Vec<(f64, f64)> = Vec::new();
 
     if closed {
-        build_closed_offsets(&verts, &dirs, left_w, right_w, &mut left_pts, &mut right_pts);
+        build_closed_offsets(
+            &verts,
+            &dirs,
+            left_w,
+            right_w,
+            &mut left_pts,
+            &mut right_pts,
+        );
     } else {
-        build_open_offsets(&verts, &dirs, left_w, right_w, &mut left_pts, &mut right_pts);
+        build_open_offsets(
+            &verts,
+            &dirs,
+            left_w,
+            right_w,
+            &mut left_pts,
+            &mut right_pts,
+        );
     }
 
     if closed {
@@ -131,19 +145,12 @@ fn build_closed_offsets(
     }
 }
 
-/// Maximum miter length as a multiple of the side's offset width.
-/// Beyond this, the corner is beveled on the outer side.
-const MITER_LIMIT: f64 = 4.0;
-
 /// Local chain of offset vertices emitted for a single join.
 ///
-/// Each side emits 1 or 2 points:
-///   - 1 point: sharp miter (a single corner vertex)
-///   - 2 points: bevel (cut corner — the two segment endpoints at the vertex)
-///
-/// Keeping each side as its own small `Vec` makes the call site's job trivial
-/// (`extend(join.left)`) and keeps the contract — "produce a continuous local
-/// chain for each side" — explicit.
+/// Each side emits exactly one point: the miter intersection of the two
+/// offset edges. Sharp acute corners are preserved (no bevel chamfer). When
+/// the inner miter flips at very acute concave corners, polygon union
+/// downstream removes the inverted region.
 struct JoinResult {
     left: Vec<(f64, f64)>,
     right: Vec<(f64, f64)>,
@@ -160,13 +167,10 @@ struct JoinResult {
 ///   - `< 0`: right turn → concave for CCW → outer side is `left`, inner is `right`
 ///   - `≈ 0`: collinear → single offset point, no miter needed
 ///
-/// Miter/bevel policy:
-///   - Outer side: apply miter limit. If exceeded, emit both edge endpoints
-///     (`_in`, `_out`) to form a bevel chord.
-///   - Inner side: always take the miter — bevel on the inner side would bulge
-///     *outward* through the material, breaking the offset invariant. When the
-///     inner miter flips (very acute concave corner), polygon union downstream
-///     removes the inverted region; the local chain itself stays continuous.
+/// Both sides always take the miter intersection — sharp corners stay sharp.
+/// At very acute angles where the miter would otherwise be cut off (bevel),
+/// the spike is kept; the polygon-union arrangement downstream cleans up any
+/// self-intersecting region the spike introduces.
 fn compute_join(
     vertex: (f64, f64),
     dir_in: (f64, f64),
@@ -195,47 +199,20 @@ fn compute_join(
     let left_miter = line_intersect(lp_in, dir_in, lp_out, dir_out);
     let right_miter = line_intersect(rp_in, dir_in, rp_out, dir_out);
 
-    if cross > 0.0 {
-        // Convex for CCW: right is outer, left is inner.
-        let left = inner_chain(left_miter, lp_out);
-        let right = outer_chain(right_miter, rp_in, rp_out, vertex, right_w);
-        JoinResult { left, right }
-    } else {
-        // Concave for CCW: left is outer, right is inner.
-        let left = outer_chain(left_miter, lp_in, lp_out, vertex, left_w);
-        let right = inner_chain(right_miter, rp_out);
-        JoinResult { left, right }
+    JoinResult {
+        left: miter_chain(left_miter, lp_out),
+        right: miter_chain(right_miter, rp_out),
     }
 }
 
-/// Inner-side chain: always take the miter.
-///
-/// Falls back to the outgoing edge's offset endpoint only when the two offset
-/// directions are numerically parallel (`line_intersect` returned `None`).
-/// A fallback single point preserves continuity — we never emit a bevel on the
-/// inner side.
-fn inner_chain(miter: Option<(f64, f64)>, fallback: (f64, f64)) -> Vec<(f64, f64)> {
+/// Always take the miter intersection. Falls back to the outgoing edge's
+/// offset endpoint only when the two offset directions are numerically
+/// parallel (`line_intersect` returned `None`); the single-point fallback
+/// preserves continuity.
+fn miter_chain(miter: Option<(f64, f64)>, fallback: (f64, f64)) -> Vec<(f64, f64)> {
     match miter {
         Some(m) => vec![m],
         None => vec![fallback],
-    }
-}
-
-/// Outer-side chain: miter when within the limit, bevel otherwise.
-///
-/// Bevel emits both edge endpoints at the vertex (`p_in`, `p_out`) so the
-/// outgoing edge of this join and the incoming edge of the next join join up
-/// through a chord across the corner, never leaving a gap.
-fn outer_chain(
-    miter: Option<(f64, f64)>,
-    p_in: (f64, f64),
-    p_out: (f64, f64),
-    vertex: (f64, f64),
-    width: f64,
-) -> Vec<(f64, f64)> {
-    match miter {
-        Some(m) if dist(vertex, m) <= width * MITER_LIMIT => vec![m],
-        _ => vec![p_in, p_out],
     }
 }
 
@@ -294,10 +271,6 @@ fn line_intersect(
     Some((p1.0 + t * d1.0, p1.1 + t * d1.1))
 }
 
-fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
-    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,15 +281,15 @@ mod tests {
         assert!(result.holes.is_empty());
         let area = signed_area_tuples(&result.outer).abs();
         let expected = 5.0 * 0.6;
-        assert!((area - expected).abs() < 0.1, "area={area}, expected={expected}");
+        assert!(
+            (area - expected).abs() < 0.1,
+            "area={area}, expected={expected}"
+        );
     }
 
     #[test]
     fn l_shape_open() {
-        let result = stroke_expand(
-            &[(0.0, 0.0), (3.0, 0.0), (3.0, 3.0)],
-            false, 0.3, 0.3,
-        );
+        let result = stroke_expand(&[(0.0, 0.0), (3.0, 0.0), (3.0, 3.0)], false, 0.3, 0.3);
         assert!(result.holes.is_empty());
         let area = signed_area_tuples(&result.outer).abs();
         assert!(area > 3.0, "area={area} too small");
@@ -326,7 +299,9 @@ mod tests {
     fn closed_square() {
         let result = stroke_expand(
             &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
-            true, 0.3, 0.3,
+            true,
+            0.3,
+            0.3,
         );
         assert_eq!(result.holes.len(), 1, "closed square should have 1 hole");
         let outer_area = signed_area_tuples(&result.outer);
@@ -334,7 +309,10 @@ mod tests {
         assert!(outer_area > 0.0, "outer should be CCW (positive area)");
         assert!(hole_area < 0.0, "hole should be CW (negative area)");
         let wall_area = outer_area + hole_area;
-        assert!(wall_area > 15.0 && wall_area < 30.0, "wall_area={wall_area}");
+        assert!(
+            wall_area > 15.0 && wall_area < 30.0,
+            "wall_area={wall_area}"
+        );
     }
 
     #[test]
@@ -342,7 +320,9 @@ mod tests {
         // CW input should be normalized to CCW.
         let result = stroke_expand(
             &[(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)],
-            true, 0.3, 0.3,
+            true,
+            0.3,
+            0.3,
         );
         assert_eq!(result.holes.len(), 1);
         let outer_area = signed_area_tuples(&result.outer);
@@ -355,18 +335,20 @@ mod tests {
         assert!(result.holes.is_empty());
         let area = signed_area_tuples(&result.outer).abs();
         let expected = 5.0 * 0.3;
-        assert!((area - expected).abs() < 0.1, "area={area}, expected={expected}");
+        assert!(
+            (area - expected).abs() < 0.1,
+            "area={area}, expected={expected}"
+        );
     }
 
     #[test]
-    fn acute_angle_bevel() {
-        // Very sharp turn should trigger bevel fallback on the outer side.
-        let result = stroke_expand(
-            &[(0.0, 0.0), (5.0, 0.0), (4.9, 0.1)],
-            false, 0.3, 0.3,
-        );
+    fn acute_angle_keeps_sharp_miter() {
+        // Sharp acute turn — the outer side keeps the (potentially long)
+        // miter point instead of beveling. Result must be non-degenerate
+        // (hole-free, with at least the three corner points on the outer).
+        let result = stroke_expand(&[(0.0, 0.0), (5.0, 0.0), (4.9, 0.1)], false, 0.3, 0.3);
         assert!(result.holes.is_empty());
-        assert!(result.outer.len() >= 4);
+        assert!(result.outer.len() >= 3);
     }
 
     #[test]
@@ -421,35 +403,27 @@ mod tests {
     fn join_result_convex_miter() {
         // Convex CCW corner under miter limit → single-point miters on both
         // sides. Verifies compute_join's local chain contract.
-        let join = compute_join(
-            (0.0, 0.0),
-            (1.0, 0.0),
-            (0.0, 1.0),
-            0.3,
-            0.3,
-        );
+        let join = compute_join((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), 0.3, 0.3);
         assert_eq!(join.left.len(), 1, "inner miter is a single point");
-        assert_eq!(join.right.len(), 1, "outer miter under limit is a single point");
+        assert_eq!(
+            join.right.len(),
+            1,
+            "outer miter under limit is a single point"
+        );
     }
 
     #[test]
-    fn join_result_acute_bevel_outer_only() {
-        // Very acute turn: outer side bevels (2 points), inner side still
-        // returns a single miter point to keep the inner chain continuous.
-        // dir_in = (1,0), dir_out ≈ (-1, 0.05) — nearly a U-turn.
+    fn join_result_acute_keeps_sharp_miter_both_sides() {
+        // Even at a very acute U-turn, both sides keep a single miter point
+        // — no bevel fallback. Sharp acute corners are preserved.
         let dir_out = {
             let (dx, dy): (f64, f64) = (-1.0, 0.05);
             let l = (dx * dx + dy * dy).sqrt();
             (dx / l, dy / l)
         };
         let join = compute_join((0.0, 0.0), (1.0, 0.0), dir_out, 0.3, 0.3);
-        // One of the sides must bevel; the other must stay a single miter point.
-        let bevel_count =
-            usize::from(join.left.len() == 2) + usize::from(join.right.len() == 2);
-        let miter_count =
-            usize::from(join.left.len() == 1) + usize::from(join.right.len() == 1);
-        assert_eq!(bevel_count, 1, "exactly one side should bevel (the outer)");
-        assert_eq!(miter_count, 1, "the other side should stay a single miter point");
+        assert_eq!(join.left.len(), 1, "left side keeps single miter point");
+        assert_eq!(join.right.len(), 1, "right side keeps single miter point");
     }
 
     #[test]
