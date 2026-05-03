@@ -218,5 +218,4 @@ mod tests {
         };
         assert!(find_self_intersection(&p).is_none());
     }
-
 }

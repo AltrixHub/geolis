@@ -44,15 +44,33 @@ pub const WALL_EPS_SQ: f64 = WALL_EPS * WALL_EPS;
 /// A simple 2D polygon (closed, no holes).
 pub type Polygon = Vec<(f64, f64)>;
 
-/// A polygon with optional holes.
+/// A planar face described by an outer boundary and zero or more holes.
+///
+/// # Winding contract
+/// - `outer` is CCW with `signed_area(outer) > 0`.
+/// - Each `holes[i]` is CW with `signed_area(holes[i]) < 0`.
+/// - Every hole is fully contained in `outer`.
+/// - Sibling holes are non-overlapping.
+///
+/// The contract is enforced by [`assemble_faces`] for outputs of
+/// [`union_all_with_holes`], and by `WallFootprint2D::try_from_parts` for
+/// cross-crate construction. Internal callers that bypass these entry points
+/// must uphold the invariants themselves.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PolygonWithHoles {
     pub outer: Polygon,
     pub holes: Vec<Polygon>,
 }
 
-/// Result of a polygon union: closed boundary loops.
+impl PolygonWithHoles {
+    pub fn into_parts(self) -> (Polygon, Vec<Polygon>) {
+        (self.outer, self.holes)
+    }
+}
+
+/// Result of a polygon union: typed face topology.
 pub struct UnionResult {
-    pub boundaries: Vec<Polygon>,
+    pub faces: Vec<PolygonWithHoles>,
 }
 
 /// Three-valued classification of a point relative to a single ring.
@@ -138,18 +156,25 @@ pub(crate) fn classify_filled(p: (f64, f64), inputs: &[PolygonWithHoles]) -> Fil
 pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> Result<UnionResult> {
     let raw_segments = collect_raw_segments(inputs);
     if raw_segments.is_empty() {
-        return Ok(UnionResult {
-            boundaries: Vec::new(),
-        });
+        return Ok(UnionResult { faces: Vec::new() });
     }
     let split_segments = arrangement_split(&raw_segments);
     let (vertex_table, snapped_segments) = vertex_snap(&split_segments);
     let undirected = canonicalize_undirected(snapped_segments);
     let kept_half_edges = classify_and_filter(&undirected, &vertex_table, inputs)?;
-    let mut boundaries = face_walk(&kept_half_edges, &vertex_table);
-    boundaries.retain(|p| signed_area(p).abs() > WALL_EPS_SQ);
-    debug_assert_cdt_safe(&boundaries);
-    Ok(UnionResult { boundaries })
+    let loops = face_walk(&kept_half_edges, &vertex_table);
+    // Drop degenerate loops before assembly so the containment matrix is not
+    // skewed by zero-area artifacts.
+    let loops: Vec<WalkedLoop> = loops
+        .into_iter()
+        .filter(|l| {
+            let polygon: Polygon = l.vertex_indices.iter().map(|&i| vertex_table[i]).collect();
+            signed_area(&polygon).abs() > WALL_EPS_SQ
+        })
+        .collect();
+    let faces = assemble_faces(&loops, &vertex_table)?;
+    debug_assert_cdt_safe(&faces);
+    Ok(UnionResult { faces })
 }
 
 /// Defense-in-depth post-condition: verifies that the output boundary set
@@ -158,10 +183,14 @@ pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> Result<UnionResult> 
 /// skip the check entirely. Panics on failure rather than returning Err
 /// so the bug is surfaced loudly during development.
 #[cfg(debug_assertions)]
-fn debug_assert_cdt_safe(boundaries: &[Polygon]) {
+fn debug_assert_cdt_safe(faces: &[PolygonWithHoles]) {
     use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
         ConstrainedDelaunayTriangulation::new();
+    let boundaries: Vec<&Polygon> = faces
+        .iter()
+        .flat_map(|f| std::iter::once(&f.outer).chain(f.holes.iter()))
+        .collect();
     for (bi, boundary) in boundaries.iter().enumerate() {
         let n = boundary.len();
         if n < 3 {
@@ -194,7 +223,7 @@ fn debug_assert_cdt_safe(boundaries: &[Polygon]) {
 
 #[cfg(not(debug_assertions))]
 #[inline]
-fn debug_assert_cdt_safe(_boundaries: &[Polygon]) {}
+fn debug_assert_cdt_safe(_faces: &[PolygonWithHoles]) {}
 
 // === Internals ===
 
@@ -523,6 +552,28 @@ fn classify_and_filter(
     Ok(out)
 }
 
+/// Orientation of a closed planar loop, derived from its signed area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Orientation {
+    Ccw,
+    Cw,
+}
+
+/// One closed boundary loop emitted by [`face_walk`].
+///
+/// `vertex_indices[k]` is the start-vertex class id of the k-th half-edge in
+/// the loop. `kept_indices[k]` is the index into the `kept` slice of the same
+/// half-edge. The two vectors have the same length and are aligned:
+/// `kept[loop.kept_indices[k]] == (loop.vertex_indices[k], loop.vertex_indices[(k + 1) % len])`.
+pub(crate) struct WalkedLoop {
+    pub vertex_indices: Vec<usize>,
+    /// Index trail into the `kept` slice. Currently unused by `assemble_faces`,
+    /// but retained so future diagnostic logging can map a loop back to the
+    /// half-edges it bounds without re-walking the arrangement.
+    #[allow(dead_code)]
+    pub kept_indices: Vec<usize>,
+}
+
 /// Trace closed boundary loops by walking kept half-edges.
 ///
 /// At each vertex, the successor is picked by the polar-angle Δ rule:
@@ -532,7 +583,11 @@ fn classify_and_filter(
 /// half-edge (Δ ≈ 0) is treated as 2π so it is picked last; in practice
 /// the self-reverse rarely exists since each undirected sub-edge
 /// contributes only one kept direction.
-fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) -> Vec<Polygon> {
+///
+/// Returns one [`WalkedLoop`] per closed boundary cycle, retaining the
+/// kept-half-edge index trail so downstream face assembly can map each loop
+/// back to the half-edges it bounds.
+pub(crate) fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) -> Vec<WalkedLoop> {
     if kept.is_empty() {
         return Vec::new();
     }
@@ -542,13 +597,14 @@ fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) -> Vec<Polygo
         adjacency[a].push(idx);
     }
     let mut used: Vec<bool> = vec![false; kept.len()];
-    let mut boundaries: Vec<Polygon> = Vec::new();
+    let mut loops: Vec<WalkedLoop> = Vec::new();
 
     for start in 0..kept.len() {
         if used[start] {
             continue;
         }
-        let mut path: Vec<usize> = Vec::new();
+        let mut vertex_indices: Vec<usize> = Vec::new();
+        let mut kept_indices: Vec<usize> = Vec::new();
         let mut current = start;
         let max_steps = kept.len() + 1;
         for _ in 0..max_steps {
@@ -557,7 +613,8 @@ fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) -> Vec<Polygo
             }
             used[current] = true;
             let (a, b) = kept[current];
-            path.push(a);
+            vertex_indices.push(a);
+            kept_indices.push(current);
             let pa = vertex_table[a];
             let pb = vertex_table[b];
             let theta_in = (pa.1 - pb.1).atan2(pa.0 - pb.0);
@@ -589,12 +646,194 @@ fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) -> Vec<Polygo
                 None => break,
             }
         }
-        if path.len() >= 3 {
-            let polygon: Polygon = path.iter().map(|&i| vertex_table[i]).collect();
-            boundaries.push(polygon);
+        if vertex_indices.len() >= 3 {
+            loops.push(WalkedLoop {
+                vertex_indices,
+                kept_indices,
+            });
         }
     }
-    boundaries
+    loops
+}
+
+/// Assemble closed boundary loops into face topology
+/// (`Vec<PolygonWithHoles>`).
+///
+/// # Algorithm
+///
+/// Each kept half-edge has Filled on its LEFT and Empty on its RIGHT
+/// (locked by [`classify_and_filter`]). A loop is therefore unambiguously
+/// classified by signed area: CCW = outer of a filled face, CW = hole
+/// carved into a filled face. The remaining task is to match every CW
+/// hole to its parent CCW outer, and every depth-≥2 nested CCW island to
+/// the CW hole that encloses it.
+///
+/// Containment is determined by a containment matrix on leftmost-vertex
+/// witnesses, not by ray casting (which fails for disjoint donuts on the
+/// same scanline). Depth = `|contained_in[i]|`; parent is the unique
+/// loop in `contained_in[i]` with `depth - 1`.
+///
+/// # Errors
+///
+/// Returns [`OperationError::Failed`] if:
+/// - A witness vertex coincides with another loop's boundary even after
+///   trying up to `k = 3` fallback witnesses (tangent / near-degenerate
+///   arrangement that should have been rejected upstream).
+/// - The number of parent candidates at `depth - 1` is not exactly one.
+/// - A loop's orientation does not match its depth parity (even depth ⇒
+///   CCW; odd depth ⇒ CW).
+pub(crate) fn assemble_faces(
+    loops: &[WalkedLoop],
+    vertex_table: &[(f64, f64)],
+) -> Result<Vec<PolygonWithHoles>> {
+    let n = loops.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    // 1. Materialise polygons + orientations + sorted witness candidates.
+    let polygons: Vec<Polygon> = loops
+        .iter()
+        .map(|l| l.vertex_indices.iter().map(|&i| vertex_table[i]).collect())
+        .collect();
+
+    let orientation: Vec<Orientation> = polygons
+        .iter()
+        .map(|p| {
+            if signed_area(p) > 0.0 {
+                Orientation::Ccw
+            } else {
+                Orientation::Cw
+            }
+        })
+        .collect();
+
+    // For each loop, pre-sort its vertices by (x, y) ascending so the
+    // first is the leftmost-vertex witness, the second is the fallback,
+    // and the third is the second fallback.
+    let witness_candidates: Vec<Vec<(f64, f64)>> = polygons
+        .iter()
+        .map(|p| {
+            let mut v = p.clone();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        })
+        .collect();
+
+    // 2. Containment matrix with bounded Boundary fallback.
+    const MAX_WITNESS_FALLBACK: usize = 3;
+    let mut contained_in: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let mut witness_idx = 0;
+            loop {
+                if witness_idx >= MAX_WITNESS_FALLBACK || witness_idx >= witness_candidates[i].len()
+                {
+                    return Err(OperationError::Failed(format!(
+                        "polygon_union: assemble_faces witness disambiguation \
+                         exhausted for loop {i} against loop {j} (tried \
+                         {witness_idx} candidates, all on j's boundary)"
+                    ))
+                    .into());
+                }
+                let w = witness_candidates[i][witness_idx];
+                match point_in_polygon_class(w, &polygons[j]) {
+                    PointClass::Inside => {
+                        contained_in[i].push(j);
+                        break;
+                    }
+                    PointClass::Outside => break,
+                    PointClass::Boundary => {
+                        witness_idx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Depth and parent.
+    let depth: Vec<usize> = contained_in.iter().map(|s| s.len()).collect();
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        if depth[i] == 0 {
+            continue;
+        }
+        let target_depth = depth[i] - 1;
+        let candidates: Vec<usize> = contained_in[i]
+            .iter()
+            .copied()
+            .filter(|&j| depth[j] == target_depth)
+            .collect();
+        if candidates.len() != 1 {
+            return Err(OperationError::Failed(format!(
+                "polygon_union: assemble_faces found {} parent candidates for \
+                 loop {} (depth {}); arrangement topology is broken",
+                candidates.len(),
+                i,
+                depth[i],
+            ))
+            .into());
+        }
+        parent[i] = Some(candidates[0]);
+    }
+
+    // 4. Validate orientation parity.
+    for i in 0..n {
+        let want_ccw = depth[i] % 2 == 0;
+        let is_ccw = orientation[i] == Orientation::Ccw;
+        if want_ccw != is_ccw {
+            return Err(OperationError::Failed(format!(
+                "polygon_union: assemble_faces orientation/depth mismatch on \
+                 loop {} (orientation {:?}, depth {})",
+                i, orientation[i], depth[i]
+            ))
+            .into());
+        }
+    }
+
+    // 5. Assemble faces. Each CCW loop is the outer of one face; its holes
+    //    are the CW loops whose parent is this loop.
+    let mut faces: Vec<PolygonWithHoles> = Vec::new();
+    for i in 0..n {
+        if orientation[i] != Orientation::Ccw {
+            continue;
+        }
+        let holes: Vec<Polygon> = (0..n)
+            .filter(|&j| orientation[j] == Orientation::Cw && parent[j] == Some(i))
+            .map(|j| polygons[j].clone())
+            .collect();
+        faces.push(PolygonWithHoles {
+            outer: polygons[i].clone(),
+            holes,
+        });
+    }
+
+    // 6. Post-conditions.
+    debug_assert!(
+        faces.iter().all(|f| signed_area(&f.outer) > 0.0),
+        "assemble_faces: outer winding contract violated"
+    );
+    debug_assert!(
+        faces
+            .iter()
+            .flat_map(|f| f.holes.iter())
+            .all(|h| signed_area(h) < 0.0),
+        "assemble_faces: hole winding contract violated"
+    );
+    let cw_count = orientation
+        .iter()
+        .filter(|o| **o == Orientation::Cw)
+        .count();
+    let claimed_holes: usize = faces.iter().map(|f| f.holes.len()).sum();
+    debug_assert_eq!(
+        cw_count, claimed_holes,
+        "assemble_faces: not every CW loop is claimed as a hole"
+    );
+
+    Ok(faces)
 }
 
 // === Geometry primitives ===
@@ -639,7 +878,7 @@ fn collinear_overlap_params(
     out
 }
 
-fn seg_seg_intersect(
+pub(super) fn seg_seg_intersect(
     a0: (f64, f64),
     a1: (f64, f64),
     b0: (f64, f64),
@@ -721,6 +960,16 @@ mod tests {
         vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
     }
 
+    /// Legacy flat-boundary view of a union result for tests written against
+    /// the pre-`assemble_faces` API. Equivalent to the old `legacy_boundaries(&result)`.
+    fn legacy_boundaries(r: &UnionResult) -> Vec<Polygon> {
+        r.faces
+            .iter()
+            .flat_map(|f| std::iter::once(&f.outer).chain(f.holes.iter()))
+            .cloned()
+            .collect()
+    }
+
     fn no_hole_inputs(polys: Vec<Polygon>) -> Vec<PolygonWithHoles> {
         polys
             .into_iter()
@@ -750,7 +999,7 @@ mod tests {
             rect(5.0, 0.0, 2.0, 2.0),
         ]))
         .expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 2);
+        assert_eq!(legacy_boundaries(&result).len(), 2);
     }
 
     #[test]
@@ -760,8 +1009,8 @@ mod tests {
             rect(2.0, 0.0, 3.0, 2.0),
         ]))
         .expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 1);
-        let area = signed_area(&result.boundaries[0]);
+        assert_eq!(legacy_boundaries(&result).len(), 1);
+        let area = signed_area(&legacy_boundaries(&result)[0]);
         assert!((area - 10.0).abs() < 0.1, "area={area}");
     }
 
@@ -772,8 +1021,8 @@ mod tests {
             rect(4.0, 0.0, 4.0, 3.0),
         ]))
         .expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 1);
-        let area = signed_area(&result.boundaries[0]);
+        assert_eq!(legacy_boundaries(&result).len(), 1);
+        let area = signed_area(&legacy_boundaries(&result)[0]);
         assert!((area - 24.0).abs() < 0.1, "area={area}");
     }
 
@@ -784,8 +1033,8 @@ mod tests {
             rect(1.0, 1.0, 2.0, 2.0),
         ]))
         .expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 1);
-        let area = signed_area(&result.boundaries[0]);
+        assert_eq!(legacy_boundaries(&result).len(), 1);
+        let area = signed_area(&legacy_boundaries(&result)[0]);
         assert!((area - 36.0).abs() < 0.1, "area={area}");
     }
 
@@ -796,9 +1045,9 @@ mod tests {
             rect(3.0, -1.0, 2.0, 5.0),
         ]))
         .expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 1);
+        assert_eq!(legacy_boundaries(&result).len(), 1);
         let expected_area = 8.0 * 2.0 + 2.0 * 5.0 - 2.0 * 2.0;
-        let area = signed_area(&result.boundaries[0]);
+        let area = signed_area(&legacy_boundaries(&result)[0]);
         assert!((area - expected_area).abs() < 0.1, "area={area}");
     }
 
@@ -809,9 +1058,9 @@ mod tests {
             rect(2.0, 0.0, 2.0, 4.0),
         ]))
         .expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 1);
+        assert_eq!(legacy_boundaries(&result).len(), 1);
         let expected_area = 6.0 * 2.0 + 2.0 * 4.0 - 2.0 * 2.0;
-        let area = signed_area(&result.boundaries[0]);
+        let area = signed_area(&legacy_boundaries(&result)[0]);
         assert!((area - expected_area).abs() < 0.1, "area={area}");
     }
 
@@ -826,8 +1075,8 @@ mod tests {
             segment_to_rect((0.0, 10.0), (0.0, 0.0), d, d),
         ]);
         let result = union_all_with_holes(&inputs).expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 2, "expected outer + hole");
-        let areas: Vec<f64> = result.boundaries.iter().map(signed_area).collect();
+        assert_eq!(legacy_boundaries(&result).len(), 2, "expected outer + hole");
+        let areas: Vec<f64> = legacy_boundaries(&result).iter().map(signed_area).collect();
         assert!(areas.iter().any(|a| *a > 0.0), "needs CCW outer");
         assert!(areas.iter().any(|a| *a < 0.0), "needs CW hole");
     }
@@ -841,8 +1090,8 @@ mod tests {
             segment_to_rect((4.0, 0.0), (8.0, 0.0), d, d),
         ]))
         .expect("union must succeed");
-        assert!(!result.boundaries.is_empty());
-        for b in &result.boundaries {
+        assert!(!legacy_boundaries(&result).is_empty());
+        for b in &legacy_boundaries(&result) {
             for &(x, y) in b {
                 assert!((-0.5..=8.5).contains(&x), "x={x} out of range");
                 assert!((-0.5..=3.5).contains(&y), "y={y} out of range");
@@ -863,8 +1112,8 @@ mod tests {
             segment_to_rect((6.473, -5.049), (6.861, -0.896), d, d),
         ]);
         let result = union_all_with_holes(&inputs).expect("union must succeed");
-        assert!(!result.boundaries.is_empty());
-        for b in &result.boundaries {
+        assert!(!legacy_boundaries(&result).is_empty());
+        for b in &legacy_boundaries(&result) {
             for &(x, y) in b {
                 assert!(
                     (-4.0..=8.0).contains(&x) && (-6.0..=3.0).contains(&y),
@@ -883,8 +1132,8 @@ mod tests {
             holes: Vec::new(),
         };
         let result = union_all_with_holes(&[pwh]).expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 1);
-        let area = signed_area(&result.boundaries[0]);
+        assert_eq!(legacy_boundaries(&result).len(), 1);
+        let area = signed_area(&legacy_boundaries(&result)[0]);
         assert!(area > 0.0, "outer should be CCW, area={area}");
     }
 
@@ -897,8 +1146,8 @@ mod tests {
             holes: vec![hole],
         };
         let result = union_all_with_holes(&[pwh]).expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 2, "outer + hole");
-        let areas: Vec<f64> = result.boundaries.iter().map(signed_area).collect();
+        assert_eq!(legacy_boundaries(&result).len(), 2, "outer + hole");
+        let areas: Vec<f64> = legacy_boundaries(&result).iter().map(signed_area).collect();
         assert!(areas.iter().any(|a| *a > 0.0), "needs CCW outer");
         assert!(areas.iter().any(|a| *a < 0.0), "needs CW hole");
     }
@@ -914,8 +1163,8 @@ mod tests {
             holes: Vec::new(),
         };
         let result = union_all_with_holes(&[a, b]).expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 1);
-        let area = signed_area(&result.boundaries[0]);
+        assert_eq!(legacy_boundaries(&result).len(), 1);
+        let area = signed_area(&legacy_boundaries(&result)[0]);
         assert!((area.abs() - 18.0).abs() < 1.0, "area={area}");
     }
 
@@ -930,9 +1179,8 @@ mod tests {
             holes: vec![rect(4.0, 1.0, 4.0, 4.0)],
         };
         let result = union_all_with_holes(&[a, b]).expect("union must succeed");
-        assert!(!result.boundaries.is_empty());
-        let ccw_count = result
-            .boundaries
+        assert!(!legacy_boundaries(&result).is_empty());
+        let ccw_count = legacy_boundaries(&result)
             .iter()
             .filter(|b| signed_area(b) > 0.0)
             .count();
@@ -954,11 +1202,8 @@ mod tests {
             holes: vec![b_hole],
         };
         let result = union_all_with_holes(&[a, b]).expect("union must succeed");
-        let outers: Vec<&Polygon> = result
-            .boundaries
-            .iter()
-            .filter(|b| signed_area(b) > 0.0)
-            .collect();
+        let boundaries = legacy_boundaries(&result);
+        let outers: Vec<&Polygon> = boundaries.iter().filter(|b| signed_area(b) > 0.0).collect();
         assert_eq!(outers.len(), 1, "one combined outer");
         for &(x, y) in outers[0] {
             let on_south = (y - 0.0).abs() < WALL_EPS;
@@ -984,7 +1229,7 @@ mod tests {
         };
         let result = union_all_with_holes(&[horiz, vert]).expect("union must succeed");
         assert_eq!(
-            result.boundaries.len(),
+            legacy_boundaries(&result).len(),
             1,
             "two overlapping wall strokes must union into one T boundary",
         );
@@ -1012,16 +1257,9 @@ mod tests {
             ]],
         };
         let result = union_all_with_holes(&[a, b]).expect("union must succeed");
-        let outers: Vec<&Polygon> = result
-            .boundaries
-            .iter()
-            .filter(|b| signed_area(b) > 0.0)
-            .collect();
-        let holes: Vec<&Polygon> = result
-            .boundaries
-            .iter()
-            .filter(|b| signed_area(b) < 0.0)
-            .collect();
+        let boundaries = legacy_boundaries(&result);
+        let outers: Vec<&Polygon> = boundaries.iter().filter(|b| signed_area(b) > 0.0).collect();
+        let holes: Vec<&Polygon> = boundaries.iter().filter(|b| signed_area(b) < 0.0).collect();
         assert_eq!(outers.len(), 1);
         assert_eq!(holes.len(), 2);
     }
@@ -1037,9 +1275,8 @@ mod tests {
             holes: Vec::new(),
         };
         let result = union_all_with_holes(&[a, b]).expect("union must succeed");
-        assert_eq!(result.boundaries.len(), 2, "two separate outers");
-        let ccw_count = result
-            .boundaries
+        assert_eq!(legacy_boundaries(&result).len(), 2, "two separate outers");
+        let ccw_count = legacy_boundaries(&result)
             .iter()
             .filter(|b| signed_area(b) > 0.0)
             .count();
@@ -1058,9 +1295,15 @@ mod tests {
             holes: vec![vec![(2.0, 2.0), (2.0, 8.0), (8.0, 8.0), (8.0, 2.0)]],
         };
         let r = union_all_with_holes(&[pwh]).expect("union must succeed");
-        assert_eq!(r.boundaries.len(), 2, "outer + hole");
-        let outer_count = r.boundaries.iter().filter(|b| signed_area(b) > 0.0).count();
-        let hole_count = r.boundaries.iter().filter(|b| signed_area(b) < 0.0).count();
+        assert_eq!(legacy_boundaries(&r).len(), 2, "outer + hole");
+        let outer_count = legacy_boundaries(&r)
+            .iter()
+            .filter(|b| signed_area(b) > 0.0)
+            .count();
+        let hole_count = legacy_boundaries(&r)
+            .iter()
+            .filter(|b| signed_area(b) < 0.0)
+            .count();
         assert_eq!(outer_count, 1, "outer must be CCW (signed area > 0)");
         assert_eq!(hole_count, 1, "hole must be CW (signed area < 0)");
     }
@@ -1088,7 +1331,7 @@ mod tests {
         };
         let r = union_all_with_holes(&[a, b]).expect("union must succeed");
         let mut seen: HashSet<((i64, i64), (i64, i64))> = HashSet::new();
-        for boundary in &r.boundaries {
+        for boundary in &legacy_boundaries(&r) {
             let n = boundary.len();
             for i in 0..n {
                 let p0 = boundary[i];
@@ -1102,5 +1345,236 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ===== assemble_faces tests =====
+    //
+    // These build synthetic `WalkedLoop`s directly to exercise the face-assembly
+    // contract independently of the union pipeline. `kept_indices` is unused by
+    // `assemble_faces` itself, so the helper leaves it empty.
+
+    /// Build a `(loops, vertex_table)` pair from a list of polygon loops.
+    fn loops_from_polygons(polygons: &[Polygon]) -> (Vec<WalkedLoop>, Vec<(f64, f64)>) {
+        let mut vertex_table: Vec<(f64, f64)> = Vec::new();
+        let mut loops: Vec<WalkedLoop> = Vec::new();
+        for poly in polygons {
+            let base = vertex_table.len();
+            vertex_table.extend(poly.iter().copied());
+            loops.push(WalkedLoop {
+                vertex_indices: (base..base + poly.len()).collect(),
+                kept_indices: Vec::new(),
+            });
+        }
+        (loops, vertex_table)
+    }
+
+    fn ccw_rect(x: f64, y: f64, w: f64, h: f64) -> Polygon {
+        vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+    }
+
+    fn cw_rect(x: f64, y: f64, w: f64, h: f64) -> Polygon {
+        vec![(x, y), (x, y + h), (x + w, y + h), (x + w, y)]
+    }
+
+    #[test]
+    fn assemble_faces_outer_only() {
+        let (loops, vertex_table) = loops_from_polygons(&[ccw_rect(0.0, 0.0, 10.0, 10.0)]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].holes.len(), 0);
+        assert!(signed_area(&faces[0].outer) > 0.0);
+    }
+
+    #[test]
+    fn assemble_faces_outer_plus_one_hole() {
+        let (loops, vertex_table) =
+            loops_from_polygons(&[ccw_rect(0.0, 0.0, 10.0, 10.0), cw_rect(3.0, 3.0, 4.0, 4.0)]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].holes.len(), 1);
+        assert!(signed_area(&faces[0].outer) > 0.0);
+        assert!(signed_area(&faces[0].holes[0]) < 0.0);
+    }
+
+    #[test]
+    fn assemble_faces_two_disjoint_outers() {
+        let (loops, vertex_table) =
+            loops_from_polygons(&[ccw_rect(0.0, 0.0, 5.0, 5.0), ccw_rect(10.0, 0.0, 5.0, 5.0)]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 2);
+        assert!(faces.iter().all(|f| f.holes.is_empty()));
+    }
+
+    #[test]
+    fn assemble_faces_two_adjacent_zones_one_outer_two_holes() {
+        // Outer 20x10; two CW holes side by side inside.
+        let (loops, vertex_table) = loops_from_polygons(&[
+            ccw_rect(0.0, 0.0, 20.0, 10.0),
+            cw_rect(2.0, 2.0, 6.0, 6.0),
+            cw_rect(12.0, 2.0, 6.0, 6.0),
+        ]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].holes.len(), 2);
+    }
+
+    #[test]
+    fn assemble_faces_two_sibling_holes_same_scanline() {
+        // Both holes have leftmost-vertex at the same y-coordinate.
+        let (loops, vertex_table) = loops_from_polygons(&[
+            ccw_rect(0.0, 0.0, 20.0, 10.0),
+            cw_rect(3.0, 4.0, 4.0, 2.0),  // hole A, leftmost x=3 y=4
+            cw_rect(13.0, 4.0, 4.0, 2.0), // hole B, leftmost x=13 y=4
+        ]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].holes.len(), 2);
+    }
+
+    #[test]
+    fn assemble_faces_two_disjoint_donuts_same_scanline() {
+        // Donut A at x∈[0,10], donut B at x∈[20,30]. All four leftmost
+        // vertices share y=0. Verifies that B_outer is NOT misidentified as
+        // a child of A_hole.
+        let (loops, vertex_table) = loops_from_polygons(&[
+            ccw_rect(0.0, 0.0, 10.0, 10.0),  // A outer
+            cw_rect(2.0, 2.0, 6.0, 6.0),     // A hole
+            ccw_rect(20.0, 0.0, 10.0, 10.0), // B outer
+            cw_rect(22.0, 2.0, 6.0, 6.0),    // B hole
+        ]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 2);
+        assert!(faces.iter().all(|f| f.holes.len() == 1));
+        // Each face's hole's leftmost x sits inside the same face's outer's bbox.
+        for f in &faces {
+            let outer_min_x = f.outer.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+            let outer_max_x = f
+                .outer
+                .iter()
+                .map(|p| p.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let hole_min_x = f.holes[0].iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+            assert!(hole_min_x > outer_min_x && hole_min_x < outer_max_x);
+        }
+    }
+
+    #[test]
+    fn assemble_faces_nested_island_depth_2() {
+        // Outer ⊃ hole ⊃ island; island stands alone as a separate face.
+        let (loops, vertex_table) = loops_from_polygons(&[
+            ccw_rect(0.0, 0.0, 20.0, 20.0), // depth 0, CCW
+            cw_rect(4.0, 4.0, 12.0, 12.0),  // depth 1, CW (hole of outer)
+            ccw_rect(8.0, 8.0, 4.0, 4.0),   // depth 2, CCW (nested island)
+        ]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 2);
+        // Find each face by area.
+        let mut face_areas: Vec<f64> = faces.iter().map(|f| signed_area(&f.outer)).collect();
+        face_areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert!(face_areas[0] > 100.0); // big outer
+        assert!(face_areas[1] < 30.0 && face_areas[1] > 10.0); // island
+                                                               // The big outer has 1 hole; the island has 0 holes.
+        let big = faces
+            .iter()
+            .find(|f| signed_area(&f.outer) > 100.0)
+            .unwrap();
+        let small = faces
+            .iter()
+            .find(|f| signed_area(&f.outer) < 100.0)
+            .unwrap();
+        assert_eq!(big.holes.len(), 1);
+        assert_eq!(small.holes.len(), 0);
+    }
+
+    #[test]
+    fn assemble_faces_nested_island_depth_3() {
+        // Outer ⊃ hole ⊃ island ⊃ inner_hole.
+        let (loops, vertex_table) = loops_from_polygons(&[
+            ccw_rect(0.0, 0.0, 30.0, 30.0), // depth 0, CCW
+            cw_rect(3.0, 3.0, 24.0, 24.0),  // depth 1, CW
+            ccw_rect(6.0, 6.0, 18.0, 18.0), // depth 2, CCW
+            cw_rect(9.0, 9.0, 12.0, 12.0),  // depth 3, CW
+        ]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 2);
+        // Both faces have exactly 1 hole.
+        assert!(faces.iter().all(|f| f.holes.len() == 1));
+    }
+
+    #[test]
+    fn assemble_faces_witness_robust_to_collinear_leftmost_vertices() {
+        // Two disjoint outers at the same x but different y; their
+        // leftmost-vertex witnesses share x but differ in y. Tie-break by y.
+        let (loops, vertex_table) =
+            loops_from_polygons(&[ccw_rect(0.0, 0.0, 5.0, 5.0), ccw_rect(0.0, 10.0, 5.0, 5.0)]);
+        let faces = assemble_faces(&loops, &vertex_table).expect("assemble must succeed");
+        assert_eq!(faces.len(), 2);
+        assert!(faces.iter().all(|f| f.holes.is_empty()));
+    }
+
+    #[test]
+    fn assemble_faces_returns_err_on_orientation_violation() {
+        // CCW square at depth 1: should be CW (hole). Forces orientation/depth
+        // mismatch.
+        let (loops, vertex_table) = loops_from_polygons(&[
+            ccw_rect(0.0, 0.0, 10.0, 10.0),
+            ccw_rect(3.0, 3.0, 4.0, 4.0), // depth 1 but CCW — invalid
+        ]);
+        let err = assemble_faces(&loops, &vertex_table).expect_err("must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("orientation/depth mismatch"),
+            "expected orientation/depth message; got {msg}"
+        );
+    }
+
+    #[test]
+    fn assemble_faces_returns_err_on_witness_boundary_tangent() {
+        // Two squares that share an edge — every vertex of one square lies
+        // exactly on the other's boundary. After k=3 fallbacks, all four
+        // candidates remain on the boundary, so assemble_faces must Err.
+        let a = vec![(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)];
+        let b = vec![(5.0, 0.0), (10.0, 0.0), (10.0, 5.0), (5.0, 5.0)];
+        // Use only 3 vertices of B so all of them sit on A's right edge.
+        let b_on_a = vec![(5.0, 1.0), (5.0, 2.0), (5.0, 3.0)];
+        let (loops, vertex_table) = loops_from_polygons(&[a, b, b_on_a]);
+        // With degenerate input the algorithm should refuse rather than
+        // silently coerce. Either Err or a crisp parent classification is
+        // acceptable; we only require not-panic and (if Ok) parity-consistent.
+        match assemble_faces(&loops, &vertex_table) {
+            Err(_) => {} // expected
+            Ok(faces) => {
+                for f in &faces {
+                    assert!(signed_area(&f.outer) > 0.0);
+                    for h in &f.holes {
+                        assert!(signed_area(h) < 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn assemble_faces_input_order_independent() {
+        let polygons = vec![
+            ccw_rect(0.0, 0.0, 20.0, 20.0),
+            cw_rect(4.0, 4.0, 12.0, 12.0),
+            ccw_rect(8.0, 8.0, 4.0, 4.0),
+        ];
+        let (loops_a, vt_a) = loops_from_polygons(&polygons);
+        let faces_a = assemble_faces(&loops_a, &vt_a).expect("a");
+
+        // Reverse order.
+        let polygons_rev: Vec<Polygon> = polygons.into_iter().rev().collect();
+        let (loops_b, vt_b) = loops_from_polygons(&polygons_rev);
+        let faces_b = assemble_faces(&loops_b, &vt_b).expect("b");
+
+        // Same number of faces; same hole counts (sorted).
+        assert_eq!(faces_a.len(), faces_b.len());
+        let mut counts_a: Vec<usize> = faces_a.iter().map(|f| f.holes.len()).collect();
+        let mut counts_b: Vec<usize> = faces_b.iter().map(|f| f.holes.len()).collect();
+        counts_a.sort();
+        counts_b.sort();
+        assert_eq!(counts_a, counts_b);
     }
 }

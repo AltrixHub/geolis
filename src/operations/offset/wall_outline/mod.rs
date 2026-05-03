@@ -3,6 +3,292 @@ mod stroke;
 
 use crate::error::{OperationError, Result};
 use crate::geometry::pline::{Pline, PlineVertex};
+use polygon_union::{point_in_polygon_class, seg_seg_intersect, PointClass, WALL_EPS, WALL_EPS_SQ};
+
+/// A planar wall face described by an outer boundary and zero or more holes,
+/// as produced by [`WallOutline2D::execute_faces`] and consumed by downstream
+/// extrusion.
+///
+/// # Winding contract
+/// - `outer` is a closed [`Pline`] with `signed_area > WALL_EPS_SQ` (CCW, non-degenerate).
+/// - Each hole is a closed [`Pline`] with `signed_area < -WALL_EPS_SQ` (CW, non-degenerate).
+/// - Every hole is fully contained in `outer`.
+/// - Sibling holes are non-overlapping.
+/// - Every `PlineVertex` has `bulge == 0` (line segments only — see
+///   [`WallFootprint2D::try_from_parts`]).
+///
+/// The contract is enforced by `assemble_faces` for outputs of `execute_faces`,
+/// and by [`WallFootprint2D::try_from_parts`] for cross-crate construction.
+#[derive(Debug, Clone)]
+pub struct WallFootprint2D {
+    outer: Pline,
+    holes: Vec<Pline>,
+}
+
+impl WallFootprint2D {
+    pub fn outer(&self) -> &Pline {
+        &self.outer
+    }
+
+    pub fn holes(&self) -> &[Pline] {
+        &self.holes
+    }
+
+    pub fn into_parts(self) -> (Pline, Vec<Pline>) {
+        (self.outer, self.holes)
+    }
+
+    /// Build a footprint from already-oriented Plines, validating every
+    /// invariant in release builds.
+    ///
+    /// # Validation (twelve checks)
+    ///
+    /// 1. `outer.closed == true` and `outer.vertices.len() >= 3`.
+    /// 2. each `hole.closed == true` and `hole.vertices.len() >= 3`.
+    /// 3. every `PlineVertex.bulge == 0` — arc segments are rejected.
+    /// 4. no consecutive vertex pair coincides within `WALL_EPS`, in any ring,
+    ///    including the closing edge (last → first).
+    /// 5. `signed_area(outer) > WALL_EPS_SQ` (strictly CCW, non-degenerate).
+    /// 6. `signed_area(hole) < -WALL_EPS_SQ` (strictly CW, non-degenerate).
+    /// 7. outer is simple — no two non-adjacent edges of `outer` intersect.
+    /// 8. each hole is simple.
+    /// 9. every hole vertex is strictly Inside outer.
+    /// 10. no hole edge intersects any outer edge.
+    /// 11. every hole's vertices lie strictly Outside every other hole.
+    /// 12. no hole edge intersects any other hole edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::InvalidInput`] with a precise message naming
+    /// the failing check, ring, and edge / vertex pair.
+    pub fn try_from_parts(outer: Pline, holes: Vec<Pline>) -> Result<Self> {
+        // 1, 3, 4: outer ring intrinsics
+        validate_ring(&outer, "outer")?;
+        // 2, 3, 4: each hole's intrinsics
+        for (hi, h) in holes.iter().enumerate() {
+            validate_ring(h, &format!("hole[{hi}]"))?;
+        }
+
+        let outer_pts = pline_xy(&outer);
+        // 7: outer simple (run before winding — a self-intersecting ring's
+        // signed area is meaningless).
+        if let Some((i, j)) = ring_self_intersection(&outer_pts) {
+            return Err(OperationError::InvalidInput(format!(
+                "WallFootprint2D::try_from_parts: outer is self-intersecting \
+                 between edges {i} and {j}"
+            ))
+            .into());
+        }
+        let outer_area = polygon_signed_area(&outer_pts);
+        // 5
+        if outer_area <= WALL_EPS_SQ {
+            return Err(OperationError::InvalidInput(format!(
+                "WallFootprint2D::try_from_parts: outer must be CCW with \
+                 signed_area > WALL_EPS_SQ; got {outer_area}"
+            ))
+            .into());
+        }
+
+        let hole_pts: Vec<Vec<(f64, f64)>> = holes.iter().map(pline_xy).collect();
+        for (hi, hp) in hole_pts.iter().enumerate() {
+            // 8: hole simple (before winding)
+            if let Some((i, j)) = ring_self_intersection(hp) {
+                return Err(OperationError::InvalidInput(format!(
+                    "WallFootprint2D::try_from_parts: hole[{hi}] is \
+                     self-intersecting between edges {i} and {j}"
+                ))
+                .into());
+            }
+            let hole_area = polygon_signed_area(hp);
+            // 6
+            if hole_area >= -WALL_EPS_SQ {
+                return Err(OperationError::InvalidInput(format!(
+                    "WallFootprint2D::try_from_parts: hole[{hi}] must be CW \
+                     with signed_area < -WALL_EPS_SQ; got {hole_area}"
+                ))
+                .into());
+            }
+            // 9: every hole vertex inside outer
+            for (vi, &p) in hp.iter().enumerate() {
+                match point_in_polygon_class(p, &outer_pts) {
+                    PointClass::Inside => {}
+                    other => {
+                        return Err(OperationError::InvalidInput(format!(
+                            "WallFootprint2D::try_from_parts: hole[{hi}] \
+                             vertex {vi} ({p:?}) is not strictly inside outer \
+                             (got {other:?})"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            // 10: no hole edge crosses any outer edge
+            if let Some((i, j)) = rings_edges_cross(hp, &outer_pts) {
+                return Err(OperationError::InvalidInput(format!(
+                    "WallFootprint2D::try_from_parts: hole[{hi}] edge {i} \
+                     intersects outer edge {j}"
+                ))
+                .into());
+            }
+        }
+
+        // 11, 12: hole-hole separation
+        for hi in 0..hole_pts.len() {
+            for hj in (hi + 1)..hole_pts.len() {
+                for (vi, &p) in hole_pts[hi].iter().enumerate() {
+                    if matches!(point_in_polygon_class(p, &hole_pts[hj]), PointClass::Inside) {
+                        return Err(OperationError::InvalidInput(format!(
+                            "WallFootprint2D::try_from_parts: hole[{hi}] \
+                             vertex {vi} ({p:?}) lies inside hole[{hj}] \
+                             (overlapping holes)"
+                        ))
+                        .into());
+                    }
+                }
+                if let Some((i, j)) = rings_edges_cross(&hole_pts[hi], &hole_pts[hj]) {
+                    return Err(OperationError::InvalidInput(format!(
+                        "WallFootprint2D::try_from_parts: hole[{hi}] edge \
+                         {i} intersects hole[{hj}] edge {j}"
+                    ))
+                    .into());
+                }
+            }
+        }
+
+        Ok(Self { outer, holes })
+    }
+
+    /// Crate-internal converter that trusts the union pipeline's invariants.
+    /// Skips the O(n²) cross-ring containment / non-crossing checks that
+    /// `assemble_faces` already enforces.
+    pub(crate) fn from_polygon_with_holes_unchecked(p: polygon_union::PolygonWithHoles) -> Self {
+        let (outer_pts, holes_pts) = p.into_parts();
+        let outer = polygon_to_pline(outer_pts);
+        let holes = holes_pts.into_iter().map(polygon_to_pline).collect();
+        // The union pipeline guarantees: closed loops, line-only, simple,
+        // CCW outer / CW holes, hole-in-outer, no overlap. Re-asserting in
+        // debug builds catches construction bugs.
+        debug_assert!(outer.closed);
+        debug_assert!(outer.vertices.len() >= 3);
+        Self { outer, holes }
+    }
+}
+
+fn polygon_to_pline(pts: Vec<(f64, f64)>) -> Pline {
+    Pline {
+        vertices: pts
+            .into_iter()
+            .map(|(x, y)| PlineVertex::line(x, y))
+            .collect(),
+        closed: true,
+    }
+}
+
+fn pline_xy(p: &Pline) -> Vec<(f64, f64)> {
+    p.vertices.iter().map(|v| (v.x, v.y)).collect()
+}
+
+fn polygon_signed_area(pts: &[(f64, f64)]) -> f64 {
+    let n = pts.len();
+    let mut a = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        a += pts[i].0 * pts[j].1;
+        a -= pts[j].0 * pts[i].1;
+    }
+    a * 0.5
+}
+
+/// Validates a single ring's intrinsics: closed, ≥3 vertices, line-only
+/// (bulge == 0), no zero-length edges (consecutive duplicates and closing
+/// duplicate within `WALL_EPS`).
+fn validate_ring(p: &Pline, label: &str) -> Result<()> {
+    if !p.closed {
+        return Err(OperationError::InvalidInput(format!(
+            "WallFootprint2D::try_from_parts: {label} must have closed = true"
+        ))
+        .into());
+    }
+    if p.vertices.len() < 3 {
+        return Err(OperationError::InvalidInput(format!(
+            "WallFootprint2D::try_from_parts: {label} must have at least 3 \
+             vertices; got {}",
+            p.vertices.len()
+        ))
+        .into());
+    }
+    for (i, v) in p.vertices.iter().enumerate() {
+        if v.bulge.abs() > 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "WallFootprint2D::try_from_parts: {label} vertex {i} has \
+                 non-zero bulge {} — only line segments are accepted",
+                v.bulge
+            ))
+            .into());
+        }
+    }
+    let n = p.vertices.len();
+    for i in 0..n {
+        let a = &p.vertices[i];
+        let b = &p.vertices[(i + 1) % n];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        if dx * dx + dy * dy < WALL_EPS * WALL_EPS {
+            return Err(OperationError::InvalidInput(format!(
+                "WallFootprint2D::try_from_parts: {label} has zero-length \
+                 edge between vertex {i} and vertex {} (within WALL_EPS)",
+                (i + 1) % n
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Returns `Some((i, j))` if non-adjacent edges `i` and `j` of the ring
+/// `pts` intersect transversely. Edge `i` is `(pts[i], pts[(i+1) % n])`.
+fn ring_self_intersection(pts: &[(f64, f64)]) -> Option<(usize, usize)> {
+    let n = pts.len();
+    for i in 0..n {
+        let a0 = pts[i];
+        let a1 = pts[(i + 1) % n];
+        for j in (i + 2)..n {
+            // Skip the pair that wraps around the ring (last edge of edge 0).
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            let b0 = pts[j];
+            let b1 = pts[(j + 1) % n];
+            if let Some((t, u)) = seg_seg_intersect(a0, a1, b0, b1) {
+                if t > WALL_EPS && t < 1.0 - WALL_EPS && u > WALL_EPS && u < 1.0 - WALL_EPS {
+                    return Some((i, j));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns `Some((i, j))` if edge `i` of ring `a` crosses edge `j` of ring
+/// `b` transversely (interior crossing only — endpoint touches are ignored).
+fn rings_edges_cross(a: &[(f64, f64)], b: &[(f64, f64)]) -> Option<(usize, usize)> {
+    let na = a.len();
+    let nb = b.len();
+    for i in 0..na {
+        let a0 = a[i];
+        let a1 = a[(i + 1) % na];
+        for j in 0..nb {
+            let b0 = b[j];
+            let b1 = b[(j + 1) % nb];
+            if let Some((t, u)) = seg_seg_intersect(a0, a1, b0, b1) {
+                if t > WALL_EPS && t < 1.0 - WALL_EPS && u > WALL_EPS && u < 1.0 - WALL_EPS {
+                    return Some((i, j));
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Generates wall outlines from one or more centerline polylines.
 ///
@@ -49,40 +335,37 @@ impl WallOutline2D {
         }
     }
 
-    /// Executes the wall outline generation.
+    /// Executes the wall outline generation, returning typed face topology.
+    ///
+    /// Each returned [`WallFootprint2D`] represents one connected wall-material
+    /// face: a CCW outer boundary (`signed_area > 0`) plus zero or more CW hole
+    /// boundaries (`signed_area < 0`). Nested islands at depth ≥ 2 are emitted
+    /// as separate `WallFootprint2D` entries (each filled face becomes one
+    /// footprint), so the output is always flat-holes-only per face.
     ///
     /// # Output guarantee
     ///
-    /// Each returned [`Pline`] is **closed** and the boundary set is the
-    /// boolean-union outline of the stroke-expanded inputs (every output
-    /// edge separates filled material from empty). The output is safe
-    /// for direct ingestion by `spade::cdt`-based tessellation; this is
-    /// guaranteed at the [`polygon_union::union_all_with_holes`] layer
-    /// by an arrangement-based construction (split → snap → bilateral
-    /// half-edge classification → polar-angle face-walk) and verified
-    /// by a `#[cfg(debug_assertions)]` CDT-safe post-condition.
-    ///
-    /// Self-intersecting offset boundaries — which can arise from sharp
-    /// zigzag or self-crossing centerlines — are flattened by the same
-    /// arrangement: any internal seam edges (filled-on-both sides) are
-    /// dropped during half-edge classification.
-    ///
-    /// # Winding
-    ///
-    /// Outer boundaries are returned CCW (signed area > 0); hole
-    /// boundaries (when nested inside an outer) are returned CW
-    /// (signed area < 0). For depth ≥ 2 nested-island outputs, parity
-    /// alternates: even depth = CCW (outer), odd depth = CW (hole).
+    /// Each returned `Pline` (outer or hole) is closed and consists only of
+    /// line segments (no arcs). The arrangement-based union pipeline
+    /// (split → snap → bilateral half-edge classification → polar-angle
+    /// face-walk → containment-matrix face assembly) guarantees:
+    /// - Every edge separates filled material from empty.
+    /// - Outputs are CDT-safe (verified by a `#[cfg(debug_assertions)]`
+    ///   post-condition in [`polygon_union::union_all_with_holes`]).
+    /// - Self-intersecting offset boundaries are flattened by dropping
+    ///   any internal seam edges during half-edge classification.
     ///
     /// # Errors
     ///
-    /// - `OperationError::InvalidInput` — no polyline has at least 2 vertices.
-    /// - `OperationError::Failed` — no outline can be generated, or
-    ///   `polygon_union` returned ambiguous half-edge classifications
-    ///   that survived the ε-shrink retries (typically degenerate input
-    ///   where multiple inputs share a tangent boundary at a sampled
-    ///   edge midpoint).
-    pub fn execute(&self) -> Result<Vec<Pline>> {
+    /// - `OperationError::InvalidInput` — no polyline has at least 2
+    ///   vertices, or both `left_width` and `right_width` are within
+    ///   `crate::math::TOLERANCE` of zero (zero-width input has no
+    ///   footprint to extrude).
+    /// - `OperationError::Failed` — no outline can be generated, or the
+    ///   `polygon_union` arrangement / face-assembly stage detected
+    ///   broken topology (ambiguous half-edge classification, witness on
+    ///   another loop's boundary, orientation/depth mismatch).
+    pub fn execute_faces(&self) -> Result<Vec<WallFootprint2D>> {
         let valid: Vec<&Pline> = self
             .plines
             .iter()
@@ -99,7 +382,12 @@ impl WallOutline2D {
         if self.left_width.abs() < crate::math::TOLERANCE
             && self.right_width.abs() < crate::math::TOLERANCE
         {
-            return Ok(self.plines.clone());
+            return Err(OperationError::InvalidInput(
+                "WallOutline2D::execute_faces requires non-zero width on at \
+                 least one side; zero-width input has no footprint to extrude"
+                    .to_owned(),
+            )
+            .into());
         }
 
         // Step 1: Stroke-expand each polyline into a wall polygon.
@@ -138,54 +426,48 @@ impl WallOutline2D {
             return Err(OperationError::Failed("no valid wall polygons".to_owned()).into());
         }
 
-        // Step 2: Union all wall polygons.
+        // Step 2: Union all wall polygons into typed face topology.
         let union_result = polygon_union::union_all_with_holes(&wall_polys)?;
 
-        if union_result.boundaries.is_empty() {
+        if union_result.faces.is_empty() {
             return Err(OperationError::Failed(
                 "wall outline union produced no results".to_owned(),
             )
             .into());
         }
 
-        // Step 3: Convert union output to closed Plines. The
-        // arrangement-based union already guarantees CDT safety; a
-        // `#[cfg(debug_assertions)]` post-condition inside
-        // `polygon_union::union_all_with_holes` re-verifies the spade
-        // dry-run for defense in depth.
-        let outlines: Vec<Pline> = union_result
-            .boundaries
+        let footprints: Vec<WallFootprint2D> = union_result
+            .faces
             .into_iter()
-            .filter(|b| b.len() >= 3)
-            .map(|b| Pline {
-                vertices: b
-                    .into_iter()
-                    .map(|(x, y)| PlineVertex::line(x, y))
-                    .collect(),
-                closed: true,
-            })
+            .map(WallFootprint2D::from_polygon_with_holes_unchecked)
             .collect();
 
-        if outlines.is_empty() {
-            return Err(OperationError::Failed(
-                "wall outline union produced no valid boundaries".to_owned(),
-            )
-            .into());
-        }
-
-        Ok(outlines)
+        Ok(footprints)
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::math::distance_2d::point_to_segment_dist;
     use crate::math::Point3;
 
+    fn run_outline_faces(plines: Vec<Pline>, d: f64) -> Vec<WallFootprint2D> {
+        WallOutline2D::new(plines, d).execute_faces().unwrap()
+    }
+
+    /// Legacy flat-Pline view for tests written against the pre-`execute_faces`
+    /// API. Equivalent to the old `execute() -> Vec<Pline>`: outer + holes
+    /// concatenated, in face order.
     fn run_outline(plines: Vec<Pline>, d: f64) -> Vec<Pline> {
-        WallOutline2D::new(plines, d).execute().unwrap()
+        run_outline_faces(plines, d)
+            .into_iter()
+            .flat_map(|f| {
+                let (o, h) = f.into_parts();
+                std::iter::once(o).chain(h)
+            })
+            .collect()
     }
 
     fn total_area(boundaries: &[Pline]) -> f64 {
@@ -1042,9 +1324,16 @@ mod tests {
 
     fn run_p3_oracle(plines: Vec<Pline>, half_width: f64, fixture: &str) -> Vec<Pline> {
         let inputs = build_oracle_inputs(&plines, half_width);
-        let outputs = WallOutline2D::new(plines, half_width)
-            .execute()
-            .unwrap_or_else(|e| panic!("[{fixture}] WallOutline2D::execute failed: {e}"));
+        let faces = WallOutline2D::new(plines, half_width)
+            .execute_faces()
+            .unwrap_or_else(|e| panic!("[{fixture}] WallOutline2D::execute_faces failed: {e}"));
+        let outputs: Vec<Pline> = faces
+            .into_iter()
+            .flat_map(|f| {
+                let (o, h) = f.into_parts();
+                std::iter::once(o).chain(h)
+            })
+            .collect();
         assert!(
             !outputs.is_empty(),
             "[{fixture}] WallOutline2D produced no boundaries"
@@ -1250,5 +1539,227 @@ mod tests {
             closed: true,
         };
         run_p3_oracle(vec![pline], 0.3, "closed_rectangle_ring");
+    }
+
+    // ===== execute_faces tests (typed face-topology API) =====
+
+    #[test]
+    fn execute_faces_open_chain_emits_single_face_no_holes() {
+        let p = Pline::from_points(
+            &[Point3::new(0.0, 0.0, 0.0), Point3::new(5.0, 0.0, 0.0)],
+            false,
+        );
+        let faces = run_outline_faces(vec![p], 0.3);
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].holes().len(), 0);
+    }
+
+    #[test]
+    fn execute_faces_closed_square_emits_one_face_with_one_hole() {
+        let p = Pline::from_points(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(10.0, 0.0, 0.0),
+                Point3::new(10.0, 10.0, 0.0),
+                Point3::new(0.0, 10.0, 0.0),
+            ],
+            true,
+        );
+        let faces = run_outline_faces(vec![p], 0.3);
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].holes().len(), 1);
+    }
+
+    #[test]
+    fn execute_faces_two_adjacent_zones_emits_one_outer_two_holes() {
+        // Two adjacent closed quads sharing a wall — should produce one outer
+        // face with two holes after stroke-and-union.
+        let a = Pline::from_points(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(5.0, 0.0, 0.0),
+                Point3::new(5.0, 3.0, 0.0),
+                Point3::new(0.0, 3.0, 0.0),
+            ],
+            true,
+        );
+        let b = Pline::from_points(
+            &[
+                Point3::new(5.0, 0.0, 0.0),
+                Point3::new(8.0, 0.0, 0.0),
+                Point3::new(8.0, 3.0, 0.0),
+                Point3::new(5.0, 3.0, 0.0),
+            ],
+            true,
+        );
+        let faces = run_outline_faces(vec![a, b], 0.15);
+        assert_eq!(faces.len(), 1, "merged outer should be a single face");
+        assert_eq!(faces[0].holes().len(), 2, "two interior cells");
+    }
+
+    #[test]
+    fn execute_faces_two_crossing_open_chains_emits_correct_face_set() {
+        // `+` configuration: two open Plines crossing at the centre. Wall
+        // material forms a plus-shaped footprint with no interior holes.
+        let h = Pline::from_points(
+            &[Point3::new(0.0, 5.0, 0.0), Point3::new(10.0, 5.0, 0.0)],
+            false,
+        );
+        let v = Pline::from_points(
+            &[Point3::new(5.0, 0.0, 0.0), Point3::new(5.0, 10.0, 0.0)],
+            false,
+        );
+        let faces = run_outline_faces(vec![h, v], 0.3);
+        assert_eq!(faces.len(), 1, "merged + should be one face");
+        assert_eq!(faces[0].holes().len(), 0, "no interior holes");
+    }
+
+    #[test]
+    fn execute_faces_zero_width_returns_invalid_input() {
+        let p = Pline::from_points(
+            &[Point3::new(0.0, 0.0, 0.0), Point3::new(5.0, 0.0, 0.0)],
+            false,
+        );
+        let err = WallOutline2D::new(vec![p], 0.0)
+            .execute_faces()
+            .expect_err("zero width must Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("non-zero width") || msg.contains("zero-width"),
+            "expected zero-width message; got {msg}"
+        );
+    }
+
+    // ===== WallFootprint2D::try_from_parts tests =====
+
+    fn closed_pline_xy(points: &[(f64, f64)]) -> Pline {
+        Pline {
+            vertices: points
+                .iter()
+                .map(|&(x, y)| PlineVertex::line(x, y))
+                .collect(),
+            closed: true,
+        }
+    }
+
+    fn ccw_square_pline() -> Pline {
+        closed_pline_xy(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])
+    }
+
+    fn cw_square_pline_at(x: f64, y: f64, w: f64, h: f64) -> Pline {
+        closed_pline_xy(&[(x, y), (x, y + h), (x + w, y + h), (x + w, y)])
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_accepts_valid_outer_only() {
+        let outer = ccw_square_pline();
+        let f = WallFootprint2D::try_from_parts(outer, vec![]).expect("must succeed");
+        assert_eq!(f.holes().len(), 0);
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_accepts_outer_plus_hole() {
+        let outer = ccw_square_pline();
+        let hole = cw_square_pline_at(3.0, 3.0, 4.0, 4.0);
+        let f = WallFootprint2D::try_from_parts(outer, vec![hole]).expect("must succeed");
+        assert_eq!(f.holes().len(), 1);
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_unclosed_outer() {
+        let mut outer = ccw_square_pline();
+        outer.closed = false;
+        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        assert!(format!("{err}").contains("closed"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_cw_outer() {
+        let outer = closed_pline_xy(&[(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        assert!(format!("{err}").contains("CCW"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_ccw_hole() {
+        let outer = ccw_square_pline();
+        // CCW square inside outer (wrong winding for a hole).
+        let hole = closed_pline_xy(&[(3.0, 3.0), (7.0, 3.0), (7.0, 7.0), (3.0, 7.0)]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
+        assert!(format!("{err}").contains("CW"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_hole_vertex_outside_outer() {
+        let outer = ccw_square_pline();
+        // CW square that pokes outside the outer (vertex at (-1, 5) is outside).
+        let hole = closed_pline_xy(&[(-1.0, 4.0), (-1.0, 6.0), (3.0, 6.0), (3.0, 4.0)]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
+        assert!(format!("{err}").contains("inside outer"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_overlapping_holes() {
+        let outer = ccw_square_pline();
+        let h1 = cw_square_pline_at(1.0, 1.0, 5.0, 5.0);
+        let h2 = cw_square_pline_at(3.0, 3.0, 5.0, 5.0); // overlaps h1
+        let err = WallFootprint2D::try_from_parts(outer, vec![h1, h2]).expect_err("must err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("overlapping") || msg.contains("intersects"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_degenerate_outer() {
+        let outer = closed_pline_xy(&[(0.0, 0.0), (1.0, 0.0)]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        assert!(format!("{err}").contains("at least 3"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_self_intersecting_outer() {
+        // Bowtie order — figure-8 quad — non-adjacent edges cross.
+        let outer = closed_pline_xy(&[(0.0, 0.0), (10.0, 10.0), (10.0, 0.0), (0.0, 10.0)]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        assert!(format!("{err}").contains("self-intersecting"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_arc_segment() {
+        let mut outer = ccw_square_pline();
+        outer.vertices[0].bulge = 0.5;
+        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        assert!(format!("{err}").contains("bulge"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_consecutive_duplicate_vertex() {
+        let outer = closed_pline_xy(&[
+            (0.0, 0.0),
+            (5.0, 0.0),
+            (5.0, 0.0), // duplicate of previous
+            (5.0, 5.0),
+            (0.0, 5.0),
+        ]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        assert!(format!("{err}").contains("zero-length"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_closing_duplicate_vertex() {
+        // Last vertex coincides with first → closing edge is zero-length.
+        let outer = closed_pline_xy(&[(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 0.0)]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        assert!(format!("{err}").contains("zero-length"), "{err}");
+    }
+
+    #[test]
+    fn wall_footprint_try_from_parts_rejects_zero_length_edge_in_hole() {
+        let outer = ccw_square_pline();
+        let hole = closed_pline_xy(&[(3.0, 3.0), (3.0, 3.0), (3.0, 7.0), (7.0, 7.0), (7.0, 3.0)]);
+        let err = WallFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
+        assert!(format!("{err}").contains("zero-length"), "{err}");
     }
 }
