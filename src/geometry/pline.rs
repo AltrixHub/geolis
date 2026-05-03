@@ -1,13 +1,13 @@
 use crate::math::arc_2d::{arc_from_bulge, arc_point_at};
 use crate::math::Point3;
 
-/// Self-intersection detection and resolution for closed plines.
-/// Used by `WallOutline2D::execute` to guarantee output simplicity.
+/// Self-intersection detection primitives. `find_self_intersection` is
+/// reused by the `WallOutline2D` test oracle (P3.1 S2) and by the
+/// figure-8 / multi-self-crossing fixture assertions; consequently the
+/// module is test-only — `polygon_union` no longer relies on it for
+/// production output.
+#[cfg(test)]
 pub(crate) mod self_intersection;
-
-/// Final-contract enforcement pass: normalizes a set of polygon-union
-/// candidate boundaries into a CDT-safe set. See module doc-comment.
-pub(crate) mod tessellation_safety;
 
 /// Bulge-encoded polyline vertex for mixed line/arc segments.
 ///

@@ -53,45 +53,35 @@ impl WallOutline2D {
     ///
     /// # Output guarantee
     ///
-    /// Each returned [`Pline`] is **closed**, **simple**, AND the boundary
-    /// set as a whole has **zero transverse constraint-edge crossings**
-    /// — both intra-boundary (within a single loop) and inter-boundary
-    /// (across distinct loops). The output is therefore safe for direct
-    /// ingestion by `spade::cdt`-based tessellation (e.g. `TessellateFace`
-    /// on outer + hole loops in the same CDT), which would otherwise
-    /// panic on transversely-crossing constraint edges.
+    /// Each returned [`Pline`] is **closed** and the boundary set is the
+    /// boolean-union outline of the stroke-expanded inputs (every output
+    /// edge separates filled material from empty). The output is safe
+    /// for direct ingestion by `spade::cdt`-based tessellation; this is
+    /// guaranteed at the [`polygon_union::union_all_with_holes`] layer
+    /// by an arrangement-based construction (split → snap → bilateral
+    /// half-edge classification → polar-angle face-walk) and verified
+    /// by a `#[cfg(debug_assertions)]` CDT-safe post-condition.
     ///
     /// Self-intersecting offset boundaries — which can arise from sharp
-    /// zigzag or self-crossing centerlines — are normalized by an internal
-    /// [`tessellation_safety::make_tessellation_safe`](crate::geometry::pline::tessellation_safety)
-    /// pass that runs (1) per-boundary cleanup (dedup near-duplicate
-    /// vertices, simplify collinear chains, validate closure), (2)
-    /// cross-boundary transverse crossing split (intra-boundary self-
-    /// intersections become multiple simple loops; inter-boundary
-    /// crossings become T-junctions), and (3) a final CDT dry-run
-    /// verification before returning. The intra-boundary primitives
-    /// `find_self_intersection` and `split_at_self_intersections` are
-    /// kept as building blocks of that pass.
+    /// zigzag or self-crossing centerlines — are flattened by the same
+    /// arrangement: any internal seam edges (filled-on-both sides) are
+    /// dropped during half-edge classification.
     ///
-    /// # Winding is unconstrained
+    /// # Winding
     ///
-    /// Prior to the simplicity guarantee, this function implicitly
-    /// returned CCW outer boundaries and CW hole boundaries (inherited
-    /// from `polygon_union::union_all_with_holes`). After self-intersection
-    /// resolution, child loops produced from a self-intersecting parent
-    /// inherit unrelated signed areas and may be either orientation
-    /// (worked example: a figure-8 centerline yields one CCW + one CW
-    /// child). Callers needing CCW-or-CW classification must re-derive
-    /// it from the shoelace area of each output.
+    /// Outer boundaries are returned CCW (signed area > 0); hole
+    /// boundaries (when nested inside an outer) are returned CW
+    /// (signed area < 0). For depth ≥ 2 nested-island outputs, parity
+    /// alternates: even depth = CCW (outer), odd depth = CW (hole).
     ///
     /// # Errors
     ///
     /// - `OperationError::InvalidInput` — no polyline has at least 2 vertices.
-    /// - `OperationError::Failed` — no outline can be generated, the
-    ///   self-intersection splitter bailed at its safety bound (input
-    ///   was pathologically self-intersecting), or the final CDT dry-run
-    ///   rejected an insertion (defense-in-depth — should not happen for
-    ///   well-formed input after the cross-boundary split).
+    /// - `OperationError::Failed` — no outline can be generated, or
+    ///   `polygon_union` returned ambiguous half-edge classifications
+    ///   that survived the ε-shrink retries (typically degenerate input
+    ///   where multiple inputs share a tangent boundary at a sampled
+    ///   edge midpoint).
     pub fn execute(&self) -> Result<Vec<Pline>> {
         let valid: Vec<&Pline> = self
             .plines
@@ -149,7 +139,7 @@ impl WallOutline2D {
         }
 
         // Step 2: Union all wall polygons.
-        let union_result = polygon_union::union_all_with_holes(&wall_polys);
+        let union_result = polygon_union::union_all_with_holes(&wall_polys)?;
 
         if union_result.boundaries.is_empty() {
             return Err(OperationError::Failed(
@@ -158,12 +148,12 @@ impl WallOutline2D {
             .into());
         }
 
-        // Step 3: Convert to Pline boundaries, then ensure the entire
-        // set is CDT-safe via the tessellation_safety pass. This single
-        // call replaces the previous per-boundary
-        // split_at_self_intersections loop and additionally handles
-        // inter-boundary crossings + a final CDT dry-run verification.
-        let raw_outlines: Vec<Pline> = union_result
+        // Step 3: Convert union output to closed Plines. The
+        // arrangement-based union already guarantees CDT safety; a
+        // `#[cfg(debug_assertions)]` post-condition inside
+        // `polygon_union::union_all_with_holes` re-verifies the spade
+        // dry-run for defense in depth.
+        let outlines: Vec<Pline> = union_result
             .boundaries
             .into_iter()
             .filter(|b| b.len() >= 3)
@@ -175,8 +165,6 @@ impl WallOutline2D {
                 closed: true,
             })
             .collect();
-        let outlines =
-            crate::geometry::pline::tessellation_safety::make_tessellation_safe(raw_outlines)?;
 
         if outlines.is_empty() {
             return Err(OperationError::Failed(
@@ -599,9 +587,10 @@ mod tests {
     }
 
     /// Integration: a centerline that crosses itself must yield only
-    /// simple boundaries. Without the `split_at_self_intersections` step
-    /// in `execute()`, this output would self-intersect and panic any
-    /// downstream `spade::cdt`-based tessellation.
+    /// simple boundaries. The arrangement-based `polygon_union` drops
+    /// internal seam edges (filled-on-both sides) during half-edge
+    /// classification, so output boundaries are simple by construction
+    /// and safe for downstream `spade::cdt`-based tessellation.
     #[test]
     fn closed_self_intersecting_centerline_returns_simple_boundaries() {
         // Figure-8 closed centerline.
@@ -652,10 +641,11 @@ mod tests {
     ///
     /// Success criterion: `WallOutline2D::execute` returns Ok(non-empty)
     /// AND every output boundary is intra-simple. The set-level CDT-safe
-    /// guarantee is enforced inside `make_tessellation_safe` via its
-    /// final `verify_cdt_safe` step — the existence of a successful
-    /// `run_outline` result is itself evidence that the CDT dry-run
-    /// passed.
+    /// guarantee is enforced inside `polygon_union::union_all_with_holes`
+    /// by a `#[cfg(debug_assertions)]` post-condition that re-runs spade's
+    /// constraint dry-run on the output — a successful `run_outline`
+    /// result in debug builds is therefore evidence that the CDT
+    /// constraints pass.
     #[test]
     fn multi_self_intersecting_centerline_returns_cdt_safe_set() {
         // 6-vertex closed centerline with 2 crossings (zigzag-cross shape).
@@ -691,7 +681,13 @@ mod tests {
     /// - contain (1, 1) as Inside (the crossing point is wall material)
     /// - contain (0.5, 0.5) as Inside (centerline of segment 0)
     /// - have NO self-intersection in any output boundary
+    ///
+    /// Superseded by P3.1 `figure_8_open_centerline_no_internal_seam`:
+    /// the centroid-Inside check below is satisfied even when an internal
+    /// seam is emitted at the crossing, so this assertion does not
+    /// distinguish a true boolean-union outline from the buggy state.
     #[test]
+    #[ignore = "P3.1 supersedes: only checks centroid Inside, not no-internal-seam"]
     fn self_crossing_open_centerline_unions_to_merged_filled_region() {
         let pline = Pline {
             vertices: vec![
@@ -736,7 +732,12 @@ mod tests {
     /// connected wall region. The crossing-center diamond should be
     /// covered by wall material — not represented as a hole that punches
     /// it out.
+    ///
+    /// Superseded by P3.1 `two_crossing_separate_walls_no_internal_seam`:
+    /// the centroid-Inside check is satisfied even when internal seams
+    /// are emitted, so this assertion does not catch the actual bug.
     #[test]
+    #[ignore = "P3.1 supersedes: only checks centroid Inside, not no-internal-seam"]
     fn two_crossing_walls_merge_with_filled_center() {
         let h = Pline {
             vertices: vec![PlineVertex::line(0.0, 1.0), PlineVertex::line(2.0, 1.0)],
@@ -768,5 +769,486 @@ mod tests {
             covered_by_outer,
             "X-crossing center (1, 1) should be wall material, but no outer boundary covers it"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // P3.1 — Sample-based "outline only" oracle + fixtures
+    //
+    // Phase 3 contract: WallOutline2D::execute output edges must be
+    // exactly the boolean-union outline of the stroke-expanded inputs.
+    // For every directed edge of every output boundary, "filled" material
+    // must be on EXACTLY one side at a small perpendicular ε. The S1
+    // bilateral-sample oracle below verifies that property; S2 verifies
+    // no transverse crossing exists between or within boundaries; S3
+    // re-runs spade's CDT dry-run to verify the output is constraint-safe.
+    //
+    // The current `union_all_with_holes` implementation fails S1 on the
+    // self-crossing fixtures (figure-8, zigzag, X-cross, T-junction)
+    // because it (a) drops source/direction info before tracing,
+    // (b) keeps the midpoint-Inside filter at polygon_union.rs:120 which
+    // treats `Boundary` as not-Inside, and (c) uses a "first matching"
+    // tiebreak in trace_one_loop that picks wrong loops at degree-4
+    // vertices. P3.3 replaces all three with a directed half-edge
+    // arrangement; once that's in place these tests turn green.
+    // -----------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum BoundaryRef {
+        Outer,
+        Hole(usize),
+    }
+
+    #[derive(Debug, Clone)]
+    enum FilledClass {
+        Filled,
+        Empty,
+        AmbiguousOnBoundary {
+            #[allow(
+                dead_code,
+                reason = "consumed via Debug formatting in panic diagnostics"
+            )]
+            touched: Vec<(usize, BoundaryRef)>,
+        },
+    }
+
+    fn is_filled_in_input_set(
+        p: (f64, f64),
+        inputs: &[polygon_union::PolygonWithHoles],
+    ) -> FilledClass {
+        let mut touched: Vec<(usize, BoundaryRef)> = Vec::new();
+        let mut any_filled = false;
+        for (idx, pwh) in inputs.iter().enumerate() {
+            let outer_class = polygon_union::point_in_polygon_class(p, &pwh.outer);
+            if outer_class == polygon_union::PointClass::Boundary {
+                touched.push((idx, BoundaryRef::Outer));
+            }
+            let hole_classes: Vec<polygon_union::PointClass> = pwh
+                .holes
+                .iter()
+                .map(|h| polygon_union::point_in_polygon_class(p, h))
+                .collect();
+            for (hi, hc) in hole_classes.iter().enumerate() {
+                if *hc == polygon_union::PointClass::Boundary {
+                    touched.push((idx, BoundaryRef::Hole(hi)));
+                }
+            }
+            if outer_class == polygon_union::PointClass::Inside
+                && hole_classes
+                    .iter()
+                    .all(|c| *c == polygon_union::PointClass::Outside)
+            {
+                any_filled = true;
+            }
+        }
+        if !touched.is_empty() {
+            FilledClass::AmbiguousOnBoundary { touched }
+        } else if any_filled {
+            FilledClass::Filled
+        } else {
+            FilledClass::Empty
+        }
+    }
+
+    fn build_oracle_inputs(
+        plines: &[Pline],
+        half_width: f64,
+    ) -> Vec<polygon_union::PolygonWithHoles> {
+        plines
+            .iter()
+            .filter_map(|p| {
+                let verts: Vec<(f64, f64)> = p.vertices.iter().map(|v| (v.x, v.y)).collect();
+                let pwh = super::stroke::stroke_expand(&verts, p.closed, half_width, half_width);
+                if pwh.outer.len() >= 3 {
+                    Some(pwh)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// S1: bilateral perpendicular sampling on every directed output edge.
+    ///
+    /// For each edge, sample at multiple positions along the edge
+    /// (t = 0.5, 0.25, 0.75, 0.1, 0.9) with adaptive ε halving (3
+    /// retries each). The first position that produces an unambiguous
+    /// bilateral verdict is used. Multiple sample positions handle the
+    /// case where a polygon edge's midpoint happens to lie on a tangent
+    /// of an unrelated input boundary (e.g. when two adjacent input
+    /// rectangles share a vertical boundary that the polygon edge
+    /// crosses perpendicularly at its midpoint).
+    ///
+    /// Asserts EXACTLY one side is `Filled` (the other `Empty`).
+    /// `Filled on both` = internal seam; `Empty on both` = spurious loop.
+    fn assert_s1_bilateral_outline_only(
+        outputs: &[Pline],
+        inputs: &[polygon_union::PolygonWithHoles],
+        half_width: f64,
+        fixture: &str,
+    ) {
+        let try_sample_at = |t: f64,
+                             v0: (f64, f64),
+                             v1: (f64, f64),
+                             nx: f64,
+                             ny: f64,
+                             initial_eps: f64|
+         -> Option<(FilledClass, FilledClass)> {
+            let sx = v0.0 + t * (v1.0 - v0.0);
+            let sy = v0.1 + t * (v1.1 - v0.1);
+            let mut eps = initial_eps;
+            for _ in 0..4 {
+                let l = is_filled_in_input_set((sx + eps * nx, sy + eps * ny), inputs);
+                let r = is_filled_in_input_set((sx - eps * nx, sy - eps * ny), inputs);
+                let l_amb = matches!(l, FilledClass::AmbiguousOnBoundary { .. });
+                let r_amb = matches!(r, FilledClass::AmbiguousOnBoundary { .. });
+                if !l_amb && !r_amb {
+                    return Some((l, r));
+                }
+                eps *= 0.5;
+                if eps < polygon_union::WALL_EPS * 0.5 {
+                    break;
+                }
+            }
+            None
+        };
+
+        for (bi, b) in outputs.iter().enumerate() {
+            let n = b.vertices.len();
+            if n < 2 {
+                continue;
+            }
+            let seg_count = if b.closed { n } else { n.saturating_sub(1) };
+            for i in 0..seg_count {
+                let v0 = (b.vertices[i].x, b.vertices[i].y);
+                let v1 = (b.vertices[(i + 1) % n].x, b.vertices[(i + 1) % n].y);
+                let dx = v1.0 - v0.0;
+                let dy = v1.1 - v0.1;
+                let edge_len = (dx * dx + dy * dy).sqrt();
+                if edge_len < polygon_union::WALL_EPS {
+                    continue;
+                }
+                let nx = -dy / edge_len;
+                let ny = dx / edge_len;
+                let initial_eps = (polygon_union::WALL_EPS * 10.0)
+                    .min(edge_len * 0.1)
+                    .min(half_width * 0.1);
+
+                let mut resolved: Option<(FilledClass, FilledClass)> = None;
+                for &t in &[0.5_f64, 0.25, 0.75, 0.1, 0.9] {
+                    if let Some(pair) = try_sample_at(t, v0, v1, nx, ny, initial_eps) {
+                        resolved = Some(pair);
+                        break;
+                    }
+                }
+                let (left, right) = resolved.unwrap_or_else(|| {
+                    let mid = ((v0.0 + v1.0) * 0.5, (v0.1 + v1.1) * 0.5);
+                    panic!(
+                        "[{fixture}] P3.1 S1: ambiguous bilateral sample at \
+                         boundary={bi} edge={i} mid=({:.6},{:.6}); \
+                         all sample positions exhausted (t=0.5/0.25/0.75/0.1/0.9)",
+                        mid.0, mid.1
+                    )
+                });
+                let l_filled = matches!(left, FilledClass::Filled);
+                let r_filled = matches!(right, FilledClass::Filled);
+                assert!(
+                    l_filled != r_filled,
+                    "[{fixture}] P3.1 S1: edge at boundary={bi} edge={i} \
+                     v0=({:.6},{:.6}) v1=({:.6},{:.6}) \
+                     has filled=left:{} right:{} (must be exactly one filled)",
+                    v0.0,
+                    v0.1,
+                    v1.0,
+                    v1.1,
+                    l_filled,
+                    r_filled
+                );
+            }
+        }
+    }
+
+    /// S2: no transverse crossing within or between output boundaries.
+    fn assert_s2_no_transverse_crossings(outputs: &[Pline], fixture: &str) {
+        use crate::geometry::pline::self_intersection::{
+            find_self_intersection, segment_segment_intersection_2d,
+        };
+        for (bi, b) in outputs.iter().enumerate() {
+            if let Some((i, j, x, y)) = find_self_intersection(b) {
+                panic!(
+                    "[{fixture}] P3.1 S2: boundary {bi} self-intersects at \
+                     edges {i}-{j} ({x:.4}, {y:.4})"
+                );
+            }
+        }
+        for (ai, a) in outputs.iter().enumerate() {
+            let an = a.vertices.len();
+            let aseg = if a.closed { an } else { an.saturating_sub(1) };
+            for (bi, b) in outputs.iter().enumerate().skip(ai + 1) {
+                let bn = b.vertices.len();
+                let bseg = if b.closed { bn } else { bn.saturating_sub(1) };
+                for ai_e in 0..aseg {
+                    let p0 = (a.vertices[ai_e].x, a.vertices[ai_e].y);
+                    let p1 = (a.vertices[(ai_e + 1) % an].x, a.vertices[(ai_e + 1) % an].y);
+                    for bj_e in 0..bseg {
+                        let q0 = (b.vertices[bj_e].x, b.vertices[bj_e].y);
+                        let q1 = (b.vertices[(bj_e + 1) % bn].x, b.vertices[(bj_e + 1) % bn].y);
+                        if let Some((t, _u)) = segment_segment_intersection_2d(p0, p1, q0, q1) {
+                            let x = p0.0 + t * (p1.0 - p0.0);
+                            let y = p0.1 + t * (p1.1 - p0.1);
+                            panic!(
+                                "[{fixture}] P3.1 S2: boundary {ai} edge {ai_e} \
+                                 crosses boundary {bi} edge {bj_e} at ({x:.4}, {y:.4})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// S3: spade CDT dry-run accepts every output edge as a constraint.
+    fn assert_s3_cdt_dry_run(outputs: &[Pline], fixture: &str) {
+        use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
+        let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
+            ConstrainedDelaunayTriangulation::new();
+        for (bi, b) in outputs.iter().enumerate() {
+            let n = b.vertices.len();
+            if n < 3 {
+                continue;
+            }
+            let mut handles = Vec::with_capacity(n);
+            for (vi, v) in b.vertices.iter().enumerate() {
+                match cdt.insert(Point2::new(v.x, v.y)) {
+                    Ok(h) => handles.push(h),
+                    Err(e) => panic!(
+                        "[{fixture}] P3.1 S3: CDT vertex insert rejected (b={bi}, v={vi}): {e:?}"
+                    ),
+                }
+            }
+            for k in 0..n {
+                let from = handles[k];
+                let to = handles[(k + 1) % n];
+                if from == to {
+                    continue;
+                }
+                let added = cdt.try_add_constraint(from, to);
+                assert!(
+                    !added.is_empty(),
+                    "[{fixture}] P3.1 S3: CDT constraint rejected (b={bi}, edge={k})"
+                );
+            }
+        }
+    }
+
+    fn run_p3_oracle(plines: Vec<Pline>, half_width: f64, fixture: &str) -> Vec<Pline> {
+        let inputs = build_oracle_inputs(&plines, half_width);
+        let outputs = WallOutline2D::new(plines, half_width)
+            .execute()
+            .unwrap_or_else(|e| panic!("[{fixture}] WallOutline2D::execute failed: {e}"));
+        assert!(
+            !outputs.is_empty(),
+            "[{fixture}] WallOutline2D produced no boundaries"
+        );
+        assert_s1_bilateral_outline_only(&outputs, &inputs, half_width, fixture);
+        assert_s2_no_transverse_crossings(&outputs, fixture);
+        assert_s3_cdt_dry_run(&outputs, fixture);
+        outputs
+    }
+
+    // ---- NEW fixtures (target failures of the current bug) ----
+
+    #[test]
+    fn figure_8_open_centerline_no_internal_seam() {
+        // S1' independent oracle is checked separately at the bottom.
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(2.0, 2.0),
+                PlineVertex::line(0.0, 2.0),
+                PlineVertex::line(2.0, 0.0),
+            ],
+            closed: false,
+        };
+        let half_width = 0.3;
+        let outputs = run_p3_oracle(vec![pline.clone()], half_width, "figure_8_open");
+
+        // S1' (analytic centerline-band oracle) — independent of stroke_expand.
+        //
+        // For figure-8 the centerline crossing at (1, 1) creates band overlaps
+        // whose perimeter passes through 4 inner corners arranged as a
+        // diamond around (1, 1). Sample those crossing-region edges only.
+        //
+        // The band oracle is approximate near miter overshoots at convex
+        // corners and small triangular hole pockets between band arms. So
+        // we only assert agreement where BOTH oracles produce a clear
+        // exactly-one-side-filled verdict — disagreements where the band
+        // oracle says "both sides outside" mean we're in a miter-artifact
+        // region the analytic model doesn't cover (skip silently).
+        let centerline: Vec<(f64, f64)> = pline.vertices.iter().map(|v| (v.x, v.y)).collect();
+        let inputs = build_oracle_inputs(&[pline], half_width);
+        let mut sampled = 0usize;
+        for b in &outputs {
+            let n = b.vertices.len();
+            let seg_count = if b.closed { n } else { n.saturating_sub(1) };
+            for i in 0..seg_count {
+                let v0 = (b.vertices[i].x, b.vertices[i].y);
+                let v1 = (b.vertices[(i + 1) % n].x, b.vertices[(i + 1) % n].y);
+                let mid = ((v0.0 + v1.0) * 0.5, (v0.1 + v1.1) * 0.5);
+                let dx = v1.0 - v0.0;
+                let dy = v1.1 - v0.1;
+                let edge_len = (dx * dx + dy * dy).sqrt();
+                if edge_len < polygon_union::WALL_EPS {
+                    continue;
+                }
+                let nx = -dy / edge_len;
+                let ny = dx / edge_len;
+                let eps = (polygon_union::WALL_EPS * 10.0).min(half_width * 0.1);
+                let lp = (mid.0 + eps * nx, mid.1 + eps * ny);
+                let rp = (mid.0 - eps * nx, mid.1 - eps * ny);
+                let stroke_l = matches!(is_filled_in_input_set(lp, &inputs), FilledClass::Filled);
+                let stroke_r = matches!(is_filled_in_input_set(rp, &inputs), FilledClass::Filled);
+                let band_l = is_within_centerline_band(lp, &centerline, half_width);
+                let band_r = is_within_centerline_band(rp, &centerline, half_width);
+                let stroke_unambiguous = stroke_l != stroke_r;
+                let band_unambiguous = band_l != band_r;
+                if stroke_unambiguous && band_unambiguous {
+                    assert_eq!(
+                        (stroke_l, stroke_r),
+                        (band_l, band_r),
+                        "S1': stroke_expand and analytic centerline-band disagree on \
+                         which side is filled at edge mid=({:.4},{:.4})",
+                        mid.0,
+                        mid.1
+                    );
+                    sampled += 1;
+                }
+            }
+        }
+        assert!(
+            sampled > 0,
+            "S1' must agree with stroke_expand on at least one polygon edge"
+        );
+    }
+
+    #[allow(
+        clippy::many_single_char_names,
+        reason = "p/a/b/d/n are domain-standard names for point/endpoints/distance/count \
+                  in 2D segment-distance geometry"
+    )]
+    fn is_within_centerline_band(p: (f64, f64), vertices: &[(f64, f64)], half_width: f64) -> bool {
+        let n = vertices.len();
+        if n < 2 {
+            return false;
+        }
+        for i in 0..(n - 1) {
+            let a = vertices[i];
+            let b = vertices[i + 1];
+            let d = point_to_segment_dist(p.0, p.1, a.0, a.1, b.0, b.1);
+            if d < half_width - polygon_union::WALL_EPS * 10.0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn zigzag_with_inner_crossings_no_internal_seam() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(4.0, 4.0),
+                PlineVertex::line(1.0, 4.0),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(3.0, 4.0),
+                PlineVertex::line(0.0, 2.0),
+            ],
+            closed: false,
+        };
+        run_p3_oracle(vec![pline], 0.1, "zigzag_with_inner_crossings");
+    }
+
+    #[test]
+    fn two_crossing_separate_walls_no_internal_seam() {
+        let h = Pline {
+            vertices: vec![PlineVertex::line(0.0, 1.0), PlineVertex::line(2.0, 1.0)],
+            closed: false,
+        };
+        let v = Pline {
+            vertices: vec![PlineVertex::line(1.0, 0.0), PlineVertex::line(1.0, 2.0)],
+            closed: false,
+        };
+        run_p3_oracle(vec![h, v], 0.2, "two_crossing_separate_walls");
+    }
+
+    #[test]
+    fn t_junction_two_open_walls_no_internal_seam() {
+        let horiz = Pline {
+            vertices: vec![PlineVertex::line(0.0, 0.0), PlineVertex::line(4.0, 0.0)],
+            closed: false,
+        };
+        let stem = Pline {
+            vertices: vec![PlineVertex::line(2.0, 0.0), PlineVertex::line(2.0, 3.0)],
+            closed: false,
+        };
+        run_p3_oracle(vec![horiz, stem], 0.15, "t_junction_two_open_walls");
+    }
+
+    // ---- EXISTING-regression fixtures (no-hole simple cases) ----
+
+    #[test]
+    fn two_overlapping_disjoint_walls_outline_only() {
+        let a = Pline {
+            vertices: vec![PlineVertex::line(0.0, 0.0), PlineVertex::line(3.0, 0.0)],
+            closed: false,
+        };
+        let b = Pline {
+            vertices: vec![PlineVertex::line(2.0, 0.0), PlineVertex::line(5.0, 0.0)],
+            closed: false,
+        };
+        run_p3_oracle(vec![a, b], 0.15, "two_overlapping_disjoint_walls");
+    }
+
+    #[test]
+    fn two_walls_sharing_one_endpoint_outline_only() {
+        let a = Pline {
+            vertices: vec![PlineVertex::line(0.0, 0.0), PlineVertex::line(4.0, 0.0)],
+            closed: false,
+        };
+        let b = Pline {
+            vertices: vec![PlineVertex::line(4.0, 0.0), PlineVertex::line(8.0, 0.0)],
+            closed: false,
+        };
+        run_p3_oracle(vec![a, b], 0.15, "two_walls_sharing_one_endpoint");
+    }
+
+    #[test]
+    fn three_walls_t_configuration_outline_only() {
+        let a = Pline {
+            vertices: vec![PlineVertex::line(0.0, 0.0), PlineVertex::line(4.0, 0.0)],
+            closed: false,
+        };
+        let b = Pline {
+            vertices: vec![PlineVertex::line(4.0, 0.0), PlineVertex::line(4.0, 3.0)],
+            closed: false,
+        };
+        let c = Pline {
+            vertices: vec![PlineVertex::line(4.0, 0.0), PlineVertex::line(8.0, 0.0)],
+            closed: false,
+        };
+        run_p3_oracle(vec![a, b, c], 0.15, "three_walls_t_configuration");
+    }
+
+    #[test]
+    fn closed_rectangle_ring_annular_outline_only() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(10.0, 0.0),
+                PlineVertex::line(10.0, 10.0),
+                PlineVertex::line(0.0, 10.0),
+            ],
+            closed: true,
+        };
+        run_p3_oracle(vec![pline], 0.3, "closed_rectangle_ring");
     }
 }
