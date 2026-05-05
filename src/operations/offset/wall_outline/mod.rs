@@ -1630,6 +1630,34 @@ mod tests {
         );
     }
 
+    /// Regression for a non-termination hang observed from Revion's modeling
+    /// preview. The exact 3-vertex open polyline below previously caused
+    /// `execute_faces` to never return (UI freeze with no log output).
+    ///
+    /// Geometry notes:
+    /// - V0→V1 length ≈ 7.51, almost straight in -X direction.
+    /// - V1→V2 length ≈ 6.35, almost straight in +Y direction.
+    /// - Corner at V1 ≈ 94° (slightly obtuse, despite the branch name
+    ///   referring to "acute"; the user's hypothesis was wrong).
+    /// - `half_thickness = 0.075` (Revion default 150 mm wall / 2 / 1000).
+    ///
+    /// The bug was non-termination, not output shape — passing this test
+    /// just requires that `execute_faces` returns in finite time. Either
+    /// `Ok(...)` or `Err(...)` is acceptable; the test must not hang.
+    #[test]
+    fn execute_faces_does_not_hang_on_revion_preview_input() {
+        let v0 = Point3::new(3.520_000_000_000_003, -4.988_75, 0.0);
+        let v1 = Point3::new(-3.972_5, -4.422_812_5, 0.0);
+        let v2 = Point3::new(-3.043_281_25, 1.862_656_25, 0.0);
+
+        let pline = Pline::from_points(&[v0, v1, v2], false);
+        let half_thickness = 0.075;
+
+        // Just verify it returns in finite time. Empty / non-empty result
+        // is both acceptable — the bug is non-termination, not output shape.
+        let _ = WallOutline2D::new(vec![pline], half_thickness).execute_faces();
+    }
+
     // ===== WallFootprint2D::try_from_parts tests =====
 
     fn closed_pline_xy(points: &[(f64, f64)]) -> Pline {
