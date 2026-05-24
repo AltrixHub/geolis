@@ -49,3 +49,11 @@ pub use union::union_all_with_holes;
 /// helpers to share a single `WALL_EPS`-tolerant implementation with
 /// the arrangement engine.
 pub(crate) use engine::seg_seg_intersect;
+
+/// Crate-internal re-export of the planar arrangement engine.
+/// Used by `boolean::merge::merge_component` to compute the union of
+/// coplanar face fragments via the same vetted segment-split /
+/// vertex-snap / half-edge-classification / face-walk pipeline that
+/// drives the 2D polygon booleans, instead of the ad-hoc edge-cancel
+/// loop the merge step used previously.
+pub(crate) use engine::{run_arrangement, UnionOracle};

@@ -686,6 +686,128 @@ mod tests {
         );
     }
 
+    /// Cascade regression: Subtract(wall, door) succeeds, then
+    /// Subtract(that_result, window1) fails at runtime with
+    /// "invalid input: consecutive points 7 and 8 are coincident".
+    ///
+    /// Coordinates captured verbatim (`{:.17e}`) from a live modeling
+    /// session that placed a door followed by two windows on the same
+    /// wall. Runtime imports **all three cutters** into the base store
+    /// before the first subtract runs (revion's `BRepSubtract` batches
+    /// the imports). This test mirrors that import order — wall + door
+    /// + window1 + window2 all materialised first, then the subtract
+    /// chain — so a state-pollution failure (e.g. the boolean engine
+    /// snapping new fragments onto vertices of an *unrelated* solid
+    /// that happens to sit in the same store) shows up here too.
+    ///
+    /// The failure originates in `merge_coplanar_faces::merge_component`
+    /// where the merged outer loop carries two consecutive points whose
+    /// distance falls below `MakeWire`'s tolerance.
+    #[test]
+    fn subtract_runtime_wall_door_then_window_cascade() {
+        let mut store = TopologyStore::new();
+
+        // Wall — gently tilted cuboid, 8.78 m long × 0.18 m thick × 2.4 m tall.
+        let wall_bottom = vec![
+            p(-3.269_483_891_652_068_32, -6.843_402_330_123_231_62e-1, 0.0),
+            p(5.258_328_608_347_930_81, -3.538_324_608_012_322_51, 0.0),
+            p(5.201_202_641_652_067_80, -3.709_019_141_987_676_79, 0.0),
+            p(-3.326_609_858_347_931_77, -8.550_347_669_876_767_75e-1, 0.0),
+        ];
+        let wall = build_extruded(&mut store, wall_bottom, 2.4);
+
+        // Door — perpendicular cuboid, ~0.9 m wide × ~0.22 m deep × ~2.1 m tall.
+        let door_bottom = vec![
+            p(-7.497_596_405_132_468_39e-1, -1.508_629_561_657_746_31, 0.0),
+            p(-8.183_108_003_719_504_75e-1, -1.713_463_006_253_083_12, 0.0),
+            p(-1.671_783_463_576_549_17, -1.427_833_181_075_091_27, 0.0),
+            p(-1.603_232_303_717_845_75, -1.222_999_736_479_754_46, 0.0),
+        ];
+        let door = build_extruded(&mut store, door_bottom, 2.099_999_904_632_568_36);
+
+        // Window 1 — sits at z ∈ [0.9, 2.1] (sill 0.9 m, height 1.2 m).
+        // Built BEFORE the first subtract so the store carries it
+        // alongside the wall/door — mirroring how revion's BRepSubtract
+        // imports every cutter up front.
+        let window1_bottom = vec![
+            p(
+                4.186_251_396_293_492_63,
+                -3.160_553_589_522_334_23,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                4.117_700_236_434_789_22,
+                -3.365_387_034_117_671_48,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                3.264_227_573_230_190_42,
+                -3.079_757_208_939_679_64,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                3.332_778_733_088_893_83,
+                -2.874_923_764_344_342_38,
+                8.999_999_761_581_420_90e-1,
+            ),
+        ];
+        let window_height = 2.100_000_023_841_857_91 - 8.999_999_761_581_420_90e-1;
+        let window1 = build_extruded(&mut store, window1_bottom, window_height);
+
+        // Window 2 — second window placement captured verbatim from
+        // the failing live session. iter=2 of the cascade subtracts
+        // this from the post-(door + window1) wall and triggers
+        // "zero-length vector" inside the boolean engine.
+        let window2_bottom = vec![
+            p(
+                1.532_615_675_427_539_74,
+                -2.591_498_101_432_384_35,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                1.476_937_380_768_878_82,
+                -2.800_198_677_737_773_87,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                6.073_516_691_992_446_59e-1,
+                -2.568_205_789_472_399_75,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                6.630_299_638_579_055_80e-1,
+                -2.359_505_213_167_010_23,
+                8.999_999_761_581_420_90e-1,
+            ),
+        ];
+        let window2 = build_extruded(&mut store, window2_bottom, window_height);
+
+        // Now run the subtract chain. All three subtracts must succeed.
+        let wall_minus_door = boolean_execute(&mut store, wall, door, BooleanOp::Subtract)
+            .expect("Subtract(wall, door) must succeed (iter=0)");
+        let wall_minus_door_and_w1 =
+            boolean_execute(&mut store, wall_minus_door, window1, BooleanOp::Subtract)
+                .expect("Subtract(wall_minus_door, window1) must succeed (iter=1)");
+        let result = boolean_execute(
+            &mut store,
+            wall_minus_door_and_w1,
+            window2,
+            BooleanOp::Subtract,
+        );
+        assert!(
+            result.is_ok(),
+            "Subtract(wall_minus_door_and_w1, window2) must succeed (iter=2), got: {result:?}",
+        );
+    }
+
+    fn build_extruded(store: &mut TopologyStore, bottom: Vec<Point3>, height: f64) -> SolidId {
+        let wire = MakeWire::new(bottom, true).execute(store).unwrap();
+        let face = MakeFace::new(wire, vec![]).execute(store).unwrap();
+        Extrude::new(face, Vector3::new(0.0, 0.0, height))
+            .execute(store)
+            .unwrap()
+    }
+
     #[test]
     fn subtract_preserves_existing_holes() {
         let mut store = TopologyStore::new();

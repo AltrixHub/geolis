@@ -173,7 +173,7 @@ fn polygon_centroid(points: &[Point3]) -> Point3 {
 /// is the same condition that `MakeFace::compute_plane_from_points` uses to
 /// reject "all points collinear" inputs. Used to filter out sliver fragments
 /// emitted by `split_polygon_by_line` that would later fail face construction.
-fn newell_normal_3d(points: &[Point3]) -> Vector3 {
+pub(super) fn newell_normal_3d(points: &[Point3]) -> Vector3 {
     let n = points.len();
     let mut nx = 0.0;
     let mut ny = 0.0;

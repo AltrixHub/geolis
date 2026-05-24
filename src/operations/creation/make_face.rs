@@ -3,6 +3,16 @@ use crate::geometry::surface::Plane;
 use crate::math::{Point3, Vector3, TOLERANCE};
 use crate::topology::{FaceData, FaceId, FaceSurface, TopologyStore, WireId};
 
+/// Coplanarity tolerance for `MakeFace`. The global `TOLERANCE = 1e-10`
+/// is geometric-equality precision (≈1 ångström); applying it to face
+/// construction rejects perfectly-good fragments produced by cascaded
+/// boolean operations whose intersection math accumulates ~1e-9 of
+/// floating-point noise per iteration. `1e-6` (1 micron) is the
+/// industry-standard "engineering coplanarity" tolerance — generous
+/// enough to absorb cascade noise, tight enough that genuinely off-
+/// plane input still fails.
+const COPLANAR_TOLERANCE: f64 = 1e-6;
+
 /// Creates a face from a wire boundary and a surface.
 pub struct MakeFace {
     outer_wire: WireId,
@@ -125,13 +135,15 @@ fn compute_plane_from_points(points: &[Point3]) -> Result<Plane> {
     Plane::from_normal(centroid, normal)
 }
 
-/// Validates that all points lie within `TOLERANCE` of the plane.
+/// Validates that all points lie within `COPLANAR_TOLERANCE` of the
+/// plane. See the constant's doc comment for why this is laxer than
+/// the global geometric `TOLERANCE`.
 fn validate_coplanarity(plane: &Plane, points: &[Point3]) -> Result<()> {
     let origin = plane.origin();
     let normal = plane.plane_normal();
     for (i, p) in points.iter().enumerate() {
         let dist = (p - origin).dot(normal).abs();
-        if dist > TOLERANCE {
+        if dist > COPLANAR_TOLERANCE {
             return Err(OperationError::InvalidInput(format!(
                 "point {i} is not coplanar (distance = {dist})"
             ))
