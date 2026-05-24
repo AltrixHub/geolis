@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::geometry::surface::Plane;
 use crate::math::polygon_3d::{point_in_polygon_3d, polygon_area_3d};
-use crate::math::{Point3, TOLERANCE};
+use crate::math::{Point3, Vector3, TOLERANCE};
 use crate::topology::{FaceId, FaceSurface, TopologyStore};
 
 use super::face_intersection::{collect_face_polygon, collect_inner_wire_polygons};
@@ -98,18 +98,28 @@ pub fn split_face(
         let normal = plane.plane_normal();
         let min_area = TOLERANCE * TOLERANCE;
         for frag in current {
-            if frag.len() >= 3 && polygon_area_3d(&frag, normal) > min_area {
+            if frag.len() >= 3
+                && polygon_area_3d(&frag, normal) > min_area
+                && newell_normal_3d(&frag).norm() > TOLERANCE
+            {
                 inner_fragments.push(frag);
             }
         }
     }
 
-    // Filter out degenerate outer fragments and associate inner fragments
+    // Filter out degenerate outer fragments and associate inner fragments.
+    // The Newell normal check rejects 3D-collinear slivers that may have a tiny
+    // nonzero projected area but cannot define a plane downstream
+    // (mirrors the guard in `MakeFace::compute_plane_from_points`).
     let normal = plane.plane_normal();
     let min_area = TOLERANCE * TOLERANCE;
     let result = fragments
         .into_iter()
-        .filter(|f| f.len() >= 3 && polygon_area_3d(f, normal) > min_area)
+        .filter(|f| {
+            f.len() >= 3
+                && polygon_area_3d(f, normal) > min_area
+                && newell_normal_3d(f).norm() > TOLERANCE
+        })
         .map(|boundary| {
             let inners = associate_inner_fragments(&boundary, &inner_fragments, plane);
             FaceFragment {
@@ -155,6 +165,27 @@ fn polygon_centroid(points: &[Point3]) -> Point3 {
         points.iter().map(|p| p.y).sum::<f64>() * inv_n,
         points.iter().map(|p| p.z).sum::<f64>() * inv_n,
     )
+}
+
+/// Computes the unnormalized Newell normal of a 3D polygon.
+///
+/// Returns a zero-magnitude vector when the points are collinear in 3D, which
+/// is the same condition that `MakeFace::compute_plane_from_points` uses to
+/// reject "all points collinear" inputs. Used to filter out sliver fragments
+/// emitted by `split_polygon_by_line` that would later fail face construction.
+fn newell_normal_3d(points: &[Point3]) -> Vector3 {
+    let n = points.len();
+    let mut nx = 0.0;
+    let mut ny = 0.0;
+    let mut nz = 0.0;
+    for i in 0..n {
+        let curr = &points[i];
+        let next = &points[(i + 1) % n];
+        nx += (curr.y - next.y) * (curr.z + next.z);
+        ny += (curr.z - next.z) * (curr.x + next.x);
+        nz += (curr.x - next.x) * (curr.y + next.y);
+    }
+    Vector3::new(nx, ny, nz)
 }
 
 /// Splits a polygon by an infinite line defined by two points on the face plane.
@@ -264,6 +295,76 @@ mod tests {
 
     fn p(x: f64, y: f64, z: f64) -> Point3 {
         Point3::new(x, y, z)
+    }
+
+    #[test]
+    fn newell_normal_3d_zero_for_collinear_points() {
+        // Four points collinear along the X axis. The Newell normal must be
+        // zero, even though the surrounding code may compute a tiny non-zero
+        // projected area when the supplied normal is mis-oriented.
+        let pts = vec![
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(2.0, 0.0, 0.0),
+            p(3.0, 0.0, 0.0),
+        ];
+        let normal = newell_normal_3d(&pts);
+        assert!(
+            normal.norm() < TOLERANCE,
+            "expected Newell normal to vanish for collinear points, got {normal:?}",
+        );
+    }
+
+    #[test]
+    fn newell_normal_3d_nonzero_for_proper_polygon() {
+        // A unit square in the XY plane — should yield a normal pointing in +Z.
+        let pts = vec![
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(0.0, 1.0, 0.0),
+        ];
+        let normal = newell_normal_3d(&pts);
+        assert!(
+            normal.norm() > TOLERANCE,
+            "expected non-degenerate normal, got {normal:?}",
+        );
+        // Newell sums an oriented area-times-two, so the unit square gives 2.
+        assert!((normal.z - 2.0).abs() < 1e-9);
+        assert!(normal.x.abs() < 1e-9);
+        assert!(normal.y.abs() < 1e-9);
+    }
+
+    /// Demonstrates the failure mode the Newell check guards against: a
+    /// 4-vertex sliver that lies on a single 3D line can still produce a
+    /// non-zero projected area against a mis-oriented plane normal, so the
+    /// area-only filter would accept it and `MakeFace::compute_plane_from_points`
+    /// would then reject it as "all points collinear". The Newell normal of
+    /// the sliver is exactly zero and lets us reject it upstream.
+    #[test]
+    fn collinear_sliver_caught_by_newell_but_not_by_projected_area() {
+        // 4 vertices strictly along the X axis — collinear in 3D.
+        let sliver = vec![
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(2.0, 0.0, 0.0),
+            p(3.0, 0.0, 0.0),
+        ];
+        let newell = newell_normal_3d(&sliver);
+        assert!(
+            newell.norm() < TOLERANCE,
+            "Newell normal of a collinear sliver must vanish",
+        );
+
+        // MakeFace would reject this sliver — confirm the production guard
+        // would also catch it.
+        let mut store = TopologyStore::new();
+        let wire = MakeWire::new(sliver, true).execute(&mut store).unwrap();
+        let face = MakeFace::new(wire, vec![]).execute(&mut store);
+        assert!(
+            face.is_err(),
+            "MakeFace must reject a 4-vertex collinear sliver (got {face:?})",
+        );
     }
 
     fn make_face(store: &mut TopologyStore, points: Vec<Point3>) -> FaceId {

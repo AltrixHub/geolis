@@ -445,6 +445,107 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Builds an axis-aligned-footprint box rotated about the Z axis by `angle`
+    /// (radians) around its planar center. Mirrors how revion authors a wall
+    /// solid: an oriented rectangular footprint extruded along +Z.
+    #[allow(clippy::too_many_arguments)]
+    fn make_rotated_box(
+        store: &mut TopologyStore,
+        cx: f64,
+        cy: f64,
+        z: f64,
+        length: f64,
+        thickness: f64,
+        height: f64,
+        angle: f64,
+    ) -> SolidId {
+        let (sin_a, cos_a) = angle.sin_cos();
+        // Tangent (along length) and perpendicular (along thickness).
+        let tx = cos_a;
+        let ty = sin_a;
+        let nx = -sin_a;
+        let ny = cos_a;
+        let half_l = length * 0.5;
+        let half_t = thickness * 0.5;
+
+        let corner = |sl: f64, st: f64| {
+            p(
+                cx + tx * sl + nx * st,
+                cy + ty * sl + ny * st,
+                z,
+            )
+        };
+
+        let pts = vec![
+            corner(-half_l, -half_t),
+            corner(half_l, -half_t),
+            corner(half_l, half_t),
+            corner(-half_l, half_t),
+        ];
+        let wire = MakeWire::new(pts, true).execute(store).unwrap();
+        let face = MakeFace::new(wire, vec![]).execute(store).unwrap();
+        Extrude::new(face, Vector3::new(0.0, 0.0, height))
+            .execute(store)
+            .unwrap()
+    }
+
+    /// Regression test for the "all points collinear, cannot define a plane"
+    /// failure observed when subtracting a clean opening box from a rotated
+    /// wall box. The split step previously emitted collinear sliver fragments
+    /// (4 coincident-edge vertices) whose Newell normal vanished, breaking
+    /// downstream face construction.
+    ///
+    /// Geometry mirrors the failing revion case: wall centered at (-3.0, -1.4)
+    /// with tangent (-0.94, 0.33) (~atan2(0.33, -0.94)), thickness 0.18,
+    /// height 2.7, length 5; opening centered at (-0.8, -1.2), depth 0.9
+    /// (1.2x wall thickness), width 0.9, sill 0, height 2.1.
+    #[test]
+    fn subtract_clean_opening_from_rotated_wall_succeeds() {
+        let mut store = TopologyStore::new();
+        let angle = (0.33_f64).atan2(-0.94);
+        let wall = make_rotated_box(
+            &mut store, -3.0, -1.4, 0.0, 5.0, 0.18, 2.7, angle,
+        );
+        // Opening box aligned along the same wall tangent: sill 0, height 2.1,
+        // width 0.9 (length-direction). Depth is 1.2 x wall thickness — small
+        // overshoot — so the LONG side faces of the opening sit nearly
+        // parallel to (and slightly outside of) the wall faces. This is the
+        // near-parallel configuration that previously generated collinear
+        // sliver fragments inside `split_face` and made the downstream
+        // `MakeFace` fail with "all points collinear".
+        let opening = make_rotated_box(
+            &mut store, -0.8, -1.2, 0.0, 0.9, 0.18 * 1.2, 2.1, angle,
+        );
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "subtract should succeed, got error: {result:?}",
+        );
+    }
+
+    /// Axis-aligned version of the wall-opening subtraction. The opening's
+    /// LONG sides sit slightly outside the wall thickness (1.2x overshoot)
+    /// and the opening shares the wall's bottom face (z=0). Both are the
+    /// near-parallel face configurations that tripped the "all points
+    /// collinear" failure before the Newell sliver-rejection fix.
+    #[test]
+    fn subtract_clean_opening_through_axis_aligned_wall() {
+        let mut store = TopologyStore::new();
+        // Wall: 5.0 long (x), 0.18 thick (y), 2.7 tall (z), bottom at z=0.
+        let wall = make_box(&mut store, -2.5, -0.09, 0.0, 5.0, 0.18, 2.7);
+        // Opening: 0.9 wide (x), 0.216 deep (y, 1.2x wall thickness so it
+        // pokes both faces by only 18 mm), 2.1 tall (z), bottom flush at z=0.
+        let depth = 0.18 * 1.2;
+        let opening = make_box(&mut store, -0.45, -depth * 0.5, 0.0, 0.9, depth, 2.1);
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "subtract with coplanar bottom should succeed, got error: {result:?}",
+        );
+    }
+
     #[test]
     fn subtract_preserves_existing_holes() {
         let mut store = TopologyStore::new();
