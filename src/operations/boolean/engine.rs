@@ -468,13 +468,7 @@ mod tests {
         let half_l = length * 0.5;
         let half_t = thickness * 0.5;
 
-        let corner = |sl: f64, st: f64| {
-            p(
-                cx + tx * sl + nx * st,
-                cy + ty * sl + ny * st,
-                z,
-            )
-        };
+        let corner = |sl: f64, st: f64| p(cx + tx * sl + nx * st, cy + ty * sl + ny * st, z);
 
         let pts = vec![
             corner(-half_l, -half_t),
@@ -503,9 +497,7 @@ mod tests {
     fn subtract_clean_opening_from_rotated_wall_succeeds() {
         let mut store = TopologyStore::new();
         let angle = (0.33_f64).atan2(-0.94);
-        let wall = make_rotated_box(
-            &mut store, -3.0, -1.4, 0.0, 5.0, 0.18, 2.7, angle,
-        );
+        let wall = make_rotated_box(&mut store, -3.0, -1.4, 0.0, 5.0, 0.18, 2.7, angle);
         // Opening box aligned along the same wall tangent: sill 0, height 2.1,
         // width 0.9 (length-direction). Depth is 1.2 x wall thickness — small
         // overshoot — so the LONG side faces of the opening sit nearly
@@ -513,9 +505,7 @@ mod tests {
         // near-parallel configuration that previously generated collinear
         // sliver fragments inside `split_face` and made the downstream
         // `MakeFace` fail with "all points collinear".
-        let opening = make_rotated_box(
-            &mut store, -0.8, -1.2, 0.0, 0.9, 0.18 * 1.2, 2.1, angle,
-        );
+        let opening = make_rotated_box(&mut store, -0.8, -1.2, 0.0, 0.9, 0.18 * 1.2, 2.1, angle);
 
         let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
         assert!(
@@ -543,6 +533,156 @@ mod tests {
         assert!(
             result.is_ok(),
             "subtract with coplanar bottom should succeed, got error: {result:?}",
+        );
+    }
+
+    /// Regression test pinning the EXACT runtime geometry that revion's window-
+    /// placement flow hits: a wall solid and an opening solid captured straight
+    /// from the live application logs.
+    ///
+    /// The wall is a thin (~0.18 m), gently tilted cuboid; the opening is a
+    /// smaller cuboid roughly parallel to the wall axis and positioned across
+    /// the wall's centerline. The depth of the opening pokes slightly out of
+    /// each wall face by ~50 mm (the production overshoot constant). At runtime
+    /// `Subtract::execute` consistently fails with
+    /// "all points are collinear, cannot define a plane" — this test pins the
+    /// coordinates so we can reproduce + fix the bug.
+    ///
+    /// If this test passes the fix is correct. If it fails (asserts the bug)
+    /// we've successfully reproduced the runtime failure locally.
+    #[test]
+    fn subtract_runtime_wall_opening_does_not_collinear() {
+        let mut store = TopologyStore::new();
+
+        // Wall bottom (z=0): captured XY from runtime logs, CCW order.
+        let wall_bottom = vec![
+            p(-2.651, -0.963, 0.0),
+            p(6.165, -2.830, 0.0),
+            p(6.128, -3.006, 0.0),
+            p(-2.689, -1.139, 0.0),
+        ];
+        let wall_wire = MakeWire::new(wall_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let wall_face = MakeFace::new(wall_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        // Wall height 2.4 m (from runtime logs).
+        let wall = Extrude::new(wall_face, Vector3::new(0.0, 0.0, 2.4))
+            .execute(&mut store)
+            .unwrap();
+
+        // Opening bottom (z=0): captured XY from runtime logs, CCW order.
+        let opening_bottom = vec![
+            p(-0.238, -1.423, 0.0),
+            p(-0.296, -1.696, 0.0),
+            p(-1.176, -1.510, 0.0),
+            p(-1.118, -1.236, 0.0),
+        ];
+        let opening_wire = MakeWire::new(opening_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let opening_face = MakeFace::new(opening_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        // Opening height 2.1 m (from runtime logs).
+        let opening = Extrude::new(opening_face, Vector3::new(0.0, 0.0, 2.1))
+            .execute(&mut store)
+            .unwrap();
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "runtime wall/opening subtract should succeed, got: {result:?}",
+        );
+    }
+
+    /// Same as [`subtract_runtime_wall_opening_does_not_collinear`] but
+    /// reconstructs the opening corners via the exact tangent / perpendicular
+    /// trigonometry `OpeningSolid3DNode::build_opening_solids` runs at
+    /// runtime (rather than copying the truncated 3-decimal corners from the
+    /// log). The wall centerline is the midline of the two short captured
+    /// wall faces; the opening center sits at the same fractional position
+    /// along that axis we observed in the failing session.
+    ///
+    /// Pinning the box construction this way removes the "log truncation"
+    /// degree of freedom — if the failing runtime case lived in this
+    /// trigonometric path it would surface here.
+    #[test]
+    fn subtract_runtime_wall_opening_full_precision() {
+        let mut store = TopologyStore::new();
+
+        let wall_bottom = vec![
+            p(-2.651, -0.963, 0.0),
+            p(6.165, -2.830, 0.0),
+            p(6.128, -3.006, 0.0),
+            p(-2.689, -1.139, 0.0),
+        ];
+        let wall_wire = MakeWire::new(wall_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let wall_face = MakeFace::new(wall_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        let wall = Extrude::new(wall_face, Vector3::new(0.0, 0.0, 2.4))
+            .execute(&mut store)
+            .unwrap();
+
+        let axis_start_x: f64 = (-2.651_f64 + -2.689_f64) * 0.5;
+        let axis_start_y: f64 = (-0.963_f64 + -1.139_f64) * 0.5;
+        let axis_end_x: f64 = (6.165_f64 + 6.128_f64) * 0.5;
+        let axis_end_y: f64 = (-2.830_f64 + -3.006_f64) * 0.5;
+        let dx = axis_end_x - axis_start_x;
+        let dy = axis_end_y - axis_start_y;
+        let len = (dx * dx + dy * dy).sqrt();
+        let tx = dx / len;
+        let ty = dy / len;
+        let px = -ty;
+        let py = tx;
+        let wall_thickness = 0.181_f64;
+        let overshoot = 0.05_f64;
+        let half_d = wall_thickness * 0.5 + overshoot;
+        let half_w = 0.9_f64 * 0.5;
+        let t = 0.222_f64;
+        let cx = axis_start_x + dx * t;
+        let cy = axis_start_y + dy * t;
+        let sill_z = 0.0_f64;
+        let opening_bottom = vec![
+            p(
+                cx - tx * half_w - px * half_d,
+                cy - ty * half_w - py * half_d,
+                sill_z,
+            ),
+            p(
+                cx + tx * half_w - px * half_d,
+                cy + ty * half_w - py * half_d,
+                sill_z,
+            ),
+            p(
+                cx + tx * half_w + px * half_d,
+                cy + ty * half_w + py * half_d,
+                sill_z,
+            ),
+            p(
+                cx - tx * half_w + px * half_d,
+                cy - ty * half_w + py * half_d,
+                sill_z,
+            ),
+        ];
+        let opening_wire = MakeWire::new(opening_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let opening_face = MakeFace::new(opening_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        let opening = Extrude::new(opening_face, Vector3::new(0.0, 0.0, 2.1))
+            .execute(&mut store)
+            .unwrap();
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "full-precision runtime wall/opening subtract should succeed, got: {result:?}",
         );
     }
 
