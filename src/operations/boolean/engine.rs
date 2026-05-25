@@ -445,6 +445,369 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Builds an axis-aligned-footprint box rotated about the Z axis by `angle`
+    /// (radians) around its planar center. Mirrors how revion authors a wall
+    /// solid: an oriented rectangular footprint extruded along +Z.
+    #[allow(clippy::too_many_arguments)]
+    fn make_rotated_box(
+        store: &mut TopologyStore,
+        cx: f64,
+        cy: f64,
+        z: f64,
+        length: f64,
+        thickness: f64,
+        height: f64,
+        angle: f64,
+    ) -> SolidId {
+        let (sin_a, cos_a) = angle.sin_cos();
+        // Tangent (along length) and perpendicular (along thickness).
+        let tx = cos_a;
+        let ty = sin_a;
+        let nx = -sin_a;
+        let ny = cos_a;
+        let half_l = length * 0.5;
+        let half_t = thickness * 0.5;
+
+        let corner = |sl: f64, st: f64| p(cx + tx * sl + nx * st, cy + ty * sl + ny * st, z);
+
+        let pts = vec![
+            corner(-half_l, -half_t),
+            corner(half_l, -half_t),
+            corner(half_l, half_t),
+            corner(-half_l, half_t),
+        ];
+        let wire = MakeWire::new(pts, true).execute(store).unwrap();
+        let face = MakeFace::new(wire, vec![]).execute(store).unwrap();
+        Extrude::new(face, Vector3::new(0.0, 0.0, height))
+            .execute(store)
+            .unwrap()
+    }
+
+    /// Regression test for the "all points collinear, cannot define a plane"
+    /// failure observed when subtracting a clean opening box from a rotated
+    /// wall box. The split step previously emitted collinear sliver fragments
+    /// (4 coincident-edge vertices) whose Newell normal vanished, breaking
+    /// downstream face construction.
+    ///
+    /// Geometry mirrors the failing revion case: wall centered at (-3.0, -1.4)
+    /// with tangent (-0.94, 0.33) (~atan2(0.33, -0.94)), thickness 0.18,
+    /// height 2.7, length 5; opening centered at (-0.8, -1.2), depth 0.9
+    /// (1.2x wall thickness), width 0.9, sill 0, height 2.1.
+    #[test]
+    fn subtract_clean_opening_from_rotated_wall_succeeds() {
+        let mut store = TopologyStore::new();
+        let angle = (0.33_f64).atan2(-0.94);
+        let wall = make_rotated_box(&mut store, -3.0, -1.4, 0.0, 5.0, 0.18, 2.7, angle);
+        // Opening box aligned along the same wall tangent: sill 0, height 2.1,
+        // width 0.9 (length-direction). Depth is 1.2 x wall thickness — small
+        // overshoot — so the LONG side faces of the opening sit nearly
+        // parallel to (and slightly outside of) the wall faces. This is the
+        // near-parallel configuration that previously generated collinear
+        // sliver fragments inside `split_face` and made the downstream
+        // `MakeFace` fail with "all points collinear".
+        let opening = make_rotated_box(&mut store, -0.8, -1.2, 0.0, 0.9, 0.18 * 1.2, 2.1, angle);
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "subtract should succeed, got error: {result:?}",
+        );
+    }
+
+    /// Axis-aligned version of the wall-opening subtraction. The opening's
+    /// LONG sides sit slightly outside the wall thickness (1.2x overshoot)
+    /// and the opening shares the wall's bottom face (z=0). Both are the
+    /// near-parallel face configurations that tripped the "all points
+    /// collinear" failure before the Newell sliver-rejection fix.
+    #[test]
+    fn subtract_clean_opening_through_axis_aligned_wall() {
+        let mut store = TopologyStore::new();
+        // Wall: 5.0 long (x), 0.18 thick (y), 2.7 tall (z), bottom at z=0.
+        let wall = make_box(&mut store, -2.5, -0.09, 0.0, 5.0, 0.18, 2.7);
+        // Opening: 0.9 wide (x), 0.216 deep (y, 1.2x wall thickness so it
+        // pokes both faces by only 18 mm), 2.1 tall (z), bottom flush at z=0.
+        let depth = 0.18 * 1.2;
+        let opening = make_box(&mut store, -0.45, -depth * 0.5, 0.0, 0.9, depth, 2.1);
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "subtract with coplanar bottom should succeed, got error: {result:?}",
+        );
+    }
+
+    /// Regression test pinning the EXACT runtime geometry that revion's window-
+    /// placement flow hits: a wall solid and an opening solid captured straight
+    /// from the live application logs.
+    ///
+    /// The wall is a thin (~0.18 m), gently tilted cuboid; the opening is a
+    /// smaller cuboid roughly parallel to the wall axis and positioned across
+    /// the wall's centerline. The depth of the opening pokes slightly out of
+    /// each wall face by ~50 mm (the production overshoot constant). At runtime
+    /// `Subtract::execute` consistently fails with
+    /// "all points are collinear, cannot define a plane" — this test pins the
+    /// coordinates so we can reproduce + fix the bug.
+    ///
+    /// If this test passes the fix is correct. If it fails (asserts the bug)
+    /// we've successfully reproduced the runtime failure locally.
+    #[test]
+    fn subtract_runtime_wall_opening_does_not_collinear() {
+        let mut store = TopologyStore::new();
+
+        // Wall bottom (z=0): captured XY from runtime logs, CCW order.
+        let wall_bottom = vec![
+            p(-2.651, -0.963, 0.0),
+            p(6.165, -2.830, 0.0),
+            p(6.128, -3.006, 0.0),
+            p(-2.689, -1.139, 0.0),
+        ];
+        let wall_wire = MakeWire::new(wall_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let wall_face = MakeFace::new(wall_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        // Wall height 2.4 m (from runtime logs).
+        let wall = Extrude::new(wall_face, Vector3::new(0.0, 0.0, 2.4))
+            .execute(&mut store)
+            .unwrap();
+
+        // Opening bottom (z=0): captured XY from runtime logs, CCW order.
+        let opening_bottom = vec![
+            p(-0.238, -1.423, 0.0),
+            p(-0.296, -1.696, 0.0),
+            p(-1.176, -1.510, 0.0),
+            p(-1.118, -1.236, 0.0),
+        ];
+        let opening_wire = MakeWire::new(opening_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let opening_face = MakeFace::new(opening_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        // Opening height 2.1 m (from runtime logs).
+        let opening = Extrude::new(opening_face, Vector3::new(0.0, 0.0, 2.1))
+            .execute(&mut store)
+            .unwrap();
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "runtime wall/opening subtract should succeed, got: {result:?}",
+        );
+    }
+
+    /// Same as [`subtract_runtime_wall_opening_does_not_collinear`] but
+    /// reconstructs the opening corners via the exact tangent / perpendicular
+    /// trigonometry `OpeningSolid3DNode::build_opening_solids` runs at
+    /// runtime (rather than copying the truncated 3-decimal corners from the
+    /// log). The wall centerline is the midline of the two short captured
+    /// wall faces; the opening center sits at the same fractional position
+    /// along that axis we observed in the failing session.
+    ///
+    /// Pinning the box construction this way removes the "log truncation"
+    /// degree of freedom — if the failing runtime case lived in this
+    /// trigonometric path it would surface here.
+    #[test]
+    fn subtract_runtime_wall_opening_full_precision() {
+        let mut store = TopologyStore::new();
+
+        let wall_bottom = vec![
+            p(-2.651, -0.963, 0.0),
+            p(6.165, -2.830, 0.0),
+            p(6.128, -3.006, 0.0),
+            p(-2.689, -1.139, 0.0),
+        ];
+        let wall_wire = MakeWire::new(wall_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let wall_face = MakeFace::new(wall_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        let wall = Extrude::new(wall_face, Vector3::new(0.0, 0.0, 2.4))
+            .execute(&mut store)
+            .unwrap();
+
+        let axis_start_x: f64 = (-2.651_f64 + -2.689_f64) * 0.5;
+        let axis_start_y: f64 = (-0.963_f64 + -1.139_f64) * 0.5;
+        let axis_end_x: f64 = (6.165_f64 + 6.128_f64) * 0.5;
+        let axis_end_y: f64 = (-2.830_f64 + -3.006_f64) * 0.5;
+        let dx = axis_end_x - axis_start_x;
+        let dy = axis_end_y - axis_start_y;
+        let len = (dx * dx + dy * dy).sqrt();
+        let tx = dx / len;
+        let ty = dy / len;
+        let px = -ty;
+        let py = tx;
+        let wall_thickness = 0.181_f64;
+        let overshoot = 0.05_f64;
+        let half_d = wall_thickness * 0.5 + overshoot;
+        let half_w = 0.9_f64 * 0.5;
+        let t = 0.222_f64;
+        let cx = axis_start_x + dx * t;
+        let cy = axis_start_y + dy * t;
+        let sill_z = 0.0_f64;
+        let opening_bottom = vec![
+            p(
+                cx - tx * half_w - px * half_d,
+                cy - ty * half_w - py * half_d,
+                sill_z,
+            ),
+            p(
+                cx + tx * half_w - px * half_d,
+                cy + ty * half_w - py * half_d,
+                sill_z,
+            ),
+            p(
+                cx + tx * half_w + px * half_d,
+                cy + ty * half_w + py * half_d,
+                sill_z,
+            ),
+            p(
+                cx - tx * half_w + px * half_d,
+                cy - ty * half_w + py * half_d,
+                sill_z,
+            ),
+        ];
+        let opening_wire = MakeWire::new(opening_bottom, true)
+            .execute(&mut store)
+            .unwrap();
+        let opening_face = MakeFace::new(opening_wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        let opening = Extrude::new(opening_face, Vector3::new(0.0, 0.0, 2.1))
+            .execute(&mut store)
+            .unwrap();
+
+        let result = boolean_execute(&mut store, wall, opening, BooleanOp::Subtract);
+        assert!(
+            result.is_ok(),
+            "full-precision runtime wall/opening subtract should succeed, got: {result:?}",
+        );
+    }
+
+    /// Cascade regression: Subtract(wall, door) succeeds, then
+    /// Subtract(that_result, window1) fails at runtime with
+    /// "invalid input: consecutive points 7 and 8 are coincident".
+    ///
+    /// Coordinates captured verbatim (`{:.17e}`) from a live modeling
+    /// session that placed a door followed by two windows on the same
+    /// wall. Runtime imports **all three cutters** into the base store
+    /// before the first subtract runs (revion's `BRepSubtract` batches
+    /// the imports). This test mirrors that import order — wall + door
+    /// + window1 + window2 all materialised first, then the subtract
+    /// chain — so a state-pollution failure (e.g. the boolean engine
+    /// snapping new fragments onto vertices of an *unrelated* solid
+    /// that happens to sit in the same store) shows up here too.
+    ///
+    /// The failure originates in `merge_coplanar_faces::merge_component`
+    /// where the merged outer loop carries two consecutive points whose
+    /// distance falls below `MakeWire`'s tolerance.
+    #[test]
+    fn subtract_runtime_wall_door_then_window_cascade() {
+        let mut store = TopologyStore::new();
+
+        // Wall — gently tilted cuboid, 8.78 m long × 0.18 m thick × 2.4 m tall.
+        let wall_bottom = vec![
+            p(-3.269_483_891_652_068_32, -6.843_402_330_123_231_62e-1, 0.0),
+            p(5.258_328_608_347_930_81, -3.538_324_608_012_322_51, 0.0),
+            p(5.201_202_641_652_067_80, -3.709_019_141_987_676_79, 0.0),
+            p(-3.326_609_858_347_931_77, -8.550_347_669_876_767_75e-1, 0.0),
+        ];
+        let wall = build_extruded(&mut store, wall_bottom, 2.4);
+
+        // Door — perpendicular cuboid, ~0.9 m wide × ~0.22 m deep × ~2.1 m tall.
+        let door_bottom = vec![
+            p(-7.497_596_405_132_468_39e-1, -1.508_629_561_657_746_31, 0.0),
+            p(-8.183_108_003_719_504_75e-1, -1.713_463_006_253_083_12, 0.0),
+            p(-1.671_783_463_576_549_17, -1.427_833_181_075_091_27, 0.0),
+            p(-1.603_232_303_717_845_75, -1.222_999_736_479_754_46, 0.0),
+        ];
+        let door = build_extruded(&mut store, door_bottom, 2.099_999_904_632_568_36);
+
+        // Window 1 — sits at z ∈ [0.9, 2.1] (sill 0.9 m, height 1.2 m).
+        // Built BEFORE the first subtract so the store carries it
+        // alongside the wall/door — mirroring how revion's BRepSubtract
+        // imports every cutter up front.
+        let window1_bottom = vec![
+            p(
+                4.186_251_396_293_492_63,
+                -3.160_553_589_522_334_23,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                4.117_700_236_434_789_22,
+                -3.365_387_034_117_671_48,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                3.264_227_573_230_190_42,
+                -3.079_757_208_939_679_64,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                3.332_778_733_088_893_83,
+                -2.874_923_764_344_342_38,
+                8.999_999_761_581_420_90e-1,
+            ),
+        ];
+        let window_height = 2.100_000_023_841_857_91 - 8.999_999_761_581_420_90e-1;
+        let window1 = build_extruded(&mut store, window1_bottom, window_height);
+
+        // Window 2 — second window placement captured verbatim from
+        // the failing live session. iter=2 of the cascade subtracts
+        // this from the post-(door + window1) wall and triggers
+        // "zero-length vector" inside the boolean engine.
+        let window2_bottom = vec![
+            p(
+                1.532_615_675_427_539_74,
+                -2.591_498_101_432_384_35,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                1.476_937_380_768_878_82,
+                -2.800_198_677_737_773_87,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                6.073_516_691_992_446_59e-1,
+                -2.568_205_789_472_399_75,
+                8.999_999_761_581_420_90e-1,
+            ),
+            p(
+                6.630_299_638_579_055_80e-1,
+                -2.359_505_213_167_010_23,
+                8.999_999_761_581_420_90e-1,
+            ),
+        ];
+        let window2 = build_extruded(&mut store, window2_bottom, window_height);
+
+        // Now run the subtract chain. All three subtracts must succeed.
+        let wall_minus_door = boolean_execute(&mut store, wall, door, BooleanOp::Subtract)
+            .expect("Subtract(wall, door) must succeed (iter=0)");
+        let wall_minus_door_and_w1 =
+            boolean_execute(&mut store, wall_minus_door, window1, BooleanOp::Subtract)
+                .expect("Subtract(wall_minus_door, window1) must succeed (iter=1)");
+        let result = boolean_execute(
+            &mut store,
+            wall_minus_door_and_w1,
+            window2,
+            BooleanOp::Subtract,
+        );
+        assert!(
+            result.is_ok(),
+            "Subtract(wall_minus_door_and_w1, window2) must succeed (iter=2), got: {result:?}",
+        );
+    }
+
+    fn build_extruded(store: &mut TopologyStore, bottom: Vec<Point3>, height: f64) -> SolidId {
+        let wire = MakeWire::new(bottom, true).execute(store).unwrap();
+        let face = MakeFace::new(wire, vec![]).execute(store).unwrap();
+        Extrude::new(face, Vector3::new(0.0, 0.0, height))
+            .execute(store)
+            .unwrap()
+    }
+
     #[test]
     fn subtract_preserves_existing_holes() {
         let mut store = TopologyStore::new();

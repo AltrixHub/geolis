@@ -1,3 +1,4 @@
+pub mod dump;
 pub mod edge;
 pub mod face;
 pub mod shell;
