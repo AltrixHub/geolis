@@ -422,6 +422,127 @@ impl NurbsSurface {
             self.isocurve_v(v_max)?,
         ])
     }
+
+    /// Finds the closest point on the surface to `query` via a coarse seed
+    /// grid followed by a damped Newton iteration (The NURBS Book, §6.1).
+    ///
+    /// Non-convergence is not an error: the best parameters found are returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if evaluating the seed grid or the final point
+    /// fails (e.g. a vanishing rational denominator).
+    pub fn closest_point(
+        &self,
+        query: &Point3,
+        options: &InversionOptions,
+    ) -> Result<SurfaceInversion> {
+        let ((u_min, u_max), (v_min, v_max)) = self.parameter_domain();
+        let samples = options.seed_samples.max(2);
+
+        // Coarse seed: minimize squared distance over the parameter grid.
+        let mut best_u = u_min;
+        let mut best_v = v_min;
+        let mut best_dist_sq = f64::INFINITY;
+        for iu in 0..=samples {
+            let u = u_min + (u_max - u_min) * (iu as f64) / (samples as f64);
+            for iv in 0..=samples {
+                let v = v_min + (v_max - v_min) * (iv as f64) / (samples as f64);
+                let p = self.point_at(u, v)?;
+                let d_sq = (p - query).norm_squared();
+                if d_sq < best_dist_sq {
+                    best_dist_sq = d_sq;
+                    best_u = u;
+                    best_v = v;
+                }
+            }
+        }
+
+        let mut u = best_u;
+        let mut v = best_v;
+        for _ in 0..options.max_iterations {
+            let skl = self.derivatives(u, v, 2)?;
+            let su = skl[1][0];
+            let sv = skl[0][1];
+            let r = skl[0][0] - query.coords;
+            let r_norm = r.norm();
+            if r_norm < options.tolerance {
+                break;
+            }
+            let f = r.dot(&su);
+            let g = r.dot(&sv);
+            let su_norm = su.norm();
+            let sv_norm = sv.norm();
+            // Zero cosine (orthogonality) convergence test.
+            if su_norm > TOLERANCE && sv_norm > TOLERANCE {
+                let cos_u = f.abs() / (su_norm * r_norm);
+                let cos_v = g.abs() / (sv_norm * r_norm);
+                if cos_u < 1e-10 && cos_v < 1e-10 {
+                    break;
+                }
+            }
+            let j00 = su_norm * su_norm + r.dot(&skl[2][0]);
+            let j01 = su.dot(&sv) + r.dot(&skl[1][1]);
+            let j11 = sv_norm * sv_norm + r.dot(&skl[0][2]);
+            let det = j00 * j11 - j01 * j01;
+            if det.abs() < TOLERANCE {
+                break;
+            }
+            let du = (-f * j11 + g * j01) / det;
+            let dv = (f * j01 - g * j00) / det;
+            let new_u = (u + du).clamp(u_min, u_max);
+            let new_v = (v + dv).clamp(v_min, v_max);
+            let step = (new_u - u).abs() + (new_v - v).abs();
+            u = new_u;
+            v = new_v;
+            if step < options.tolerance {
+                break;
+            }
+        }
+
+        let point = self.point_at(u, v)?;
+        let distance = (point - query).norm();
+        Ok(SurfaceInversion {
+            u,
+            v,
+            point,
+            distance,
+        })
+    }
+}
+
+/// Options controlling Newton point inversion on a surface.
+#[derive(Debug, Clone, Copy)]
+pub struct InversionOptions {
+    /// Maximum Newton iterations.
+    pub max_iterations: usize,
+    /// Convergence tolerance on the Euclidean residual and parameter step.
+    pub tolerance: f64,
+    /// Seed-grid samples per parametric direction.
+    pub seed_samples: usize,
+}
+
+impl Default for InversionOptions {
+    fn default() -> Self {
+        Self {
+            max_iterations: 64,
+            tolerance: 1e-12,
+            seed_samples: 16,
+        }
+    }
+}
+
+/// Result of a closest-point (inversion) query on a NURBS surface.
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceInversion {
+    /// U parameter of the closest point.
+    pub u: f64,
+    /// V parameter of the closest point.
+    pub v: f64,
+    /// The closest point on the surface.
+    pub point: Point3,
+    /// Distance from the query point.
+    pub distance: f64,
 }
 
 use crate::geometry::surface::{Surface, SurfaceDomain};
@@ -618,5 +739,47 @@ mod tests {
         assert!((u1.point_at(0.5).unwrap() - s.point_at(1.0, 0.5).unwrap()).norm() < 1e-12);
         assert!((v0.point_at(0.5).unwrap() - s.point_at(0.5, 0.0).unwrap()).norm() < 1e-12);
         assert!((v1.point_at(0.5).unwrap() - s.point_at(0.5, 1.0).unwrap()).norm() < 1e-12);
+    }
+
+    #[test]
+    fn inversion_round_trips_surface_points() {
+        let s = parabolic_patch();
+        let options = InversionOptions::default();
+        for &(u, v) in &[(0.2, 0.3), (0.5, 0.5), (0.85, 0.1)] {
+            let p = s.point_at(u, v).unwrap();
+            let result = s.closest_point(&p, &options).unwrap();
+            assert!(
+                result.distance < 1e-9,
+                "distance {} at ({u},{v})",
+                result.distance
+            );
+            let q = s.point_at(result.u, result.v).unwrap();
+            assert!((q - p).norm() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn inversion_projects_off_surface_point() {
+        // For the planar bilinear patch, projection of an elevated point is
+        // straight down and parameters equal the (scaled) XY coordinates.
+        let s = bilinear_patch();
+        let result = s
+            .closest_point(&Point3::new(1.0, 1.0, 5.0), &InversionOptions::default())
+            .unwrap();
+        assert!((result.distance - 5.0).abs() < 1e-9);
+        assert!((result.u - 0.5).abs() < 1e-9);
+        assert!((result.v - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn inversion_clamps_to_domain_for_outside_points() {
+        let s = bilinear_patch();
+        let result = s
+            .closest_point(&Point3::new(5.0, 1.0, 0.0), &InversionOptions::default())
+            .unwrap();
+        // Closest point is on the u_max edge
+        assert!((result.u - 1.0).abs() < 1e-9);
+        let p = s.point_at(result.u, result.v).unwrap();
+        assert!((p - Point3::new(2.0, 1.0, 0.0)).norm() < 1e-9);
     }
 }
