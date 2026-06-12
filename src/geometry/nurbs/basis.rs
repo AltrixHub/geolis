@@ -7,6 +7,8 @@ use crate::math::TOLERANCE;
 ///
 /// Returns `[N_{span-degree,degree}(u), ..., N_{span,degree}(u)]`.
 #[must_use]
+// Single-char bindings mirror The NURBS Book A2.2 notation (n, k, j, r, ...).
+#[allow(clippy::many_single_char_names)]
 pub fn basis_functions(knots: &KnotVector, span: usize, u: f64, degree: usize) -> Vec<f64> {
     let k = knots.as_slice();
     let mut n = vec![0.0; degree + 1];
@@ -34,6 +36,17 @@ pub fn basis_functions(knots: &KnotVector, span: usize, u: f64, degree: usize) -
 /// `N_{span-degree+j,degree}` at `u`. Derivatives of order greater than
 /// `degree` are zero.
 #[must_use]
+// A2.3 is one indivisible algorithm; its single-char bindings, signed/unsigned
+// index arithmetic, exact small-integer factorial casts, and index-driven loops
+// follow The NURBS Book notation verbatim.
+#[allow(
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::needless_range_loop
+)]
 pub fn basis_function_derivatives(
     knots: &KnotVector,
     span: usize,
@@ -112,6 +125,8 @@ pub fn basis_function_derivatives(
 
 /// Binomial coefficient C(n, k) as f64.
 #[must_use]
+// Exact small-integer to f64 conversions for the binomial recurrence.
+#[allow(clippy::cast_precision_loss)]
 pub fn binomial(n: usize, k: usize) -> f64 {
     if k > n {
         return 0.0;

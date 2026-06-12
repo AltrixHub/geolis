@@ -16,6 +16,13 @@ impl NurbsCurve3D {
     /// Returns an error if the degree is < 1, fewer than `degree + 1` points
     /// are given, the total chord length is degenerate, or the interpolation
     /// system is singular.
+    // A9.1: exact degree-to-f64 averaging cast, the chords/coords pairing, and
+    // the fixed xyz axis loop follow The NURBS Book formulation.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::similar_names,
+        clippy::needless_range_loop
+    )]
     pub fn interpolate(points: &[Point3], degree: usize) -> Result<(Self, Vec<f64>)> {
         let n = points.len();
         if degree < 1 {
@@ -152,20 +159,16 @@ mod tests {
             Point3::new(1.0 + 1e-6, 0.0, 0.0),
             Point3::new(5.0, 2.0, 0.0),
         ];
-        match NurbsCurve3D::interpolate(&pts, 3) {
-            Ok((curve, params)) => {
-                for (p, &t) in pts.iter().zip(&params) {
-                    let q = curve.point_at(t).unwrap();
-                    assert!(
-                        q.coords.iter().all(|c| c.is_finite()),
-                        "non-finite point at t={t}"
-                    );
-                    assert!((q - p).norm() < 1e-6, "missed clustered point at t={t}");
-                }
-            }
-            Err(_) => {
-                // Returning an error is also acceptable; the contract is only
-                // that the routine never panics or yields NaN silently.
+        // Returning an error is also acceptable; the contract is only that the
+        // routine never panics or yields NaN silently.
+        if let Ok((curve, params)) = NurbsCurve3D::interpolate(&pts, 3) {
+            for (p, &t) in pts.iter().zip(&params) {
+                let q = curve.point_at(t).unwrap();
+                assert!(
+                    q.coords.iter().all(|c| c.is_finite()),
+                    "non-finite point at t={t}"
+                );
+                assert!((q - p).norm() < 1e-6, "missed clustered point at t={t}");
             }
         }
     }

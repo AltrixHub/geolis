@@ -209,6 +209,8 @@ impl NurbsSurface {
     ///
     /// Returns an error if the parameters are outside the domain or the
     /// rational denominator vanishes.
+    // A4.3 single-char bindings follow The NURBS Book notation.
+    #[allow(clippy::many_single_char_names)]
     pub fn point_at(&self, u: f64, v: f64) -> Result<Point3> {
         self.validate_parameters(u, v)?;
         let span_u = self.knots_u.find_span(self.degree_u, self.nu, u);
@@ -244,6 +246,8 @@ impl NurbsSurface {
     ///
     /// Returns an error if the parameters are outside the domain or the
     /// rational denominator vanishes.
+    // A3.6 / A4.4 single-char bindings and index-driven loops follow The NURBS Book.
+    #[allow(clippy::many_single_char_names, clippy::needless_range_loop)]
     pub fn derivatives(&self, u: f64, v: f64, order: usize) -> Result<Vec<Vec<Vector3>>> {
         self.validate_parameters(u, v)?;
         let span_u = self.knots_u.find_span(self.degree_u, self.nu, u);
@@ -415,6 +419,13 @@ impl NurbsSurface {
     ///
     /// Returns an error only if evaluating the seed grid or the final point
     /// fails (e.g. a vanishing rational denominator).
+    // §6.1 Newton iteration: su/sv/f/g/jNN bindings and the exact grid-index to
+    // f64 conversions follow The NURBS Book notation.
+    #[allow(
+        clippy::many_single_char_names,
+        clippy::similar_names,
+        clippy::cast_precision_loss
+    )]
     pub fn closest_point(
         &self,
         query: &Point3,
@@ -553,7 +564,12 @@ impl Surface for NurbsSurface {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+// Tests reuse The NURBS Book single-char / su,sv-style notation.
+#[allow(
+    clippy::unwrap_used,
+    clippy::many_single_char_names,
+    clippy::similar_names
+)]
 mod tests {
     use super::*;
     use crate::geometry::surface::Surface;

@@ -23,6 +23,12 @@ impl NurbsCurve3D {
     /// Returns an error if the radius is non-positive, `normal` or `ref_dir` is
     /// zero-length, `ref_dir` is not perpendicular to `normal`, or the sweep is
     /// not in `(0, 2*pi]`.
+    // Segment count and index conversions are exact small-integer to f64 casts.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     pub fn arc(
         center: Point3,
         radius: f64,
@@ -59,7 +65,7 @@ impl NurbsCurve3D {
         let y_axis = normal.cross(&ref_dir);
 
         let theta = end_angle - start_angle;
-        if theta < TOLERANCE || theta > TAU + TOLERANCE {
+        if !(TOLERANCE..=TAU + TOLERANCE).contains(&theta) {
             return Err(GeometryError::Degenerate(format!(
                 "arc sweep {theta} must be in (0, 2*pi]"
             ))
@@ -67,7 +73,6 @@ impl NurbsCurve3D {
         }
 
         // Number of quadratic segments: one per quarter turn.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let narcs = ((theta / FRAC_PI_2).ceil() as usize).clamp(1, 4);
         let dtheta = theta / narcs as f64;
         let w1 = (dtheta / 2.0).cos();

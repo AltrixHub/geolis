@@ -230,6 +230,12 @@ impl<const D: usize> NurbsCurve<D> {
     ///
     /// Returns an error if `u` is outside the domain or the resulting knot
     /// multiplicity would exceed the degree.
+    // A5.1 single-char bindings and index-driven copies follow The NURBS Book.
+    #[allow(
+        clippy::many_single_char_names,
+        clippy::needless_range_loop,
+        clippy::manual_memcpy
+    )]
     pub fn insert_knot(&self, u: f64, times: usize) -> Result<Self> {
         self.validate_parameter(u)?;
         let p = self.degree;
