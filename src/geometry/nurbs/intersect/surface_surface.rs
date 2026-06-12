@@ -185,6 +185,11 @@ fn push_unique_seed(seeds: &mut Vec<Seed>, a: &NurbsSurface, candidate: Seed, le
 }
 
 /// Whether a seed already lies on an existing branch (within one marching step).
+///
+/// Assumption: distinct intersection branches are separated by more than one
+/// marching step; branches closer than that are merged into one. Tighten the
+/// `step_factor` in [`IntersectionOptions`] when intersecting near-coincident
+/// sheets.
 fn seed_covered(
     branches: &[SurfaceIntersectionCurve],
     a: &NurbsSurface,

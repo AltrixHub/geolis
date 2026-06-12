@@ -221,9 +221,8 @@ fn refine_edge_v(
     let mut lo = v0;
     let mut hi = v1;
     let mut flo = f0;
-    let mut fhi = f1;
     // Secant/bisection hybrid for robustness on the 1D edge.
-    let mut v = if (fhi - flo).abs() > 1e-300 {
+    let mut v = if (f1 - f0).abs() > 1e-300 {
         v0 - f0 * (v1 - v0) / (f1 - f0)
     } else {
         0.5 * (v0 + v1)
@@ -234,12 +233,12 @@ fn refine_edge_v(
         if f.abs() < options.tolerance {
             return Ok(Some(Seed { u, v }));
         }
+        // Bracket update: only the low-side value is consulted afterwards.
         if (f <= 0.0) == (flo <= 0.0) {
             lo = v;
             flo = f;
         } else {
             hi = v;
-            fhi = f;
         }
         let next = if fv.abs() > 1e-12 {
             v - f / fv
@@ -251,7 +250,6 @@ fn refine_edge_v(
         } else {
             v = next;
         }
-        let _ = fhi;
     }
     let (f, _, _) = field.value_grad(u, v)?;
     if f.abs() < options.tolerance.max(1e-7) {
@@ -274,8 +272,7 @@ fn refine_edge_u(
     let mut lo = u0;
     let mut hi = u1;
     let mut flo = f0;
-    let mut fhi = f1;
-    let mut u = if (fhi - flo).abs() > 1e-300 {
+    let mut u = if (f1 - f0).abs() > 1e-300 {
         u0 - f0 * (u1 - u0) / (f1 - f0)
     } else {
         0.5 * (u0 + u1)
@@ -286,12 +283,12 @@ fn refine_edge_u(
         if f.abs() < options.tolerance {
             return Ok(Some(Seed { u, v }));
         }
+        // Bracket update: only the low-side value is consulted afterwards.
         if (f <= 0.0) == (flo <= 0.0) {
             lo = u;
             flo = f;
         } else {
             hi = u;
-            fhi = f;
         }
         let next = if fu.abs() > 1e-12 {
             u - f / fu
@@ -303,7 +300,6 @@ fn refine_edge_u(
         } else {
             u = next;
         }
-        let _ = fhi;
     }
     let (f, _, _) = field.value_grad(u, v)?;
     if f.abs() < options.tolerance.max(1e-7) {
