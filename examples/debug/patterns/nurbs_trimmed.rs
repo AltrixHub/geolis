@@ -41,21 +41,22 @@ fn wavy_patch() -> Option<NurbsSurface> {
 }
 
 /// Counter-clockwise outer rectangle covering the full [0,1]^2 parameter domain.
-fn full_domain_outer() -> TrimLoop {
-    let line = |a: (f64, f64), b: (f64, f64)| {
-        NurbsCurve2D::from_unweighted(
-            vec![Point2::new(a.0, a.1), Point2::new(b.0, b.1)],
-            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).expect("valid degree-1 knots"),
-            1,
-        )
-        .expect("valid degree-1 line")
-    };
-    TrimLoop::new(vec![
-        line((0.0, 0.0), (1.0, 0.0)),
-        line((1.0, 0.0), (1.0, 1.0)),
-        line((1.0, 1.0), (0.0, 1.0)),
-        line((0.0, 1.0), (0.0, 0.0)),
-    ])
+fn uv_line(a: (f64, f64), b: (f64, f64)) -> Option<NurbsCurve2D> {
+    NurbsCurve2D::from_unweighted(
+        vec![Point2::new(a.0, a.1), Point2::new(b.0, b.1)],
+        KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).ok()?,
+        1,
+    )
+    .ok()
+}
+
+fn full_domain_outer() -> Option<TrimLoop> {
+    Some(TrimLoop::new(vec![
+        uv_line((0.0, 0.0), (1.0, 0.0))?,
+        uv_line((1.0, 0.0), (1.0, 1.0))?,
+        uv_line((1.0, 1.0), (0.0, 1.0))?,
+        uv_line((0.0, 1.0), (0.0, 0.0))?,
+    ]))
 }
 
 /// Clockwise circular hole in UV (rational circle reversed to wind clockwise).
@@ -75,7 +76,10 @@ pub fn register(storage: &MeshStorage) {
     let Some(hole) = circular_hole() else {
         return;
     };
-    let trim = FaceTrim::new(full_domain_outer(), vec![hole]);
+    let Some(outer) = full_domain_outer() else {
+        return;
+    };
+    let trim = FaceTrim::new(outer, vec![hole]);
 
     let mut store = TopologyStore::new();
     let Ok(face) = MakeNurbsFace::new(surface)

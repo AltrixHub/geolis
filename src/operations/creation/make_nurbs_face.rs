@@ -172,13 +172,12 @@ impl MakeNurbsFace {
                 .last()
                 .ok_or_else(|| OperationError::Failed("empty pcurve sample".to_owned()))?;
 
-            let start_v = match prev_vertex {
-                Some(v) => v,
-                None => {
-                    let v = store.add_vertex(VertexData::new(start_point));
-                    first_vertex = Some(v);
-                    v
-                }
+            let start_v = if let Some(v) = prev_vertex {
+                v
+            } else {
+                let v = store.add_vertex(VertexData::new(start_point));
+                first_vertex = Some(v);
+                v
             };
             // Close back to the first vertex on the final segment when the loop
             // returns to its start.

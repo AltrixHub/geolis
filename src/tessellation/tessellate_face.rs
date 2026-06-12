@@ -149,14 +149,21 @@ impl TessellateFace {
                     &self.params,
                 )
             }
-            FaceSurface::Nurbs(nurbs) => {
-                let options = SurfaceTessellationOptions::default();
-                match &face.trim {
-                    None => super::tessellate_nurbs_surface(nurbs, &options),
-                    Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options),
-                }
-            }
+            FaceSurface::Nurbs(nurbs) => tessellate_nurbs_face(nurbs, face.trim.as_ref()),
         }
+    }
+}
+
+/// Tessellates a NURBS face: trimmed faces go through the constrained-Delaunay
+/// path, untrimmed faces through the full-domain adaptive tessellator.
+fn tessellate_nurbs_face(
+    nurbs: &crate::geometry::nurbs::NurbsSurface,
+    trim: Option<&crate::topology::FaceTrim>,
+) -> Result<TriangleMesh> {
+    let options = SurfaceTessellationOptions::default();
+    match trim {
+        None => super::tessellate_nurbs_surface(nurbs, &options),
+        Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options),
     }
 }
 
