@@ -47,7 +47,7 @@ pub fn tessellate_nurbs_curve(
     curve: &NurbsCurve3D,
     options: &CurveTessellationOptions,
 ) -> Result<Vec<Point3>> {
-    if !(options.chord_tolerance > 0.0) {
+    if options.chord_tolerance <= 0.0 {
         return Err(TessellationError::InvalidParameters(
             "chord_tolerance must be strictly positive".to_owned(),
         )
@@ -60,16 +60,29 @@ pub fn tessellate_nurbs_curve(
     // Start with the first seed point, then append each interval's interior +
     // end points so endpoints are shared exactly once.
     let mut points = Vec::new();
-    points.push(curve.point_at(seeds[0])?);
+    let mut prev_end = Sample {
+        t: seeds[0],
+        point: curve.point_at(seeds[0])?,
+    };
+    points.push(prev_end.point);
     for window in seeds.windows(2) {
-        let (a, b) = (window[0], window[1]);
-        let pa = *points.last().expect("points seeded with first sample");
-        let pb = curve.point_at(b)?;
-        bisect_curve(curve, a, b, pa, pb, options, 0, &mut points)?;
-        points.push(pb);
+        let end = Sample {
+            t: window[1],
+            point: curve.point_at(window[1])?,
+        };
+        bisect_curve(curve, prev_end, end, options, 0, &mut points)?;
+        points.push(end.point);
+        prev_end = end;
     }
 
     Ok(points)
+}
+
+/// A curve sample: parameter plus its evaluated point.
+#[derive(Clone, Copy)]
+struct Sample {
+    t: f64,
+    point: Point3,
 }
 
 /// Distinct parameter seeds: domain endpoints plus every interior knot that
@@ -89,34 +102,36 @@ fn seed_parameters(curve: &NurbsCurve3D, t_min: f64, t_max: f64) -> Vec<f64> {
     seeds
 }
 
-/// Recursively appends interior sample points for the open interval `(a, b)`.
+/// Recursively appends interior sample points for the open interval
+/// `(start.t, end.t)`.
 ///
-/// `pa` / `pb` are the already-evaluated endpoints. The midpoint is appended
-/// only when the curve deviates from the chord beyond tolerance and depth
-/// remains; the endpoint `pb` is appended by the caller.
+/// `start` / `end` are the already-evaluated endpoints. The midpoint is
+/// appended only when the curve deviates from the chord beyond tolerance and
+/// depth remains; the `end` endpoint is appended by the caller.
 fn bisect_curve(
     curve: &NurbsCurve3D,
-    a: f64,
-    b: f64,
-    pa: Point3,
-    pb: Point3,
+    start: Sample,
+    end: Sample,
     options: &CurveTessellationOptions,
     depth: usize,
     out: &mut Vec<Point3>,
 ) -> Result<()> {
-    let mid_t = 0.5 * (a + b);
-    let pm = curve.point_at(mid_t)?;
+    let mid_t = 0.5 * (start.t + end.t);
+    let mid = Sample {
+        t: mid_t,
+        point: curve.point_at(mid_t)?,
+    };
 
-    let chord_mid = Point3::from(0.5 * (pa.coords + pb.coords));
-    let deviation = (pm - chord_mid).norm();
+    let chord_mid = Point3::from(0.5 * (start.point.coords + end.point.coords));
+    let deviation = (mid.point - chord_mid).norm();
 
     if depth >= options.max_depth || deviation <= options.chord_tolerance {
         return Ok(());
     }
 
-    bisect_curve(curve, a, mid_t, pa, pm, options, depth + 1, out)?;
-    out.push(pm);
-    bisect_curve(curve, mid_t, b, pm, pb, options, depth + 1, out)?;
+    bisect_curve(curve, start, mid, options, depth + 1, out)?;
+    out.push(mid.point);
+    bisect_curve(curve, mid, end, options, depth + 1, out)?;
     Ok(())
 }
 
@@ -171,8 +186,8 @@ pub fn tessellate_nurbs_surface(
     let interior_u = interior_knots(surface.knots_u().as_slice(), u_min, u_max);
     let interior_v = interior_knots(surface.knots_v().as_slice(), v_min, v_max);
 
-    let u_params = refine_axis(surface, options, u_min, u_max, &interior_u, Axis::U)?;
-    let v_params = refine_axis(surface, options, v_min, v_max, &interior_v, Axis::V)?;
+    let u_params = refine_axis(surface, options, u_min, u_max, &interior_u, Axis::U);
+    let v_params = refine_axis(surface, options, v_min, v_max, &interior_v, Axis::V);
 
     build_grid_mesh(surface, &u_params, &v_params, u_min, u_max, v_min, v_max)
 }
@@ -187,7 +202,7 @@ enum Axis {
 }
 
 fn validate_surface_options(options: &SurfaceTessellationOptions) -> Result<()> {
-    if !(options.normal_tolerance > 0.0) {
+    if options.normal_tolerance <= 0.0 {
         return Err(TessellationError::InvalidParameters(
             "normal_tolerance must be strictly positive".to_owned(),
         )
@@ -240,7 +255,7 @@ fn max_normal_deviation_along(
     cross_lo: f64,
     cross_hi: f64,
     axis: Axis,
-) -> Result<f64> {
+) -> f64 {
     // A handful of fixed cross-stations is enough to catch curvature; the
     // interior point avoids degenerate normals at rational seams.
     let cross_stations = [cross_lo, 0.5 * (cross_lo + cross_hi), cross_hi];
@@ -268,7 +283,7 @@ fn max_normal_deviation_along(
             prev = Some(n);
         }
     }
-    Ok(max_dev)
+    max_dev
 }
 
 /// Angle in radians between two unit vectors, clamped for numerical safety.
@@ -286,7 +301,7 @@ fn refine_axis(
     hi: f64,
     interior: &[f64],
     axis: Axis,
-) -> Result<Vec<f64>> {
+) -> Vec<f64> {
     let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
     let (cross_lo, cross_hi) = match axis {
         Axis::U => (v_min, v_max),
@@ -296,9 +311,9 @@ fn refine_axis(
     let mut divisions = options.min_divisions;
     loop {
         let params = axis_parameters(lo, hi, divisions, interior);
-        let dev = max_normal_deviation_along(surface, &params, cross_lo, cross_hi, axis)?;
+        let dev = max_normal_deviation_along(surface, &params, cross_lo, cross_hi, axis);
         if dev <= options.normal_tolerance || divisions >= options.max_divisions {
-            return Ok(params);
+            return params;
         }
         divisions = (divisions * 2).min(options.max_divisions);
     }
@@ -583,8 +598,8 @@ mod surface_tests {
         // Refinement happens in u (curved) but not v (straight extrusion).
         let interior_u = interior_knots(surface.knots_u().as_slice(), 0.0, 1.0);
         let interior_v = interior_knots(surface.knots_v().as_slice(), 0.0, 1.0);
-        let u_params = refine_axis(&surface, &options, 0.0, 1.0, &interior_u, Axis::U).unwrap();
-        let v_params = refine_axis(&surface, &options, 0.0, 1.0, &interior_v, Axis::V).unwrap();
+        let u_params = refine_axis(&surface, &options, 0.0, 1.0, &interior_u, Axis::U);
+        let v_params = refine_axis(&surface, &options, 0.0, 1.0, &interior_v, Axis::V);
         assert!(
             u_params.len() > options.min_divisions + 1,
             "curved u must refine: {}",
@@ -620,10 +635,10 @@ mod surface_tests {
         for surface in [bilinear_patch(), quarter_cylinder_patch()] {
             let mesh =
                 tessellate_nurbs_surface(&surface, &SurfaceTessellationOptions::default()).unwrap();
-            let n = mesh.vertices.len() as u32;
+            let n = mesh.vertices.len();
             for tri in &mesh.indices {
                 for &i in tri {
-                    assert!(i < n, "index {i} out of bounds ({n} vertices)");
+                    assert!((i as usize) < n, "index {i} out of bounds ({n} vertices)");
                 }
                 let a = mesh.vertices[tri[0] as usize];
                 let b = mesh.vertices[tri[1] as usize];
