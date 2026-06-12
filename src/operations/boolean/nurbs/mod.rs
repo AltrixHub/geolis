@@ -19,4 +19,5 @@
 //! 3. [`band`] — build the tool's hole-wall face between each loop pair.
 //! 4. [`assemble`] — collect result faces into a new shell + solid.
 
-mod loops;
+pub(crate) mod loops;
+pub(crate) mod punch;

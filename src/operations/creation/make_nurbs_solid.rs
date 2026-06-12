@@ -7,7 +7,7 @@
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{NurbsCurve3D, NurbsSurface};
 use crate::math::{Point3, Vector3, TOLERANCE};
-use crate::topology::{FaceId, FaceSurface, ShellData, SolidData, SolidId, TopologyStore};
+use crate::topology::{FaceId, ShellData, SolidData, SolidId, TopologyStore};
 
 use super::{MakeFace, MakeNurbsFace, MakeWire};
 
@@ -351,6 +351,7 @@ pub(crate) fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> Res
 mod tests {
     use super::*;
     use crate::tessellation::{TessellateSolid, TessellationParams};
+    use crate::topology::FaceSurface;
     use std::collections::HashMap;
 
     /// Asserts the tessellated solid mesh is edge-manifold: every undirected
