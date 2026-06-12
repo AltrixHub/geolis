@@ -208,6 +208,28 @@ fn mirror_edges(
             EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                 todo!("Mirror for Circle/Ellipse edges")
             }
+            EdgeCurve::Nurbs(nurbs) => {
+                // Reflecting every control point mirrors the curve; weights,
+                // knots, and degree (hence the parameter domain) are invariant.
+                let new_points = nurbs
+                    .control_points()
+                    .iter()
+                    .map(|p| mirror_point(p, plane_origin, plane_normal))
+                    .collect();
+                let new_nurbs = crate::geometry::nurbs::NurbsCurve3D::new(
+                    new_points,
+                    nurbs.weights().to_vec(),
+                    nurbs.knots().clone(),
+                    nurbs.degree(),
+                )?;
+                EdgeData {
+                    start: new_start,
+                    end: new_end,
+                    curve: EdgeCurve::Nurbs(new_nurbs),
+                    t_start: edge.t_start,
+                    t_end: edge.t_end,
+                }
+            }
         };
         let new_eid = store.add_edge(new_edge_data);
         map.insert(eid, new_eid);
@@ -253,6 +275,7 @@ fn build_mirrored_faces(
             outer_wire: new_outer_wire,
             inner_wires: new_inner_wires,
             same_sense: true,
+            trim: None,
         });
         new_faces.push(new_face_id);
     }

@@ -4,6 +4,7 @@ mod tessellate_face;
 mod tessellate_nurbs;
 mod tessellate_solid;
 mod tessellate_stroke;
+mod tessellate_trimmed;
 mod tessellate_with_holes;
 
 pub use stroke_style::{LineJoin, StrokeStyle};
@@ -15,6 +16,7 @@ pub use tessellate_nurbs::{
 };
 pub use tessellate_solid::TessellateSolid;
 pub use tessellate_stroke::TessellateStroke;
+pub use tessellate_trimmed::tessellate_trimmed_nurbs_face;
 pub use tessellate_with_holes::TessellateWithHoles;
 
 use crate::math::{Point2, Point3, Vector3};

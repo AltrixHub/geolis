@@ -1,3 +1,4 @@
+use crate::geometry::nurbs::NurbsSurface;
 use crate::geometry::surface::{Cone, Cylinder, Plane, Sphere, Torus};
 
 use super::wire::WireId;
@@ -20,6 +21,8 @@ pub enum FaceSurface {
     Sphere(Sphere),
     /// A toroidal surface.
     Torus(Torus),
+    /// A free-form NURBS surface.
+    Nurbs(NurbsSurface),
 }
 
 /// Data associated with a topological face.
@@ -36,4 +39,7 @@ pub struct FaceData {
     pub inner_wires: Vec<WireId>,
     /// If `true`, the face normal agrees with the surface normal.
     pub same_sense: bool,
+    /// UV-space trim geometry. `None` for analytic faces and untrimmed NURBS
+    /// faces (full parameter domain); `Some` for trimmed NURBS faces.
+    pub trim: Option<super::trim::FaceTrim>,
 }

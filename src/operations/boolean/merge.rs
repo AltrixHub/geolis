@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::error::Result;
+use crate::error::{OperationError, Result};
 use crate::math::{Point3, Vector3, TOLERANCE};
 use crate::operations::creation::{MakeFace, MakeSolid, MakeWire};
 use crate::topology::{FaceId, FaceSurface, ShellData, SolidId, TopologyStore};
@@ -106,6 +106,12 @@ fn collect_all_face_info(store: &TopologyStore, solid_id: SolidId) -> Result<Vec
 fn collect_face_info(store: &TopologyStore, face_id: FaceId) -> Result<FaceInfo> {
     let face = store.face(face_id)?;
     let FaceSurface::Plane(ref plane) = face.surface else {
+        if matches!(face.surface, FaceSurface::Nurbs(_)) {
+            return Err(OperationError::Failed(
+                "boolean operations on NURBS faces are not yet supported".into(),
+            )
+            .into());
+        }
         todo!("Coplanar face merge for non-planar faces")
     };
     let wire = store.wire(face.outer_wire)?;

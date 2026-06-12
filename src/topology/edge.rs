@@ -1,4 +1,5 @@
 use crate::geometry::curve::{Arc, Circle, Ellipse, Line};
+use crate::geometry::nurbs::NurbsCurve3D;
 
 use super::vertex::VertexId;
 
@@ -18,6 +19,8 @@ pub enum EdgeCurve {
     Circle(Circle),
     /// An ellipse or elliptical arc.
     Ellipse(Ellipse),
+    /// A free-form NURBS curve.
+    Nurbs(NurbsCurve3D),
 }
 
 /// Data associated with a topological edge.

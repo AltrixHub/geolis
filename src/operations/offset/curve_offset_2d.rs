@@ -36,6 +36,10 @@ impl CurveOffset2D {
             EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                 todo!("CurveOffset2D for Circle/Ellipse")
             }
+            EdgeCurve::Nurbs(_) => Err(OperationError::Failed(
+                "offsetting NURBS edges is not yet supported".into(),
+            )
+            .into()),
         }
     }
 }

@@ -11,7 +11,7 @@ use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
 use crate::topology::{EdgeCurve, FaceId, FaceSurface, TopologyStore, WireId};
 
-use super::{TessellationMode, TessellationParams, TriangleMesh};
+use super::{SurfaceTessellationOptions, TessellationMode, TessellationParams, TriangleMesh};
 
 /// Tessellates a face into a triangle mesh.
 pub struct TessellateFace {
@@ -149,7 +149,21 @@ impl TessellateFace {
                     &self.params,
                 )
             }
+            FaceSurface::Nurbs(nurbs) => tessellate_nurbs_face(nurbs, face.trim.as_ref()),
         }
+    }
+}
+
+/// Tessellates a NURBS face: trimmed faces go through the constrained-Delaunay
+/// path, untrimmed faces through the full-domain adaptive tessellator.
+fn tessellate_nurbs_face(
+    nurbs: &crate::geometry::nurbs::NurbsSurface,
+    trim: Option<&crate::topology::FaceTrim>,
+) -> Result<TriangleMesh> {
+    let options = SurfaceTessellationOptions::default();
+    match trim {
+        None => super::tessellate_nurbs_surface(nurbs, &options),
+        Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options),
     }
 }
 
@@ -765,6 +779,9 @@ fn collect_wire_points_tessellated(
                 let n = tessellate_edge_segments(ellipse.semi_major(), t_start, t_end, params);
                 add_curve_samples(&mut points, ellipse, t_start, t_end, n)?;
             }
+            EdgeCurve::Nurbs(nurbs) => {
+                add_curve_samples(&mut points, nurbs, t_start, t_end, params.max_segments)?;
+            }
         }
     }
 
@@ -1098,6 +1115,7 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
         })
     }
 
@@ -1165,6 +1183,7 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
         })
     }
 
@@ -1243,6 +1262,7 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
         })
     }
 

@@ -121,6 +121,10 @@ impl FaceOffset {
                 let wire = MakeWire::new(offset_points, true).execute(store)?;
                 MakeFace::new(wire, vec![]).execute(store)
             }
+            FaceSurface::Nurbs(_) => Err(OperationError::Failed(
+                "offsetting NURBS faces is not yet supported".into(),
+            )
+            .into()),
         }
     }
 }

@@ -28,6 +28,7 @@ impl PointOnCurve {
             EdgeCurve::Arc(arc) => arc.evaluate(self.t),
             EdgeCurve::Circle(circle) => circle.evaluate(self.t),
             EdgeCurve::Ellipse(ellipse) => ellipse.evaluate(self.t),
+            EdgeCurve::Nurbs(nurbs) => nurbs.evaluate(self.t),
         }
     }
 }
