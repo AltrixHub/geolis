@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::error::{OperationError, Result};
 use crate::topology::{FaceData, FaceId, FaceSurface, SolidId, TopologyStore};
 
-use super::band::build_band_face;
+use super::band::{build_band_face, BandRingWires};
 use super::loops::{collect_nurbs_faces, extract_cut_loops};
 use super::punch::punch_loop;
 
@@ -58,21 +58,14 @@ pub(crate) fn subtract_through_cut(
         result_faces.push(copy);
     }
 
-    // Punch each loop onto the COPIED target face.
+    // Punch each loop onto the COPIED target face, then build the band face that
+    // shares those exact hole-ring wires. `cut.loops` is ordered [entry, exit]
+    // (loops.rs sorts by mean v), so the two punch results map directly to the
+    // band's entry/exit rings.
     for cut in &cuts {
-        for loop_ in &cut.loops {
-            let copied_target = *id_map.get(&loop_.target_face).ok_or_else(|| {
-                OperationError::Failed("cut loop references an unknown target face".into())
-            })?;
-            let mut remapped = loop_.clone();
-            remapped.target_face = copied_target;
-            punch_loop(store, &remapped)?;
-        }
-    }
-
-    // Build a band (hole-wall) face per tool side face.
-    for cut in &cuts {
-        let band = build_band_face(store, cut)?;
+        let entry = punch_onto_copy(store, &cut.loops[0], &id_map)?;
+        let exit = punch_onto_copy(store, &cut.loops[1], &id_map)?;
+        let band = build_band_face(store, cut, BandRingWires { entry, exit })?;
         result_faces.push(band);
     }
 
@@ -117,6 +110,25 @@ fn assert_no_cap_intersection(
         }
     }
     Ok(())
+}
+
+/// Punches one cut loop onto the COPIED target face and returns the hole-ring
+/// [`WireId`] created on that copy (so the band face can share it).
+///
+/// The loop's `target_face` is remapped through `id_map` to the result copy
+/// first; punching the preserved input face would attach the ring to the wrong
+/// face.
+fn punch_onto_copy(
+    store: &mut TopologyStore,
+    loop_: &super::loops::CutLoop,
+    id_map: &HashMap<FaceId, FaceId>,
+) -> Result<crate::topology::WireId> {
+    let copied_target = *id_map.get(&loop_.target_face).ok_or_else(|| {
+        OperationError::Failed("cut loop references an unknown target face".into())
+    })?;
+    let mut remapped = loop_.clone();
+    remapped.target_face = copied_target;
+    punch_loop(store, &remapped)
 }
 
 /// Deep-copies a face into a new `FaceData` entry, cloning the surface and trim
@@ -183,13 +195,114 @@ mod tests {
             .unwrap();
         // 6 slab faces + 1 band face = 7.
         assert_eq!(shell.faces.len(), 7, "6 slab faces + 1 band");
-        // Exactly 2 faces carry holes (front + back).
-        let holed = shell
+        // The two punched faces (front + back) each carry exactly one hole inner
+        // wire; the band face carries one inner wire (the exit ring) plus its
+        // outer wire (the entry ring). All three NURBS faces with inner wires:
+        // 2 punched + 1 band = 3.
+        let with_inner = shell
             .faces
             .iter()
             .filter(|&&f| !store.face(f).unwrap().inner_wires.is_empty())
             .count();
-        assert_eq!(holed, 2, "front + back punched");
+        assert_eq!(with_inner, 3, "front + back punched + 1 band");
+    }
+
+    /// The band face shares its boundary wires with the punched faces' inner
+    /// wires — the same `WireId`s, not duplicates.
+    #[test]
+    fn band_shares_ring_wires_with_punched_faces() {
+        use crate::topology::WireId;
+        let (store, result) = slab_minus_tube(0.7);
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+
+        // Collect the punched faces' hole inner-wire ids (front + back rings).
+        let mut punched_rings: Vec<WireId> = Vec::new();
+        // Locate the single band face: its outer wire is itself a hole ring (it
+        // appears in some other face's inner wires).
+        let mut all_inner: Vec<WireId> = Vec::new();
+        for &f in &shell.faces {
+            all_inner.extend(store.face(f).unwrap().inner_wires.iter().copied());
+        }
+        // The band is the face whose `outer_wire` is one of the hole rings.
+        let band = shell
+            .faces
+            .iter()
+            .copied()
+            .find(|&f| all_inner.contains(&store.face(f).unwrap().outer_wire))
+            .unwrap();
+        let band_face = store.face(band).unwrap();
+        let band_entry = band_face.outer_wire;
+        assert_eq!(band_face.inner_wires.len(), 1, "band has one inner ring");
+        let band_exit = band_face.inner_wires[0];
+
+        // The punched faces are the OTHER faces with inner wires.
+        for &f in &shell.faces {
+            if f == band {
+                continue;
+            }
+            punched_rings.extend(store.face(f).unwrap().inner_wires.iter().copied());
+        }
+        assert_eq!(punched_rings.len(), 2, "two punched hole rings");
+        assert!(
+            punched_rings.contains(&band_entry),
+            "band entry ring shared with a punched face"
+        );
+        assert!(
+            punched_rings.contains(&band_exit),
+            "band exit ring shared with a punched face"
+        );
+        assert_ne!(band_entry, band_exit, "entry and exit rings differ");
+    }
+
+    /// No edge in the result shell spans the tool's full height: the bogus
+    /// full-surface u-seam edges (z = -1.5 .. 3.5 in the demo) are gone now that
+    /// the band reuses the SSI ring wires.
+    #[test]
+    fn no_edge_spans_tool_full_height() {
+        use crate::topology::EdgeCurve;
+
+        // Slab thickness is 1.5 (front peak) + 1.0 (down) = 2.5; the SSI rings
+        // sag at most ~1.5 over the curved face. Any edge taller than this is a
+        // full-tool-height seam artifact (the tube spans z = -1.5 .. 3.5 = 5.0).
+        const MAX_RING_Z_EXTENT: f64 = 2.5 + 1.5;
+
+        let (store, result) = slab_minus_tube(0.7);
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+
+        let mut max_extent = 0.0_f64;
+        for &f in &shell.faces {
+            let face = store.face(f).unwrap();
+            let mut wires = vec![face.outer_wire];
+            wires.extend(face.inner_wires.iter().copied());
+            for w in wires {
+                let wire = store.wire(w).unwrap();
+                for oe in &wire.edges {
+                    let edge = store.edge(oe.edge).unwrap();
+                    if let EdgeCurve::Nurbs(curve) = &edge.curve {
+                        // Sample the edge polyline and measure its z-extent.
+                        let (t0, t1) = curve.parameter_domain();
+                        let mut zmin = f64::INFINITY;
+                        let mut zmax = f64::NEG_INFINITY;
+                        for i in 0..=32 {
+                            let t = t0 + (t1 - t0) * f64::from(i) / 32.0;
+                            let p = curve.point_at(t).unwrap();
+                            zmin = zmin.min(p.z);
+                            zmax = zmax.max(p.z);
+                        }
+                        max_extent = max_extent.max(zmax - zmin);
+                    }
+                }
+            }
+        }
+        assert!(
+            max_extent < MAX_RING_Z_EXTENT,
+            "an edge spans z-extent {max_extent} (>= {MAX_RING_Z_EXTENT}) — \
+             stray full-tool-height seam edge still present"
+        );
     }
 
     #[test]
@@ -319,11 +432,17 @@ mod tests {
         let shell = store
             .shell(store.solid(result).unwrap().outer_shell)
             .unwrap();
-        // Band (hole-wall) faces are the NURBS faces with no inner wires; the
-        // punched front/back copies carry their hole as an inner wire.
+        // Band (hole-wall) faces are identified by their boundary topology: a
+        // band's `outer_wire` is itself a hole ring shared with a punched face's
+        // inner wires. (Both bands and punched faces now carry inner wires, so
+        // `inner_wires.is_empty()` no longer discriminates.)
+        let mut all_inner: Vec<crate::topology::WireId> = Vec::new();
+        for &f in &shell.faces {
+            all_inner.extend(store.face(f).unwrap().inner_wires.iter().copied());
+        }
         let band_faces: Vec<_> = collect_nurbs_faces(&store, &shell.faces)
             .into_iter()
-            .filter(|(fid, _)| store.face(*fid).unwrap().inner_wires.is_empty())
+            .filter(|(fid, _)| all_inner.contains(&store.face(*fid).unwrap().outer_wire))
             .collect();
         assert!(
             !band_faces.is_empty(),

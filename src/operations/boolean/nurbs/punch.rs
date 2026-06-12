@@ -25,13 +25,14 @@ use crate::topology::{
 use super::loops::CutLoop;
 
 /// Punches a single cut loop onto its target face: adds a CW trim hole and a 3D
-/// inner wire.
+/// inner wire. Returns the [`WireId`] of the hole ring wire it created so callers
+/// can share the same wire with the band (hole-wall) face.
 ///
 /// # Errors
 ///
 /// Returns an error if the target face is not a NURBS face, the loop degenerates
 /// to fewer than 3 distinct UV points, or curve / wire construction fails.
-pub(crate) fn punch_loop(store: &mut TopologyStore, cut: &CutLoop) -> Result<()> {
+pub(crate) fn punch_loop(store: &mut TopologyStore, cut: &CutLoop) -> Result<WireId> {
     let surface = nurbs_surface_of(store, cut.target_face)?;
 
     // 1. Build the CW hole pcurve from the target-UV trace.
@@ -48,7 +49,7 @@ pub(crate) fn punch_loop(store: &mut TopologyStore, cut: &CutLoop) -> Result<()>
         .get_or_insert_with(|| FaceTrim::new(full_domain_outer_loop(&surface), Vec::new()));
     trim.holes.push(hole_loop);
     face.inner_wires.push(inner_wire);
-    Ok(())
+    Ok(inner_wire)
 }
 
 /// Returns a clone of the NURBS surface backing `face`, or an error if `face` is

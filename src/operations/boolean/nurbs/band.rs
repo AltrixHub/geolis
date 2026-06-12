@@ -35,19 +35,42 @@
 
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsSurface};
-use crate::math::{Point2, TOLERANCE};
-use crate::topology::{FaceData, FaceId, FaceSurface, FaceTrim, TopologyStore, TrimLoop, WireData};
+use crate::math::Point2;
+use crate::topology::{FaceData, FaceId, FaceSurface, FaceTrim, TopologyStore, TrimLoop, WireId};
 
 use super::loops::ToolFaceCut;
 
+/// The two hole-ring wires shared with the punched target faces for one tool
+/// side face: the entry ring (lower mean v) and the exit ring (upper mean v).
+///
+/// These are the exact [`WireId`]s returned by [`super::punch::punch_loop`] for
+/// the same tool face's two loops, so the band face shares its boundary edges
+/// with the punched target faces (correct `BRep` adjacency).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BandRingWires {
+    /// Entry ring wire (matches `cut.loops[0]`, the lower-v loop).
+    pub entry: WireId,
+    /// Exit ring wire (matches `cut.loops[1]`, the upper-v loop).
+    pub exit: WireId,
+}
+
 /// Builds the band (hole-wall) face for one tool side face from its two cut
 /// loops, and returns the new face's id.
+///
+/// `rings` carries the two hole-ring wires already created by the punch step for
+/// this tool face's loops; the band face reuses them as its boundary so it
+/// shares edges/wires with the punched target faces instead of fabricating a new
+/// full-surface boundary.
 ///
 /// # Errors
 ///
 /// Returns an error if the tool face is not a NURBS face or the stitched band
 /// polygon degenerates (fewer than 3 distinct UV points).
-pub(crate) fn build_band_face(store: &mut TopologyStore, cut: &ToolFaceCut) -> Result<FaceId> {
+pub(crate) fn build_band_face(
+    store: &mut TopologyStore,
+    cut: &ToolFaceCut,
+    rings: BandRingWires,
+) -> Result<FaceId> {
     let surface = match &store.face(cut.tool_face)?.surface {
         FaceSurface::Nurbs(s) => s.clone(),
         _ => {
@@ -64,16 +87,13 @@ pub(crate) fn build_band_face(store: &mut TopologyStore, cut: &ToolFaceCut) -> R
     let outer = stitch_band_loop(&entry, &exit)?;
     let trim = FaceTrim::new(outer, Vec::new());
 
-    // A band face shares the tool's outer boundary topologically only as a
-    // bookkeeping wire; reuse a degenerate-free closed wire built from the
-    // surface's own boundary so the face has a valid `outer_wire`. The trim is
-    // what drives tessellation.
-    let outer_wire = boundary_wire(store, &surface)?;
-
+    // The band's real boundary is the two SSI hole rings (entry + exit). Share
+    // the exact wires the punch step attached to the target faces so the band
+    // face has correct BRep adjacency (no fabricated full-surface seam wire).
     Ok(store.add_face(FaceData {
         surface: FaceSurface::Nurbs(surface),
-        outer_wire,
-        inner_wires: Vec::new(),
+        outer_wire: rings.entry,
+        inner_wires: vec![rings.exit],
         // Subtract: band normals point into the hole.
         same_sense: false,
         trim: Some(trim),
@@ -139,70 +159,6 @@ fn stitch_band_loop(entry: &[Point2], exit: &[Point2]) -> Result<TrimLoop> {
     Ok(TrimLoop::new(curves))
 }
 
-/// Builds a bookkeeping closed outer wire from the surface's exact boundary
-/// isocurves (reusing the same four-isocurve scheme as `MakeNurbsFace`).
-fn boundary_wire(
-    store: &mut TopologyStore,
-    surface: &NurbsSurface,
-) -> Result<crate::topology::WireId> {
-    use crate::topology::{EdgeCurve, EdgeData, OrientedEdge, VertexData, VertexId};
-
-    let [u_min_edge, u_max_edge, v_min_edge, v_max_edge] = surface.boundary_curves()?;
-    let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
-    let c00 = surface.point_at(u_min, v_min)?;
-    let c10 = surface.point_at(u_max, v_min)?;
-    let c11 = surface.point_at(u_max, v_max)?;
-    let c01 = surface.point_at(u_min, v_max)?;
-
-    let mut corners: Vec<(crate::math::Point3, VertexId)> = Vec::new();
-    let mut vertex_for = |store: &mut TopologyStore, p: crate::math::Point3| -> VertexId {
-        for (cp, id) in &corners {
-            if (cp - p).norm() < TOLERANCE {
-                return *id;
-            }
-        }
-        let id = store.add_vertex(VertexData::new(p));
-        corners.push((p, id));
-        id
-    };
-    let v00 = vertex_for(store, c00);
-    let v10 = vertex_for(store, c10);
-    let v11 = vertex_for(store, c11);
-    let v01 = vertex_for(store, c01);
-
-    let segments = [
-        (v_min_edge, v00, v10, true),
-        (u_max_edge, v10, v11, true),
-        (v_max_edge, v01, v11, false),
-        (u_min_edge, v00, v01, false),
-    ];
-    let mut oriented = Vec::with_capacity(4);
-    for (curve, ns, ne, forward) in segments {
-        if ns == ne {
-            let (t0, t1) = curve.parameter_domain();
-            if (curve.point_at(t1)? - curve.point_at(t0)?).norm() < TOLERANCE {
-                continue;
-            }
-        }
-        let (t0, t1) = curve.parameter_domain();
-        let edge = store.add_edge(EdgeData {
-            start: ns,
-            end: ne,
-            curve: EdgeCurve::Nurbs(curve),
-            t_start: t0,
-            t_end: t1,
-        });
-        oriented.push(OrientedEdge::new(edge, forward));
-    }
-    if oriented.is_empty() {
-        return Err(OperationError::Failed("band boundary collapsed".into()).into());
-    }
-    Ok(store.add_wire(WireData {
-        edges: oriented,
-        is_closed: true,
-    }))
-}
-
 /// A degree-1 two-point UV line segment.
 fn uv_segment(a: Point2, b: Point2) -> NurbsCurve2D {
     NurbsCurve2D::from_unweighted(
@@ -240,6 +196,7 @@ mod tests {
     use crate::geometry::nurbs::InversionOptions;
     use crate::math::Point3;
     use crate::operations::boolean::nurbs::loops::{collect_nurbs_faces, extract_cut_loops};
+    use crate::operations::boolean::nurbs::punch::punch_loop;
     use crate::operations::creation::{MakeCurvedSlab, MakeNurbsTube};
     use crate::tessellation::{TessellateFace, TessellationParams};
     use crate::topology::SolidId;
@@ -253,8 +210,16 @@ mod tests {
     }
 
     /// Builds the band face for a slab×tube and returns (store, band face,
-    /// tool surface).
+    /// tool surface). The two hole loops are punched first (as the real pipeline
+    /// does) so the band shares their ring wires.
     fn band_face(radius: f64) -> (TopologyStore, FaceId, NurbsSurface) {
+        let (store, band, surf, _rings) = band_face_with_rings(radius);
+        (store, band, surf)
+    }
+
+    /// Like [`band_face`] but also returns the entry/exit ring wires the band
+    /// shares with the punched faces.
+    fn band_face_with_rings(radius: f64) -> (TopologyStore, FaceId, NurbsSurface, BandRingWires) {
         let mut store = TopologyStore::new();
         let slab = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
             .execute(&mut store)
@@ -266,8 +231,12 @@ mod tests {
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
         let cuts = extract_cut_loops(&target, &tool).unwrap();
         let tool_surf = tool[0].1.clone();
-        let band = build_band_face(&mut store, &cuts[0]).unwrap();
-        (store, band, tool_surf)
+        // Punch both loops (entry then exit) and share their ring wires.
+        let entry = punch_loop(&mut store, &cuts[0].loops[0]).unwrap();
+        let exit = punch_loop(&mut store, &cuts[0].loops[1]).unwrap();
+        let rings = BandRingWires { entry, exit };
+        let band = build_band_face(&mut store, &cuts[0], rings).unwrap();
+        (store, band, tool_surf, rings)
     }
 
     #[test]
@@ -332,5 +301,18 @@ mod tests {
             "band z-extent {} too small (zmin={zmin}, zmax={zmax})",
             zmax - zmin
         );
+    }
+
+    #[test]
+    fn band_boundary_is_exactly_the_two_ring_wires() {
+        let (store, band, _surf, rings) = band_face_with_rings(0.7);
+        let face = store.face(band).unwrap();
+        // The band's outer wire is the entry ring; its single inner wire is the
+        // exit ring — the exact wires the punch step created.
+        assert_eq!(face.outer_wire, rings.entry, "outer wire = entry ring");
+        assert_eq!(face.inner_wires.len(), 1, "exactly one inner wire");
+        assert_eq!(face.inner_wires[0], rings.exit, "inner wire = exit ring");
+        // The two rings are distinct wires (entry != exit).
+        assert_ne!(rings.entry, rings.exit, "entry and exit rings differ");
     }
 }
