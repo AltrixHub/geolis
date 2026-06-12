@@ -22,9 +22,11 @@
 
 mod bbox;
 mod curve_curve;
+mod curve_surface;
 mod types;
 
 pub use curve_curve::intersect_curves_2d;
+pub use curve_surface::intersect_curve_surface;
 pub use types::{
     CurveCurveIntersection2D, CurveSurfaceIntersection, IntersectionOptions,
     SurfaceIntersectionCurve,
