@@ -3,7 +3,7 @@ mod curve;
 mod knot;
 mod surface;
 
-pub mod construct;
+mod construct;
 
 pub use basis::{basis_function_derivatives, basis_functions, binomial};
 pub use curve::{NurbsCurve, NurbsCurve2D, NurbsCurve3D};
