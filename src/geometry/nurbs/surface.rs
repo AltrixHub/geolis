@@ -324,6 +324,104 @@ impl NurbsSurface {
         let skl = self.derivatives(u, v, 1)?;
         Ok((Point3::from(skl[0][0]), skl[1][0], skl[0][1]))
     }
+
+    /// Extracts the isoparametric curve at fixed `u` (a curve in the v
+    /// direction) by homogeneously contracting the u-basis.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `u` is outside the domain, an isocurve weight
+    /// vanishes, or the resulting curve fails construction.
+    pub fn isocurve_u(&self, u: f64) -> Result<NurbsCurve3D> {
+        let (u_min, u_max) = self.knots_u.domain(self.degree_u);
+        if u < u_min - TOLERANCE || u > u_max + TOLERANCE {
+            return Err(GeometryError::ParameterOutOfRange {
+                parameter: "u",
+                value: u,
+                min: u_min,
+                max: u_max,
+            }
+            .into());
+        }
+        let span_u = self.knots_u.find_span(self.degree_u, self.nu, u);
+        let basis_u = basis_functions(&self.knots_u, span_u, u, self.degree_u);
+
+        let mut points = Vec::with_capacity(self.nv);
+        let mut weights = Vec::with_capacity(self.nv);
+        for j in 0..self.nv {
+            let mut wp = Vector3::zeros();
+            let mut w = 0.0;
+            for (r, &bu) in basis_u.iter().enumerate() {
+                let i = span_u - self.degree_u + r;
+                let wij = self.weight(i, j);
+                wp += self.control_point(i, j).coords * (bu * wij);
+                w += bu * wij;
+            }
+            if w.abs() < TOLERANCE {
+                return Err(GeometryError::Degenerate("zero isocurve weight".into()).into());
+            }
+            points.push(Point3::from(wp / w));
+            weights.push(w);
+        }
+        NurbsCurve3D::new(points, weights, self.knots_v.clone(), self.degree_v)
+    }
+
+    /// Extracts the isoparametric curve at fixed `v` (a curve in the u
+    /// direction) by homogeneously contracting the v-basis.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `v` is outside the domain, an isocurve weight
+    /// vanishes, or the resulting curve fails construction.
+    pub fn isocurve_v(&self, v: f64) -> Result<NurbsCurve3D> {
+        let (v_min, v_max) = self.knots_v.domain(self.degree_v);
+        if v < v_min - TOLERANCE || v > v_max + TOLERANCE {
+            return Err(GeometryError::ParameterOutOfRange {
+                parameter: "v",
+                value: v,
+                min: v_min,
+                max: v_max,
+            }
+            .into());
+        }
+        let span_v = self.knots_v.find_span(self.degree_v, self.nv, v);
+        let basis_v = basis_functions(&self.knots_v, span_v, v, self.degree_v);
+
+        let mut points = Vec::with_capacity(self.nu);
+        let mut weights = Vec::with_capacity(self.nu);
+        for i in 0..self.nu {
+            let mut wp = Vector3::zeros();
+            let mut w = 0.0;
+            for (r, &bv) in basis_v.iter().enumerate() {
+                let j = span_v - self.degree_v + r;
+                let wij = self.weight(i, j);
+                wp += self.control_point(i, j).coords * (bv * wij);
+                w += bv * wij;
+            }
+            if w.abs() < TOLERANCE {
+                return Err(GeometryError::Degenerate("zero isocurve weight".into()).into());
+            }
+            points.push(Point3::from(wp / w));
+            weights.push(w);
+        }
+        NurbsCurve3D::new(points, weights, self.knots_u.clone(), self.degree_u)
+    }
+
+    /// Extracts the four boundary curves `[u_min edge, u_max edge, v_min edge,
+    /// v_max edge]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any isocurve extraction fails.
+    pub fn boundary_curves(&self) -> Result<[NurbsCurve3D; 4]> {
+        let ((u_min, u_max), (v_min, v_max)) = self.parameter_domain();
+        Ok([
+            self.isocurve_u(u_min)?,
+            self.isocurve_u(u_max)?,
+            self.isocurve_v(v_min)?,
+            self.isocurve_v(v_max)?,
+        ])
+    }
 }
 
 use crate::geometry::surface::{Surface, SurfaceDomain};
@@ -490,5 +588,35 @@ mod tests {
         assert!((d.u_max - 1.0).abs() < TOLERANCE);
         assert!((d.v_min - 0.0).abs() < TOLERANCE);
         assert!((d.v_max - 1.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn isocurve_u_matches_surface() {
+        let s = parabolic_patch();
+        let c = s.isocurve_u(0.3).unwrap();
+        for i in 0..=20 {
+            let v = f64::from(i) / 20.0;
+            assert!((c.point_at(v).unwrap() - s.point_at(0.3, v).unwrap()).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn isocurve_v_matches_surface() {
+        let s = parabolic_patch();
+        let c = s.isocurve_v(0.7).unwrap();
+        for i in 0..=20 {
+            let u = f64::from(i) / 20.0;
+            assert!((c.point_at(u).unwrap() - s.point_at(u, 0.7).unwrap()).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn boundary_curves_trace_patch_edges() {
+        let s = bilinear_patch();
+        let [u0, u1, v0, v1] = s.boundary_curves().unwrap();
+        assert!((u0.point_at(0.5).unwrap() - s.point_at(0.0, 0.5).unwrap()).norm() < 1e-12);
+        assert!((u1.point_at(0.5).unwrap() - s.point_at(1.0, 0.5).unwrap()).norm() < 1e-12);
+        assert!((v0.point_at(0.5).unwrap() - s.point_at(0.5, 0.0).unwrap()).norm() < 1e-12);
+        assert!((v1.point_at(0.5).unwrap() - s.point_at(0.5, 1.0).unwrap()).norm() < 1e-12);
     }
 }
