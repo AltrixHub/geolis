@@ -233,13 +233,128 @@ impl NurbsSurface {
         }
         Ok(Point3::from(numerator / denominator))
     }
+
+    /// Computes partial derivatives of the surface up to total order `order`
+    /// at `(u, v)` (The NURBS Book, A3.6 for the homogeneous derivatives,
+    /// A4.4 / eq 4.20 for the rational correction).
+    ///
+    /// Returns `skl` where `skl[k][l]` = ∂^{k+l}S/∂u^k∂v^l and `skl[0][0]` is
+    /// the position vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parameters are outside the domain or the
+    /// rational denominator vanishes.
+    pub fn derivatives(&self, u: f64, v: f64, order: usize) -> Result<Vec<Vec<Vector3>>> {
+        self.validate_parameters(u, v)?;
+        let span_u = self.knots_u.find_span(self.degree_u, self.nu, u);
+        let span_v = self.knots_v.find_span(self.degree_v, self.nv, v);
+        let nders_u = basis_function_derivatives(&self.knots_u, span_u, u, self.degree_u, order);
+        let nders_v = basis_function_derivatives(&self.knots_v, span_v, v, self.degree_v, order);
+
+        // Homogeneous derivatives: aders[k][l] for the weighted points,
+        // wders[k][l] for the weights.
+        let mut aders = vec![vec![Vector3::zeros(); order + 1]; order + 1];
+        let mut wders = vec![vec![0.0_f64; order + 1]; order + 1];
+        let du = order.min(self.degree_u);
+        let dv = order.min(self.degree_v);
+        for k in 0..=du {
+            // temp[s] = sum_r nders_u[k][r] * (w_ij * P_ij, w_ij)
+            let mut temp = vec![(Vector3::zeros(), 0.0_f64); self.degree_v + 1];
+            for s in 0..=self.degree_v {
+                let j = span_v - self.degree_v + s;
+                let mut acc_p = Vector3::zeros();
+                let mut acc_w = 0.0;
+                for r in 0..=self.degree_u {
+                    let i = span_u - self.degree_u + r;
+                    let nd = nders_u[k][r];
+                    let w = self.weight(i, j);
+                    acc_p += self.control_point(i, j).coords * (nd * w);
+                    acc_w += nd * w;
+                }
+                temp[s] = (acc_p, acc_w);
+            }
+            let l_max = dv.min(order - k);
+            for l in 0..=l_max {
+                let mut acc_p = Vector3::zeros();
+                let mut acc_w = 0.0;
+                for s in 0..=self.degree_v {
+                    let nd = nders_v[l][s];
+                    acc_p += temp[s].0 * nd;
+                    acc_w += temp[s].1 * nd;
+                }
+                aders[k][l] = acc_p;
+                wders[k][l] = acc_w;
+            }
+        }
+
+        if wders[0][0].abs() < TOLERANCE {
+            return Err(GeometryError::Degenerate("zero rational denominator".into()).into());
+        }
+
+        // Rational correction (A4.4 / eq 4.20).
+        let mut skl = vec![vec![Vector3::zeros(); order + 1]; order + 1];
+        for k in 0..=order {
+            for l in 0..=(order - k) {
+                let mut value = aders[k][l];
+                for j in 1..=l {
+                    value -= skl[k][l - j] * (binomial(l, j) * wders[0][j]);
+                }
+                for i in 1..=k {
+                    value -= skl[k - i][l] * (binomial(k, i) * wders[i][0]);
+                    let mut inner = Vector3::zeros();
+                    for j in 1..=l {
+                        inner += skl[k - i][l - j] * (binomial(l, j) * wders[i][j]);
+                    }
+                    value -= inner * binomial(k, i);
+                }
+                skl[k][l] = value / wders[0][0];
+            }
+        }
+        Ok(skl)
+    }
+
+    /// Convenience accessor returning `(point, dS/du, dS/dv)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parameters are outside the domain or the
+    /// rational denominator vanishes.
+    pub fn partials(&self, u: f64, v: f64) -> Result<(Point3, Vector3, Vector3)> {
+        let skl = self.derivatives(u, v, 1)?;
+        Ok((Point3::from(skl[0][0]), skl[1][0], skl[0][1]))
+    }
+}
+
+use crate::geometry::surface::{Surface, SurfaceDomain};
+
+impl Surface for NurbsSurface {
+    fn evaluate(&self, u: f64, v: f64) -> Result<Point3> {
+        self.point_at(u, v)
+    }
+
+    fn normal(&self, u: f64, v: f64) -> Result<Vector3> {
+        let (_, su, sv) = self.partials(u, v)?;
+        let n = su.cross(&sv);
+        let len = n.norm();
+        if len < TOLERANCE {
+            return Err(GeometryError::ZeroVector.into());
+        }
+        Ok(n / len)
+    }
+
+    fn domain(&self) -> SurfaceDomain {
+        let ((u_min, u_max), (v_min, v_max)) = self.parameter_domain();
+        SurfaceDomain::new(u_min, u_max, v_min, v_max)
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::math::{Point3, TOLERANCE};
+    use crate::geometry::surface::Surface;
+    use crate::math::{Point3, Vector3, TOLERANCE};
 
     /// 2x2 bilinear patch spanning [0,2]x[0,2] in the XY plane.
     fn bilinear_patch() -> NurbsSurface {
@@ -323,5 +438,57 @@ mod tests {
         let s = parabolic_patch();
         let p = s.point_at(0.5, 0.5).unwrap();
         assert!((p - Point3::new(1.0, 0.5, 0.5)).norm() < 1e-12);
+    }
+
+    #[test]
+    fn partials_match_central_differences() {
+        let s = parabolic_patch();
+        let h = 1e-6;
+        for &(u, v) in &[(0.3, 0.4), (0.5, 0.5), (0.7, 0.2)] {
+            let d = s.derivatives(u, v, 1).unwrap();
+            let du_fd = (s.point_at(u + h, v).unwrap() - s.point_at(u - h, v).unwrap()) / (2.0 * h);
+            let dv_fd = (s.point_at(u, v + h).unwrap() - s.point_at(u, v - h).unwrap()) / (2.0 * h);
+            assert!((d[1][0] - du_fd).norm() < 1e-5, "du at ({u},{v})");
+            assert!((d[0][1] - dv_fd).norm() < 1e-5, "dv at ({u},{v})");
+        }
+    }
+
+    #[test]
+    fn second_partials_match_central_differences() {
+        let s = parabolic_patch();
+        let h = 1e-4;
+        let (u, v) = (0.5, 0.5);
+        let d = s.derivatives(u, v, 2).unwrap();
+        let duu_fd = (s.point_at(u + h, v).unwrap().coords
+            - 2.0 * s.point_at(u, v).unwrap().coords
+            + s.point_at(u - h, v).unwrap().coords)
+            / (h * h);
+        assert!((d[2][0] - duu_fd).norm() < 1e-3);
+    }
+
+    #[test]
+    fn derivative_order_zero_is_point() {
+        let s = parabolic_patch();
+        let d = s.derivatives(0.3, 0.6, 0).unwrap();
+        let p = s.point_at(0.3, 0.6).unwrap();
+        assert!((d[0][0] - p.coords).norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn surface_trait_normal_of_planar_patch_is_z() {
+        let s = bilinear_patch();
+        let n = Surface::normal(&s, 0.5, 0.5).unwrap();
+        assert!((n - Vector3::new(0.0, 0.0, 1.0)).norm() < TOLERANCE);
+        assert!((n.norm() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn surface_trait_domain() {
+        let s = bilinear_patch();
+        let d = Surface::domain(&s);
+        assert!((d.u_min - 0.0).abs() < TOLERANCE);
+        assert!((d.u_max - 1.0).abs() < TOLERANCE);
+        assert!((d.v_min - 0.0).abs() < TOLERANCE);
+        assert!((d.v_max - 1.0).abs() < TOLERANCE);
     }
 }
