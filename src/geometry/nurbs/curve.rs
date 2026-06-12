@@ -167,6 +167,86 @@ impl<const D: usize> NurbsCurve<D> {
         }
         Ok(Point::from(numerator / denominator))
     }
+
+    /// Evaluates derivatives up to `order` at `t` (The NURBS Book, A4.2).
+    ///
+    /// Returns `d` where `d[0]` is the position vector and `d[k]` is the
+    /// k-th derivative.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `t` is outside the parameter domain.
+    pub fn derivatives(&self, t: f64, order: usize) -> Result<Vec<SVector<f64, D>>> {
+        use super::basis::{basis_function_derivatives, binomial};
+
+        self.validate_parameter(t)?;
+        let span = self
+            .knots
+            .find_span(self.degree, self.control_points.len(), t);
+        let nders = basis_function_derivatives(&self.knots, span, t, self.degree, order);
+
+        // Homogeneous derivatives: a[k] = sum N^{(k)} * w_i * P_i, w[k] = sum N^{(k)} * w_i
+        let mut a = vec![SVector::<f64, D>::zeros(); order + 1];
+        let mut w = vec![0.0; order + 1];
+        for (k, row) in nders.iter().enumerate().take(order + 1) {
+            for (j, nd) in row.iter().enumerate() {
+                let idx = span - self.degree + j;
+                a[k] += self.control_points[idx].coords * (nd * self.weights[idx]);
+                w[k] += nd * self.weights[idx];
+            }
+        }
+        if w[0].abs() < TOLERANCE {
+            return Err(GeometryError::Degenerate("zero rational denominator".into()).into());
+        }
+
+        // Rational derivatives: C^{(k)} = (A^{(k)} - sum_{i=1..k} C(k,i) w^{(i)} C^{(k-i)}) / w
+        let mut ders = vec![SVector::<f64, D>::zeros(); order + 1];
+        for k in 0..=order {
+            let mut v = a[k];
+            for i in 1..=k {
+                v -= ders[k - i] * (binomial(k, i) * w[i]);
+            }
+            ders[k] = v / w[0];
+        }
+        Ok(ders)
+    }
+
+    /// Whether the curve endpoints coincide.
+    #[must_use]
+    pub fn is_endpoint_closed(&self) -> bool {
+        let (t_min, t_max) = self.parameter_domain();
+        match (self.point_at(t_min), self.point_at(t_max)) {
+            (Ok(a), Ok(b)) => (a - b).norm() < TOLERANCE,
+            _ => false,
+        }
+    }
+}
+
+use crate::geometry::curve::{Curve, CurveDomain};
+use crate::math::{Point3, Vector3};
+
+impl Curve for NurbsCurve3D {
+    fn evaluate(&self, t: f64) -> Result<Point3> {
+        self.point_at(t)
+    }
+
+    fn tangent(&self, t: f64) -> Result<Vector3> {
+        let ders = self.derivatives(t, 1)?;
+        let len = ders[1].norm();
+        if len < TOLERANCE {
+            return Err(GeometryError::ZeroVector.into());
+        }
+        Ok(ders[1] / len)
+    }
+
+    fn domain(&self) -> CurveDomain {
+        let (t_min, t_max) = self.parameter_domain();
+        CurveDomain::new(t_min, t_max)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.is_endpoint_closed()
+    }
 }
 
 #[cfg(test)]
@@ -276,5 +356,63 @@ mod tests {
         .unwrap();
         let p = c.point_at(0.5).unwrap();
         assert!((p - Point2::new(1.0, 1.0)).norm() < TOLERANCE);
+    }
+
+    use crate::geometry::curve::Curve;
+    use crate::math::Vector3;
+
+    #[test]
+    fn first_derivative_matches_central_difference() {
+        let c = quarter_circle();
+        let h = 1e-6;
+        for i in 1..10 {
+            let t = f64::from(i) / 10.0;
+            let d = c.derivatives(t, 1).unwrap();
+            let fd = (c.point_at(t + h).unwrap() - c.point_at(t - h).unwrap()) / (2.0 * h);
+            assert!((d[1] - fd).norm() < 1e-5, "t={t}");
+        }
+    }
+
+    #[test]
+    fn second_derivative_matches_central_difference() {
+        let c = quarter_circle();
+        let h = 1e-4;
+        let t = 0.5;
+        let d = c.derivatives(t, 2).unwrap();
+        let fd = (c.point_at(t + h).unwrap().coords - 2.0 * c.point_at(t).unwrap().coords
+            + c.point_at(t - h).unwrap().coords)
+            / (h * h);
+        assert!((d[2] - fd).norm() < 1e-3);
+    }
+
+    #[test]
+    fn derivative_order_zero_is_point() {
+        let c = quarter_circle();
+        let d = c.derivatives(0.3, 0).unwrap();
+        let p = c.point_at(0.3).unwrap();
+        assert!((d[0] - p.coords).norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn curve_trait_evaluate_and_tangent() {
+        let c = quarter_circle();
+        let p = Curve::evaluate(&c, 0.0).unwrap();
+        assert!((p - Point3::new(1.0, 0.0, 0.0)).norm() < TOLERANCE);
+        // Tangent at start of the quarter circle points in +Y
+        let t = c.tangent(0.0).unwrap();
+        assert!((t - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-9);
+        assert!(
+            (t.norm() - 1.0).abs() < 1e-12,
+            "tangent must be unit length"
+        );
+    }
+
+    #[test]
+    fn curve_trait_domain_and_closed() {
+        let c = quarter_circle();
+        let d = c.domain();
+        assert!((d.t_min - 0.0).abs() < TOLERANCE);
+        assert!((d.t_max - 1.0).abs() < TOLERANCE);
+        assert!(!c.is_closed());
     }
 }
