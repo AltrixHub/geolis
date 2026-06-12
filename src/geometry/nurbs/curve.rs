@@ -3,7 +3,7 @@ use nalgebra::{Point, SVector};
 use crate::error::{GeometryError, Result};
 use crate::math::TOLERANCE;
 
-use super::basis::basis_functions;
+use super::basis::{basis_functions, binomial};
 use super::knot::KnotVector;
 
 /// A NURBS curve in `D`-dimensional space.
@@ -179,7 +179,7 @@ impl<const D: usize> NurbsCurve<D> {
     /// Returns an error if `t` is outside the parameter domain.
     // TODO(perf): hot-path callers (intersection marching) may want an allocation-free variant.
     pub fn derivatives(&self, t: f64, order: usize) -> Result<Vec<SVector<f64, D>>> {
-        use super::basis::{basis_function_derivatives, binomial};
+        use super::basis::basis_function_derivatives;
 
         self.validate_parameter(t)?;
         let span = self
@@ -381,6 +381,216 @@ impl<const D: usize> NurbsCurve<D> {
             KnotVector::new(new_knots)?,
             self.degree,
         )
+    }
+
+    /// Raises the curve degree by `t` without changing its shape
+    /// (The NURBS Book, A5.9).
+    ///
+    /// Degree elevation operates on the homogeneous control points
+    /// `(w * P, w)` so that rational curves (non-unit weights) are elevated
+    /// exactly, then dehomogenizes the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reconstructing the elevated knot vector or curve
+    /// fails. This path is unreachable for a valid curve; the error is
+    /// propagated rather than masked by a silent fallback. `t == 0` returns a
+    /// clone.
+    // A5.9: single-char bindings (a, b, ph, mh, kind, oldr, ...) and the
+    // index-driven Bezier-segment loops follow The NURBS Book notation.
+    #[allow(
+        clippy::many_single_char_names,
+        clippy::needless_range_loop,
+        clippy::too_many_lines,
+        clippy::similar_names
+    )]
+    pub fn elevate_degree(&self, t: usize) -> Result<Self> {
+        if t == 0 {
+            return Ok(self.clone());
+        }
+        let p = self.degree;
+        let ph = p + t;
+        let ph2 = ph / 2;
+
+        // Homogeneous control points (w * P, w).
+        type H<const D: usize> = (SVector<f64, D>, f64);
+        let hw = |i: usize| -> H<D> {
+            (
+                self.control_points[i].coords * self.weights[i],
+                self.weights[i],
+            )
+        };
+        let zero_h = || -> H<D> { (SVector::<f64, D>::zeros(), 0.0) };
+        let scale = |h: H<D>, s: f64| -> H<D> { (h.0 * s, h.1 * s) };
+        let add = |a: H<D>, b: H<D>| -> H<D> { (a.0 + b.0, a.1 + b.1) };
+
+        let u = self.knots.as_slice();
+        let m = u.len() - 1;
+        let n = self.control_points.len() - 1;
+
+        // Bezout coefficients for degree-elevation of one Bezier segment
+        // (eq 5.36): bezalfs[i][j].
+        let mut bezalfs = vec![vec![0.0_f64; p + 1]; ph + 1];
+        bezalfs[0][0] = 1.0;
+        bezalfs[ph][p] = 1.0;
+        for i in 1..=ph2 {
+            let inv = 1.0 / binomial(ph, i);
+            let mpi = p.min(i);
+            for j in (i.saturating_sub(t))..=mpi {
+                bezalfs[i][j] = inv * binomial(p, j) * binomial(t, i - j);
+            }
+        }
+        for i in (ph2 + 1)..ph {
+            let mpi = p.min(i);
+            for j in (i.saturating_sub(t))..=mpi {
+                bezalfs[i][j] = bezalfs[ph - i][p - j];
+            }
+        }
+
+        // Output buffers (over-allocated; truncated to exact length at the end).
+        let cap_q = (n + 1) * (t + 1) + ph + 1;
+        let mut qw: Vec<H<D>> = vec![zero_h(); cap_q];
+        let mut uh: Vec<f64> = vec![0.0; cap_q + ph + 1];
+
+        let mut bpts: Vec<H<D>> = vec![zero_h(); p + 1];
+        let mut ebpts: Vec<H<D>> = vec![zero_h(); ph + 1];
+        let mut next_bpts: Vec<H<D>> = vec![zero_h(); p.saturating_sub(1)];
+        let mut alfs: Vec<f64> = vec![0.0; p.saturating_sub(1).max(1)];
+
+        let mut mh = ph;
+        let mut kind = ph + 1;
+        let mut r: isize = -1;
+        let mut a = p;
+        let mut b = p + 1;
+        let mut cind = 1;
+        let mut ua = u[0];
+
+        qw[0] = hw(0);
+        for i in 0..=ph {
+            uh[i] = ua;
+        }
+
+        // Initialise the first Bezier segment.
+        for i in 0..=p {
+            bpts[i] = hw(i);
+        }
+
+        while b < m {
+            let i_start = b;
+            while b < m && (u[b] - u[b + 1]).abs() < TOLERANCE {
+                b += 1;
+            }
+            let mul = b - i_start + 1;
+            mh += mul + t;
+            let ub = u[b];
+            let oldr = r;
+            r = p as isize - mul as isize;
+
+            // Insert knot u[b] r times to make the next segment.
+            let lbz = if oldr > 0 { (oldr + 2) as usize / 2 } else { 1 };
+            let rbz = if r > 0 { ph - (r as usize + 1) / 2 } else { ph };
+
+            if r > 0 {
+                let r_us = r as usize;
+                let numer = ub - ua;
+                for k in ((mul + 1)..=p).rev() {
+                    alfs[k - mul - 1] = numer / (u[a + k] - ua);
+                }
+                for j in 1..=r_us {
+                    let save = r_us - j;
+                    let s = mul + j;
+                    for k in (s..=p).rev() {
+                        let af = alfs[k - s];
+                        bpts[k] = add(scale(bpts[k], af), scale(bpts[k - 1], 1.0 - af));
+                    }
+                    next_bpts[save] = bpts[p];
+                }
+            }
+
+            // Degree-elevate the Bezier segment: bpts -> ebpts.
+            for i in lbz..=ph {
+                ebpts[i] = zero_h();
+                let mpi = p.min(i);
+                for j in (i.saturating_sub(t))..=mpi {
+                    ebpts[i] = add(ebpts[i], scale(bpts[j], bezalfs[i][j]));
+                }
+            }
+
+            // Remove knot u[a] oldr times (knot-removal blend of the new seg).
+            if oldr > 1 {
+                let oldr_us = oldr as usize;
+                let mut first = kind - 2;
+                let mut last = kind;
+                let den = ub - ua;
+                let mut bet = (ub - uh[kind - 1]) / den;
+                for tr in 1..oldr_us {
+                    let mut i = first;
+                    let mut j = last;
+                    let mut kj = j - kind + 1;
+                    while j as isize - i as isize > tr as isize {
+                        if i < cind {
+                            let alf = (ub - uh[i]) / (ua - uh[i]);
+                            qw[i] = add(scale(qw[i], alf), scale(qw[i - 1], 1.0 - alf));
+                        }
+                        if j >= lbz {
+                            if (j as isize - tr as isize)
+                                <= (kind as isize - ph as isize + last as isize)
+                            {
+                                let gam = (ub - uh[j - tr]) / den;
+                                ebpts[kj] =
+                                    add(scale(ebpts[kj], gam), scale(ebpts[kj + 1], 1.0 - gam));
+                            } else {
+                                ebpts[kj] =
+                                    add(scale(ebpts[kj], bet), scale(ebpts[kj + 1], 1.0 - bet));
+                            }
+                        }
+                        i += 1;
+                        j -= 1;
+                        kj = kj.wrapping_sub(1);
+                    }
+                    first = first.wrapping_sub(1);
+                    last += 1;
+                    bet = (ub - uh[kind - 1]) / den;
+                }
+            }
+
+            // Load the knot ua.
+            if a != p {
+                for _ in 0..(ph as isize - oldr) {
+                    uh[kind] = ua;
+                    kind += 1;
+                }
+            }
+            // Load control points into qw.
+            for j in lbz..=rbz {
+                qw[cind] = ebpts[j];
+                cind += 1;
+            }
+
+            // Set up for the next pass through the loop.
+            if b < m {
+                for j in 0..(r as usize) {
+                    bpts[j] = next_bpts[j];
+                }
+                for j in (r as usize)..=p {
+                    bpts[j] = hw(b - p + j);
+                }
+                a = b;
+                b += 1;
+                ua = ub;
+            } else {
+                for i in 0..=ph {
+                    uh[kind + i] = ub;
+                }
+            }
+        }
+
+        let nh = mh - ph - 1;
+        let new_hp = &qw[..=nh];
+        let new_knots = uh[..(nh + ph + 2)].to_vec();
+
+        let (points, weights) = dehomogenize(new_hp)?;
+        Self::new(points, weights, KnotVector::new(new_knots)?, ph)
     }
 }
 
@@ -672,5 +882,44 @@ mod tests {
             let t = f64::from(i) / 20.0;
             assert!((r.point_at(1.0 - t).unwrap() - c.point_at(t).unwrap()).norm() < 1e-12);
         }
+    }
+
+    #[test]
+    fn elevate_degree_zero_is_clone() {
+        let c = quarter_circle();
+        let e = c.elevate_degree(0).unwrap();
+        assert_eq!(e.degree(), c.degree());
+        assert_eq!(e.control_points().len(), c.control_points().len());
+        assert_same_shape(&c, &e, 1e-12);
+    }
+
+    #[test]
+    fn elevate_line_to_quadratic_preserves_shape() {
+        let c = line_curve();
+        let e = c.elevate_degree(1).unwrap();
+        assert_eq!(e.degree(), 2);
+        // n + t rule: a single Bezier segment of degree 1 has 2 control points;
+        // raising by 1 yields 3 control points and 6 knots.
+        assert_eq!(e.control_points().len(), 3);
+        assert_eq!(e.knots().len(), 6);
+        assert_same_shape(&c, &e, 1e-12);
+    }
+
+    #[test]
+    fn elevate_quarter_circle_by_one_preserves_shape_and_weights() {
+        let c = quarter_circle();
+        let e = c.elevate_degree(1).unwrap();
+        assert_eq!(e.degree(), 3);
+        assert!(e.weights().iter().all(|&w| w > 0.0));
+        assert_same_shape(&c, &e, 1e-12);
+    }
+
+    #[test]
+    fn elevate_quarter_circle_by_two_preserves_shape_and_weights() {
+        let c = quarter_circle();
+        let e = c.elevate_degree(2).unwrap();
+        assert_eq!(e.degree(), 4);
+        assert!(e.weights().iter().all(|&w| w > 0.0));
+        assert_same_shape(&c, &e, 1e-12);
     }
 }
