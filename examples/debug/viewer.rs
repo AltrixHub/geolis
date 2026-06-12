@@ -21,7 +21,9 @@ use revion_ui::{
 /// surface curvature continuity easy to inspect).
 pub fn app_component(ctx: &mut RenderContext, mesh_storage: &MeshStorage) -> View {
     let theme = Theme::dark();
-    let display_mode = ctx.signal(DisplayMode3D::default());
+    // Matcap by default: NURBS surface inspection reads best with the
+    // normal-to-hue material; the status-bar button switches back to Lit.
+    let display_mode = ctx.signal(DisplayMode3D::MatcapRainbow);
 
     let viewport_2d = build_viewport_2d(ctx, &theme, mesh_storage);
     let viewport_3d = build_viewport_3d(ctx, &theme, mesh_storage, display_mode);
