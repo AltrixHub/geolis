@@ -245,7 +245,7 @@ mod tests {
         let s = bilinear_patch();
         let c = line(Point3::new(-1.0, 1.0, 1.0), Point3::new(3.0, 1.0, 1.0));
         let hits = intersect_curve_surface(&c, &s, &IntersectionOptions::default()).unwrap();
-        assert!(hits.is_empty(), "expected no hits, got {:?}", hits);
+        assert!(hits.is_empty(), "expected no hits, got {hits:?}");
     }
 
     #[test]
@@ -254,6 +254,6 @@ mod tests {
         let s = bilinear_patch();
         let c = line(Point3::new(5.0, 5.0, -1.0), Point3::new(5.0, 5.0, 1.0));
         let hits = intersect_curve_surface(&c, &s, &IntersectionOptions::default()).unwrap();
-        assert!(hits.is_empty(), "expected no hits, got {:?}", hits);
+        assert!(hits.is_empty(), "expected no hits, got {hits:?}");
     }
 }

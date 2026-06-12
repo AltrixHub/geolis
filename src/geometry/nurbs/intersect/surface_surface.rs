@@ -408,7 +408,7 @@ mod tests {
     use crate::geometry::nurbs::{KnotVector, NurbsSurface};
     use crate::math::Point3;
 
-    /// 2x2 bilinear patch in the z = 0 plane, spanning [x_lo,x_hi]x[y_lo,y_hi].
+    /// 2x2 bilinear patch in the z = 0 plane, spanning `[x_lo,x_hi]x[y_lo,y_hi]`.
     fn z0_patch(x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64) -> NurbsSurface {
         NurbsSurface::from_unweighted(
             vec![
@@ -427,8 +427,8 @@ mod tests {
         .unwrap()
     }
 
-    /// A vertical bilinear patch in the plane x = x0, spanning y in [y_lo,y_hi]
-    /// and z in [z_lo,z_hi].
+    /// A vertical bilinear patch in the plane `x = x0`, spanning y in
+    /// `[y_lo,y_hi]` and z in `[z_lo,z_hi]`.
     fn x_const_patch(x0: f64, y_lo: f64, y_hi: f64, z_lo: f64, z_hi: f64) -> NurbsSurface {
         NurbsSurface::from_unweighted(
             vec![
@@ -489,18 +489,17 @@ mod tests {
         assert!(!br.closed);
         assert!(br.points.len() >= 2);
         for p in &br.points {
-            assert!((p.x - 0.5).abs() < 1e-9, "x off line: {:?}", p);
-            assert!(p.z.abs() < 1e-9, "z off line: {:?}", p);
+            assert!((p.x - 0.5).abs() < 1e-9, "x off line: {p:?}");
+            assert!(p.z.abs() < 1e-9, "z off line: {p:?}");
             assert!(
                 p.y >= -1.0 - 1e-7 && p.y <= 2.0 + 1e-7,
-                "y out of range: {:?}",
-                p
+                "y out of range: {p:?}"
             );
         }
         // Endpoints reach the y-extent of the overlap region [-1, 2].
         let ys: Vec<f64> = br.points.iter().map(|p| p.y).collect();
-        let ymin = ys.iter().cloned().fold(f64::INFINITY, f64::min);
-        let ymax = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let ymin = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let ymax = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!(ymin < -1.0 + 1e-3, "branch should reach y=-1, got {ymin}");
         assert!(ymax > 2.0 - 1e-3, "branch should reach y=2, got {ymax}");
     }
@@ -517,8 +516,8 @@ mod tests {
         for br in &branches {
             for p in &br.points {
                 let radial = (p.x * p.x + p.y * p.y).sqrt();
-                assert!((radial - 1.0).abs() < 1e-6, "off unit circle: {:?}", p);
-                assert!(p.z.abs() < 1e-6, "off z=0: {:?}", p);
+                assert!((radial - 1.0).abs() < 1e-6, "off unit circle: {p:?}");
+                assert!(p.z.abs() < 1e-6, "off z=0: {p:?}");
                 total += 1;
             }
         }
@@ -559,8 +558,8 @@ mod tests {
             for p in &br.points {
                 let ra = (p.x * p.x + p.y * p.y).sqrt();
                 let rb = (p.y * p.y + p.z * p.z).sqrt();
-                assert!((ra - 1.0).abs() < 1e-6, "off cylinder A: {:?} (r={ra})", p);
-                assert!((rb - 1.0).abs() < 1e-6, "off cylinder B: {:?} (r={rb})", p);
+                assert!((ra - 1.0).abs() < 1e-6, "off cylinder A: {p:?} (r={ra})");
+                assert!((rb - 1.0).abs() < 1e-6, "off cylinder B: {p:?} (r={rb})");
                 count += 1;
             }
         }

@@ -641,10 +641,9 @@ mod tests {
             let radial = (p.x * p.x + p.y * p.y).sqrt();
             assert!(
                 (radial - 1.0).abs() < 1e-6,
-                "point {k} {:?} off unit circle (r={radial})",
-                p
+                "point {k} {p:?} off unit circle (r={radial})"
             );
-            assert!((p.z - 1.0).abs() < 1e-6, "point {k} {:?} off z=1", p);
+            assert!((p.z - 1.0).abs() < 1e-6, "point {k} {p:?} off z=1");
         }
         // UV traces in-domain.
         for uv in &b.uv_a {
@@ -697,8 +696,8 @@ mod tests {
         assert!(b.closed, "full-circle cut must be a closed loop");
         for p in &b.points {
             let radial = (p.x * p.x + p.y * p.y).sqrt();
-            assert!((radial - 1.0).abs() < 1e-6, "{:?} off unit circle", p);
-            assert!((p.z - 1.0).abs() < 1e-6, "{:?} off z=1", p);
+            assert!((radial - 1.0).abs() < 1e-6, "{p:?} off unit circle");
+            assert!((p.z - 1.0).abs() < 1e-6, "{p:?} off z=1");
         }
     }
 
