@@ -21,6 +21,21 @@ pub struct NurbsSurface {
     degree_v: usize,
 }
 
+/// Validates that `value` lies within `[min, max]` (with tolerance),
+/// reporting the named `parameter` axis on failure.
+fn check_axis(parameter: &'static str, value: f64, min: f64, max: f64) -> Result<()> {
+    if value < min - TOLERANCE || value > max + TOLERANCE {
+        return Err(GeometryError::ParameterOutOfRange {
+            parameter,
+            value,
+            min,
+            max,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 impl NurbsSurface {
     /// Creates a NURBS surface, validating the structural invariants so that
     /// every later internal call to [`KnotVector::find_span`] / [`basis_functions`]
@@ -183,24 +198,8 @@ impl NurbsSurface {
     /// tolerance), reporting `u` then `v`.
     fn validate_parameters(&self, u: f64, v: f64) -> Result<()> {
         let ((u_min, u_max), (v_min, v_max)) = self.parameter_domain();
-        if u < u_min - TOLERANCE || u > u_max + TOLERANCE {
-            return Err(GeometryError::ParameterOutOfRange {
-                parameter: "u",
-                value: u,
-                min: u_min,
-                max: u_max,
-            }
-            .into());
-        }
-        if v < v_min - TOLERANCE || v > v_max + TOLERANCE {
-            return Err(GeometryError::ParameterOutOfRange {
-                parameter: "v",
-                value: v,
-                min: v_min,
-                max: v_max,
-            }
-            .into());
-        }
+        check_axis("u", u, u_min, u_max)?;
+        check_axis("v", v, v_min, v_max)?;
         Ok(())
     }
 
@@ -334,15 +333,7 @@ impl NurbsSurface {
     /// vanishes, or the resulting curve fails construction.
     pub fn isocurve_u(&self, u: f64) -> Result<NurbsCurve3D> {
         let (u_min, u_max) = self.knots_u.domain(self.degree_u);
-        if u < u_min - TOLERANCE || u > u_max + TOLERANCE {
-            return Err(GeometryError::ParameterOutOfRange {
-                parameter: "u",
-                value: u,
-                min: u_min,
-                max: u_max,
-            }
-            .into());
-        }
+        check_axis("u", u, u_min, u_max)?;
         let span_u = self.knots_u.find_span(self.degree_u, self.nu, u);
         let basis_u = basis_functions(&self.knots_u, span_u, u, self.degree_u);
 
@@ -375,15 +366,7 @@ impl NurbsSurface {
     /// vanishes, or the resulting curve fails construction.
     pub fn isocurve_v(&self, v: f64) -> Result<NurbsCurve3D> {
         let (v_min, v_max) = self.knots_v.domain(self.degree_v);
-        if v < v_min - TOLERANCE || v > v_max + TOLERANCE {
-            return Err(GeometryError::ParameterOutOfRange {
-                parameter: "v",
-                value: v,
-                min: v_min,
-                max: v_max,
-            }
-            .into());
-        }
+        check_axis("v", v, v_min, v_max)?;
         let span_v = self.knots_v.find_span(self.degree_v, self.nv, v);
         let basis_v = basis_functions(&self.knots_v, span_v, v, self.degree_v);
 
@@ -424,7 +407,7 @@ impl NurbsSurface {
     }
 
     /// Finds the closest point on the surface to `query` via a coarse seed
-    /// grid followed by a damped Newton iteration (The NURBS Book, §6.1).
+    /// grid followed by a clamped Newton iteration (The NURBS Book, §6.1).
     ///
     /// Non-convergence is not an error: the best parameters found are returned.
     ///
@@ -518,7 +501,8 @@ pub struct InversionOptions {
     pub max_iterations: usize,
     /// Convergence tolerance on the Euclidean residual and parameter step.
     pub tolerance: f64,
-    /// Seed-grid samples per parametric direction.
+    /// Seed-grid samples per parametric direction. For oscillatory or
+    /// high-curvature surfaces, raise this to avoid seeding the wrong basin.
     pub seed_samples: usize,
 }
 
@@ -607,6 +591,32 @@ mod tests {
                 Point3::new(2.0, 0.0, 2.0),
                 Point3::new(2.0, 1.0, 2.0),
             ],
+            3,
+            2,
+            KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap(),
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            2,
+            1,
+        )
+        .unwrap()
+    }
+
+    /// Quarter-cylinder shell: exact rational quadratic quarter circle in u
+    /// (XY plane, radius 1, weights [1, 1/sqrt(2), 1]) extruded linearly in
+    /// v along +Z by 2. A genuinely rational surface: interior weight != 1.
+    fn quarter_cylinder_patch() -> NurbsSurface {
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        NurbsSurface::new(
+            vec![
+                // u-major, nv = 2: (i, j) = i * 2 + j
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 2.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(1.0, 1.0, 2.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 2.0),
+            ],
+            vec![1.0, 1.0, w, w, 1.0, 1.0],
             3,
             2,
             KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap(),
@@ -781,5 +791,86 @@ mod tests {
         assert!((result.u - 1.0).abs() < 1e-9);
         let p = s.point_at(result.u, result.v).unwrap();
         assert!((p - Point3::new(2.0, 1.0, 0.0)).norm() < 1e-9);
+    }
+
+    #[test]
+    fn rejects_wrong_knot_count() {
+        let result = NurbsSurface::from_unweighted(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, 2.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+                Point3::new(2.0, 2.0, 0.0),
+            ],
+            2,
+            2,
+            KnotVector::new(vec![0.0, 0.0, 0.5, 1.0, 1.0]).unwrap(),
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            1,
+            1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_non_positive_weight() {
+        let result = NurbsSurface::new(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, 2.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+                Point3::new(2.0, 2.0, 0.0),
+            ],
+            vec![1.0, 1.0, 0.0, 1.0],
+            2,
+            2,
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            1,
+            1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rational_patch_lies_on_cylinder_and_derivatives_match_differences() {
+        let s = quarter_cylinder_patch();
+        let h = 1e-6;
+        for &(u, v) in &[(0.2, 0.3), (0.5, 0.5), (0.8, 0.7)] {
+            // Every point must lie on the unit cylinder x^2 + y^2 = 1
+            let p = s.point_at(u, v).unwrap();
+            let radial = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((radial - 1.0).abs() < 1e-12, "off cylinder at ({u},{v})");
+
+            // First partials vs central differences (rational correction active)
+            let d = s.derivatives(u, v, 2).unwrap();
+            let du_fd = (s.point_at(u + h, v).unwrap() - s.point_at(u - h, v).unwrap()) / (2.0 * h);
+            let dv_fd = (s.point_at(u, v + h).unwrap() - s.point_at(u, v - h).unwrap()) / (2.0 * h);
+            assert!((d[1][0] - du_fd).norm() < 1e-5, "du at ({u},{v})");
+            assert!((d[0][1] - dv_fd).norm() < 1e-5, "dv at ({u},{v})");
+
+            // Second u-partial vs central differences
+            let h2 = 1e-4;
+            let duu_fd = (s.point_at(u + h2, v).unwrap().coords
+                - 2.0 * s.point_at(u, v).unwrap().coords
+                + s.point_at(u - h2, v).unwrap().coords)
+                / (h2 * h2);
+            assert!((d[2][0] - duu_fd).norm() < 1e-3, "duu at ({u},{v})");
+        }
+    }
+
+    #[test]
+    fn rational_patch_inversion_round_trips() {
+        let s = quarter_cylinder_patch();
+        let options = InversionOptions::default();
+        for &(u, v) in &[(0.25, 0.4), (0.6, 0.8)] {
+            let p = s.point_at(u, v).unwrap();
+            let result = s.closest_point(&p, &options).unwrap();
+            assert!(
+                result.distance < 1e-9,
+                "distance {} at ({u},{v})",
+                result.distance
+            );
+        }
     }
 }
