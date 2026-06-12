@@ -503,6 +503,372 @@ impl NurbsSurface {
             distance,
         })
     }
+
+    /// Axis-aligned bounding box of the control points.
+    ///
+    /// By the convex-hull property the surface lies entirely inside this box, so
+    /// it is a conservative bound used for intersection-candidate pruning.
+    /// Returns `(min_corner, max_corner)`.
+    #[must_use]
+    pub fn bounding_box(&self) -> (Point3, Point3) {
+        let mut min = self.control_points[0].coords;
+        let mut max = self.control_points[0].coords;
+        for p in &self.control_points[1..] {
+            min = min.inf(&p.coords);
+            max = max.sup(&p.coords);
+        }
+        (Point3::from(min), Point3::from(max))
+    }
+
+    /// Inserts `u` into the u-knot vector to full multiplicity `degree_u`, then
+    /// splits into two surfaces covering `[u_min, u]` and `[u, u_max]` in u
+    /// (same v-domain). Mirrors [`NurbsCurve::split`] applied column-wise on the
+    /// homogeneous grid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `u` is not strictly inside the u-domain interior or a
+    /// sub-surface fails construction.
+    pub fn split_u(&self, u: f64) -> Result<(Self, Self)> {
+        let ((u_min, u_max), _) = self.parameter_domain();
+        if u <= u_min + TOLERANCE || u >= u_max - TOLERANCE {
+            return Err(GeometryError::ParameterOutOfRange {
+                parameter: "u",
+                value: u,
+                min: u_min,
+                max: u_max,
+            }
+            .into());
+        }
+        let p = self.degree_u;
+        let s = self.knots_u.multiplicity(u);
+        let (knots, grid, new_nu) = refine_grid_u(self, u, p - s)?;
+
+        let first = knots
+            .iter()
+            .position(|&x| (x - u).abs() < TOLERANCE)
+            .ok_or_else(|| GeometryError::Degenerate("split knot not found".into()))?;
+
+        // Left: u-rows [0, first), knots [0..first+p] ++ [u].
+        let mut left_knots = knots[..first + p].to_vec();
+        left_knots.push(u);
+        let left = Self::from_homogeneous_u(
+            &grid,
+            new_nu,
+            self.nv,
+            0,
+            first,
+            KnotVector::new(left_knots)?,
+            self.knots_v.clone(),
+            p,
+            self.degree_v,
+        )?;
+
+        // Right: u-rows [first-1, ..), knots [u; p+1] ++ knots[first+p..].
+        let mut right_knots = vec![u; p + 1];
+        right_knots.extend_from_slice(&knots[first + p..]);
+        let right = Self::from_homogeneous_u(
+            &grid,
+            new_nu,
+            self.nv,
+            first - 1,
+            new_nu,
+            KnotVector::new(right_knots)?,
+            self.knots_v.clone(),
+            p,
+            self.degree_v,
+        )?;
+        Ok((left, right))
+    }
+
+    /// Inserts `v` into the v-knot vector to full multiplicity `degree_v`, then
+    /// splits into two surfaces covering `[v_min, v]` and `[v, v_max]` in v
+    /// (same u-domain). Mirrors [`NurbsCurve::split`] applied row-wise on the
+    /// homogeneous grid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `v` is not strictly inside the v-domain interior or a
+    /// sub-surface fails construction.
+    pub fn split_v(&self, v: f64) -> Result<(Self, Self)> {
+        let (_, (v_min, v_max)) = self.parameter_domain();
+        if v <= v_min + TOLERANCE || v >= v_max - TOLERANCE {
+            return Err(GeometryError::ParameterOutOfRange {
+                parameter: "v",
+                value: v,
+                min: v_min,
+                max: v_max,
+            }
+            .into());
+        }
+        let p = self.degree_v;
+        let s = self.knots_v.multiplicity(v);
+        let (knots, grid, new_nv) = refine_grid_v(self, v, p - s)?;
+
+        let first = knots
+            .iter()
+            .position(|&x| (x - v).abs() < TOLERANCE)
+            .ok_or_else(|| GeometryError::Degenerate("split knot not found".into()))?;
+
+        let mut left_knots = knots[..first + p].to_vec();
+        left_knots.push(v);
+        let left = Self::from_homogeneous_v(
+            &grid,
+            self.nu,
+            new_nv,
+            0,
+            first,
+            self.knots_u.clone(),
+            KnotVector::new(left_knots)?,
+            self.degree_u,
+            p,
+        )?;
+
+        let mut right_knots = vec![v; p + 1];
+        right_knots.extend_from_slice(&knots[first + p..]);
+        let right = Self::from_homogeneous_v(
+            &grid,
+            self.nu,
+            new_nv,
+            first - 1,
+            new_nv,
+            self.knots_u.clone(),
+            KnotVector::new(right_knots)?,
+            self.degree_u,
+            p,
+        )?;
+        Ok((left, right))
+    }
+
+    /// Rebuilds a surface from a homogeneous `(w*P, w)` u-major grid keeping
+    /// only u-rows `[u_lo, u_hi)`.
+    #[allow(clippy::too_many_arguments)]
+    fn from_homogeneous_u(
+        grid: &[(Vector3, f64)],
+        grid_nu: usize,
+        nv: usize,
+        u_lo: usize,
+        u_hi: usize,
+        knots_u: KnotVector,
+        knots_v: KnotVector,
+        degree_u: usize,
+        degree_v: usize,
+    ) -> Result<Self> {
+        debug_assert!(u_hi <= grid_nu);
+        let mut points = Vec::with_capacity((u_hi - u_lo) * nv);
+        let mut weights = Vec::with_capacity((u_hi - u_lo) * nv);
+        for i in u_lo..u_hi {
+            for j in 0..nv {
+                let (wp, w) = grid[i * nv + j];
+                if w <= 0.0 {
+                    return Err(GeometryError::Degenerate(
+                        "non-positive homogeneous weight".into(),
+                    )
+                    .into());
+                }
+                points.push(Point3::from(wp / w));
+                weights.push(w);
+            }
+        }
+        Self::new(
+            points,
+            weights,
+            u_hi - u_lo,
+            nv,
+            knots_u,
+            knots_v,
+            degree_u,
+            degree_v,
+        )
+    }
+
+    /// Rebuilds a surface from a homogeneous `(w*P, w)` u-major grid keeping
+    /// only v-columns `[v_lo, v_hi)`.
+    #[allow(clippy::too_many_arguments)]
+    fn from_homogeneous_v(
+        grid: &[(Vector3, f64)],
+        nu: usize,
+        grid_nv: usize,
+        v_lo: usize,
+        v_hi: usize,
+        knots_u: KnotVector,
+        knots_v: KnotVector,
+        degree_u: usize,
+        degree_v: usize,
+    ) -> Result<Self> {
+        let mut points = Vec::with_capacity(nu * (v_hi - v_lo));
+        let mut weights = Vec::with_capacity(nu * (v_hi - v_lo));
+        for i in 0..nu {
+            for j in v_lo..v_hi {
+                let (wp, w) = grid[i * grid_nv + j];
+                if w <= 0.0 {
+                    return Err(GeometryError::Degenerate(
+                        "non-positive homogeneous weight".into(),
+                    )
+                    .into());
+                }
+                points.push(Point3::from(wp / w));
+                weights.push(w);
+            }
+        }
+        Self::new(
+            points,
+            weights,
+            nu,
+            v_hi - v_lo,
+            knots_u,
+            knots_v,
+            degree_u,
+            degree_v,
+        )
+    }
+}
+
+/// Per-column knot insertion in u: refines every v-column (which shares
+/// `knots_u`/`degree_u`) by inserting `u` `times` times on the homogeneous
+/// grid. Returns the refined u-knot vector, the new u-major homogeneous grid,
+/// and the new u-row count. Mirrors [`NurbsCurve::insert_knot`] index
+/// arithmetic, applied column-by-column.
+// A5.1-style single-char bindings and index-driven copies follow The NURBS Book.
+#[allow(
+    clippy::many_single_char_names,
+    clippy::needless_range_loop,
+    clippy::manual_memcpy
+)]
+fn refine_grid_u(
+    s: &NurbsSurface,
+    u: f64,
+    times: usize,
+) -> Result<(Vec<f64>, Vec<(Vector3, f64)>, usize)> {
+    let p = s.degree_u;
+    let np = s.nu;
+    let nv = s.nv;
+    let r = times;
+    let mult = s.knots_u.multiplicity(u);
+    let k = s.knots_u.find_span(p, np, u);
+    let knots = s.knots_u.as_slice();
+    let new_nu = np + r;
+
+    let hw = |i: usize, j: usize| -> (Vector3, f64) {
+        let w = s.weight(i, j);
+        (s.control_point(i, j).coords * w, w)
+    };
+
+    let mut grid = vec![(Vector3::zeros(), 0.0); new_nu * nv];
+    if r == 0 {
+        for i in 0..np {
+            for j in 0..nv {
+                grid[i * nv + j] = hw(i, j);
+            }
+        }
+        return Ok((knots.to_vec(), grid, new_nu));
+    }
+
+    for j in 0..nv {
+        // Front copy: leading unaffected rows.
+        for i in 0..=(k - p) {
+            grid[i * nv + j] = hw(i, j);
+        }
+        // Back copy: trailing unaffected rows.
+        for i in (k - mult)..np {
+            grid[(i + r) * nv + j] = hw(i, j);
+        }
+        // Affected window temp array.
+        let mut work: Vec<(Vector3, f64)> = (0..=(p - mult)).map(|i| hw(k - p + i, j)).collect();
+        for jj in 1..=r {
+            let l = k - p + jj;
+            for i in 0..=(p - jj - mult) {
+                let alpha = (u - knots[l + i]) / (knots[i + k + 1] - knots[l + i]);
+                work[i] = (
+                    work[i + 1].0 * alpha + work[i].0 * (1.0 - alpha),
+                    work[i + 1].1 * alpha + work[i].1 * (1.0 - alpha),
+                );
+            }
+            grid[l * nv + j] = work[0];
+            grid[(k + r - jj - mult) * nv + j] = work[p - jj - mult];
+        }
+        let l = k - p + r;
+        for i in (l + 1)..(k - mult) {
+            grid[i * nv + j] = work[i - l];
+        }
+    }
+
+    let mut new_knots = Vec::with_capacity(knots.len() + r);
+    new_knots.extend_from_slice(&knots[..=k]);
+    new_knots.extend(std::iter::repeat_n(u, r));
+    new_knots.extend_from_slice(&knots[k + 1..]);
+    Ok((new_knots, grid, new_nu))
+}
+
+/// Per-row knot insertion in v: refines every u-row (sharing `knots_v`/
+/// `degree_v`) by inserting `v` `times` times on the homogeneous grid. Returns
+/// the refined v-knot vector, the new u-major homogeneous grid, and the new
+/// v-column count.
+#[allow(
+    clippy::many_single_char_names,
+    clippy::needless_range_loop,
+    clippy::manual_memcpy
+)]
+fn refine_grid_v(
+    s: &NurbsSurface,
+    v: f64,
+    times: usize,
+) -> Result<(Vec<f64>, Vec<(Vector3, f64)>, usize)> {
+    let p = s.degree_v;
+    let np = s.nv;
+    let nu = s.nu;
+    let r = times;
+    let mult = s.knots_v.multiplicity(v);
+    let k = s.knots_v.find_span(p, np, v);
+    let knots = s.knots_v.as_slice();
+    let new_nv = np + r;
+
+    let hw = |i: usize, j: usize| -> (Vector3, f64) {
+        let w = s.weight(i, j);
+        (s.control_point(i, j).coords * w, w)
+    };
+
+    let mut grid = vec![(Vector3::zeros(), 0.0); nu * new_nv];
+    if r == 0 {
+        for i in 0..nu {
+            for j in 0..np {
+                grid[i * new_nv + j] = hw(i, j);
+            }
+        }
+        return Ok((knots.to_vec(), grid, new_nv));
+    }
+
+    for i in 0..nu {
+        for j in 0..=(k - p) {
+            grid[i * new_nv + j] = hw(i, j);
+        }
+        for j in (k - mult)..np {
+            grid[i * new_nv + (j + r)] = hw(i, j);
+        }
+        let mut work: Vec<(Vector3, f64)> = (0..=(p - mult)).map(|jj| hw(i, k - p + jj)).collect();
+        for jj in 1..=r {
+            let l = k - p + jj;
+            for c in 0..=(p - jj - mult) {
+                let alpha = (v - knots[l + c]) / (knots[c + k + 1] - knots[l + c]);
+                work[c] = (
+                    work[c + 1].0 * alpha + work[c].0 * (1.0 - alpha),
+                    work[c + 1].1 * alpha + work[c].1 * (1.0 - alpha),
+                );
+            }
+            grid[i * new_nv + l] = work[0];
+            grid[i * new_nv + (k + r - jj - mult)] = work[p - jj - mult];
+        }
+        let l = k - p + r;
+        for c in (l + 1)..(k - mult) {
+            grid[i * new_nv + c] = work[c - l];
+        }
+    }
+
+    let mut new_knots = Vec::with_capacity(knots.len() + r);
+    new_knots.extend_from_slice(&knots[..=k]);
+    new_knots.extend(std::iter::repeat_n(v, r));
+    new_knots.extend_from_slice(&knots[k + 1..]);
+    Ok((new_knots, grid, new_nv))
 }
 
 /// Options controlling Newton point inversion on a surface.
@@ -873,6 +1239,104 @@ mod tests {
                 / (h2 * h2);
             assert!((d[2][0] - duu_fd).norm() < 1e-3, "duu at ({u},{v})");
         }
+    }
+
+    #[test]
+    fn bounding_box_contains_sampled_points() {
+        let s = quarter_cylinder_patch();
+        let (min, max) = s.bounding_box();
+        for iu in 0..=20 {
+            let u = f64::from(iu) / 20.0;
+            for iv in 0..=20 {
+                let v = f64::from(iv) / 20.0;
+                let p = s.point_at(u, v).unwrap();
+                for k in 0..3 {
+                    assert!(
+                        p.coords[k] >= min.coords[k] - 1e-12
+                            && p.coords[k] <= max.coords[k] + 1e-12,
+                        "point ({u},{v}) axis {k} escapes box"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Both sub-surfaces must agree with the original over their sub-domains.
+    fn assert_split_u_matches(s: &NurbsSurface, u: f64) {
+        let (left, right) = s.split_u(u).unwrap();
+        let ((u_min, u_max), (v_min, v_max)) = s.parameter_domain();
+        for iu in 0..=50 {
+            let uu = u_min + (u - u_min) * f64::from(iu) / 50.0;
+            for iv in 0..=10 {
+                let vv = v_min + (v_max - v_min) * f64::from(iv) / 10.0;
+                assert!(
+                    (left.point_at(uu, vv).unwrap() - s.point_at(uu, vv).unwrap()).norm() < 1e-12,
+                    "left mismatch at ({uu},{vv})"
+                );
+            }
+        }
+        for iu in 0..=50 {
+            let uu = u + (u_max - u) * f64::from(iu) / 50.0;
+            for iv in 0..=10 {
+                let vv = v_min + (v_max - v_min) * f64::from(iv) / 10.0;
+                assert!(
+                    (right.point_at(uu, vv).unwrap() - s.point_at(uu, vv).unwrap()).norm() < 1e-12,
+                    "right mismatch at ({uu},{vv})"
+                );
+            }
+        }
+    }
+
+    fn assert_split_v_matches(s: &NurbsSurface, v: f64) {
+        let (left, right) = s.split_v(v).unwrap();
+        let ((u_min, u_max), (v_min, v_max)) = s.parameter_domain();
+        for iv in 0..=50 {
+            let vv = v_min + (v - v_min) * f64::from(iv) / 50.0;
+            for iu in 0..=10 {
+                let uu = u_min + (u_max - u_min) * f64::from(iu) / 10.0;
+                assert!(
+                    (left.point_at(uu, vv).unwrap() - s.point_at(uu, vv).unwrap()).norm() < 1e-12,
+                    "left mismatch at ({uu},{vv})"
+                );
+            }
+        }
+        for iv in 0..=50 {
+            let vv = v + (v_max - v) * f64::from(iv) / 50.0;
+            for iu in 0..=10 {
+                let uu = u_min + (u_max - u_min) * f64::from(iu) / 10.0;
+                assert!(
+                    (right.point_at(uu, vv).unwrap() - s.point_at(uu, vv).unwrap()).norm() < 1e-12,
+                    "right mismatch at ({uu},{vv})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_u_halves_match_bilinear() {
+        assert_split_u_matches(&bilinear_patch(), 0.4);
+    }
+
+    #[test]
+    fn split_v_halves_match_bilinear() {
+        assert_split_v_matches(&bilinear_patch(), 0.6);
+    }
+
+    #[test]
+    fn split_u_halves_match_rational_cylinder() {
+        assert_split_u_matches(&quarter_cylinder_patch(), 0.5);
+        assert_split_u_matches(&quarter_cylinder_patch(), 0.3);
+    }
+
+    #[test]
+    fn split_v_halves_match_parabolic() {
+        assert_split_v_matches(&parabolic_patch(), 0.5);
+    }
+
+    #[test]
+    fn split_u_rejects_boundary() {
+        assert!(bilinear_patch().split_u(0.0).is_err());
+        assert!(bilinear_patch().split_u(1.0).is_err());
     }
 
     #[test]
