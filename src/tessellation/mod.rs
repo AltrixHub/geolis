@@ -9,7 +9,10 @@ mod tessellate_with_holes;
 pub use stroke_style::{LineJoin, StrokeStyle};
 pub use tessellate_curve::TessellateCurve;
 pub use tessellate_face::TessellateFace;
-pub use tessellate_nurbs::{tessellate_nurbs_curve, CurveTessellationOptions};
+pub use tessellate_nurbs::{
+    tessellate_nurbs_curve, tessellate_nurbs_surface, CurveTessellationOptions,
+    SurfaceTessellationOptions,
+};
 pub use tessellate_solid::TessellateSolid;
 pub use tessellate_stroke::TessellateStroke;
 pub use tessellate_with_holes::TessellateWithHoles;
