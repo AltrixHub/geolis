@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{OperationError, Result};
 use crate::geometry::surface::Plane;
 use crate::math::polygon_3d::{point_in_polygon_3d, polygon_area_3d};
 use crate::math::{Point3, Vector3, TOLERANCE};
@@ -39,6 +39,12 @@ pub fn split_face(
 ) -> Result<Vec<FaceFragment>> {
     let face = store.face(face_id)?;
     let FaceSurface::Plane(ref plane) = face.surface else {
+        if matches!(face.surface, FaceSurface::Nurbs(_)) {
+            return Err(OperationError::Failed(
+                "boolean operations on NURBS faces are not yet supported".into(),
+            )
+            .into());
+        }
         todo!("Face splitting for non-planar faces")
     };
 

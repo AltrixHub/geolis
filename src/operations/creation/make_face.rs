@@ -65,6 +65,7 @@ impl MakeFace {
             outer_wire: self.outer_wire,
             inner_wires: self.inner_wires.clone(),
             same_sense: true,
+            trim: None,
         });
 
         Ok(face_id)

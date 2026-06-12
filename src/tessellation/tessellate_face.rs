@@ -11,7 +11,7 @@ use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
 use crate::topology::{EdgeCurve, FaceId, FaceSurface, TopologyStore, WireId};
 
-use super::{TessellationMode, TessellationParams, TriangleMesh};
+use super::{SurfaceTessellationOptions, TessellationMode, TessellationParams, TriangleMesh};
 
 /// Tessellates a face into a triangle mesh.
 pub struct TessellateFace {
@@ -148,6 +148,10 @@ impl TessellateFace {
                     same_sense,
                     &self.params,
                 )
+            }
+            FaceSurface::Nurbs(nurbs) => {
+                let options = SurfaceTessellationOptions::default();
+                super::tessellate_nurbs_surface(nurbs, &options)
             }
         }
     }
@@ -765,6 +769,9 @@ fn collect_wire_points_tessellated(
                 let n = tessellate_edge_segments(ellipse.semi_major(), t_start, t_end, params);
                 add_curve_samples(&mut points, ellipse, t_start, t_end, n)?;
             }
+            EdgeCurve::Nurbs(nurbs) => {
+                add_curve_samples(&mut points, nurbs, t_start, t_end, params.max_segments)?;
+            }
         }
     }
 
@@ -1098,6 +1105,7 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
         })
     }
 
@@ -1165,6 +1173,7 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
         })
     }
 
@@ -1243,6 +1252,7 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
         })
     }
 

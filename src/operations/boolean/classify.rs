@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{OperationError, Result};
 use crate::math::intersect_3d::{line_plane_intersect, LinePlaneRelation};
 use crate::math::polygon_3d::point_in_polygon_3d;
 use crate::math::{Point3, Vector3, TOLERANCE};
@@ -66,6 +66,12 @@ fn collect_face_data(
     for &face_id in face_ids {
         let face = store.face(face_id)?;
         let FaceSurface::Plane(ref plane) = face.surface else {
+            if matches!(face.surface, FaceSurface::Nurbs(_)) {
+                return Err(OperationError::Failed(
+                    "boolean operations on NURBS faces are not yet supported".into(),
+                )
+                .into());
+            }
             todo!("Point classification for non-planar faces")
         };
 

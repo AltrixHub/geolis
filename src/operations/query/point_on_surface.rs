@@ -30,6 +30,7 @@ impl PointOnSurface {
             FaceSurface::Cone(cone) => cone.evaluate(self.u, self.v),
             FaceSurface::Sphere(sphere) => sphere.evaluate(self.u, self.v),
             FaceSurface::Torus(torus) => torus.evaluate(self.u, self.v),
+            FaceSurface::Nurbs(nurbs) => nurbs.evaluate(self.u, self.v),
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{OperationError, Result};
 use crate::math::intersect_3d::{plane_plane_intersect, PlanePairRelation};
 use crate::math::polygon_3d::clip_segment_to_polygon;
 use crate::math::{Point3, TOLERANCE};
@@ -30,9 +30,21 @@ pub fn intersect_face_face(
     let fb = store.face(face_b)?;
 
     let FaceSurface::Plane(ref plane_a) = fa.surface else {
+        if matches!(fa.surface, FaceSurface::Nurbs(_)) {
+            return Err(OperationError::Failed(
+                "boolean operations on NURBS faces are not yet supported".into(),
+            )
+            .into());
+        }
         todo!("Face intersection for non-planar faces")
     };
     let FaceSurface::Plane(ref plane_b) = fb.surface else {
+        if matches!(fb.surface, FaceSurface::Nurbs(_)) {
+            return Err(OperationError::Failed(
+                "boolean operations on NURBS faces are not yet supported".into(),
+            )
+            .into());
+        }
         todo!("Face intersection for non-planar faces")
     };
 

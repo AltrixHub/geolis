@@ -3,6 +3,7 @@ pub mod edge;
 pub mod face;
 pub mod shell;
 pub mod solid;
+pub mod trim;
 pub mod vertex;
 pub mod wire;
 
@@ -10,6 +11,7 @@ pub use edge::{EdgeCurve, EdgeData, EdgeId};
 pub use face::{FaceData, FaceId, FaceSurface};
 pub use shell::{ShellData, ShellId};
 pub use solid::{SolidData, SolidId};
+pub use trim::{FaceTrim, TrimLoop};
 pub use vertex::{VertexData, VertexId};
 pub use wire::{OrientedEdge, WireData, WireId};
 

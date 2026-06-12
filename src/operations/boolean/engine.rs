@@ -295,6 +295,12 @@ fn copy_solid(store: &mut TopologyStore, solid_id: SolidId) -> Result<SolidId> {
         let inner_polygons = collect_inner_wire_polygons(store, *face_id)?;
         let face = store.face(*face_id)?;
         let FaceSurface::Plane(ref plane) = face.surface else {
+            if matches!(face.surface, FaceSurface::Nurbs(_)) {
+                return Err(OperationError::Failed(
+                    "boolean operations on NURBS faces are not yet supported".into(),
+                )
+                .into());
+            }
             todo!("Boolean operations for non-planar faces")
         };
 
@@ -377,6 +383,41 @@ mod tests {
         assert_eq!(
             faces_with_holes, 2,
             "expected 2 faces with inner wires (holes)"
+        );
+    }
+
+    #[test]
+    fn nurbs_faced_solid_returns_unsupported_error_not_panic() {
+        use crate::geometry::nurbs::{KnotVector, NurbsSurface};
+
+        let mut store = TopologyStore::new();
+        let a = make_box(&mut store, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0);
+        let b = make_box(&mut store, 1.0, 1.0, -0.5, 2.0, 2.0, 5.0);
+
+        // Swap one face of solid `a` to a NURBS surface so the boolean pipeline
+        // reaches the explicit unsupported path instead of a planar one.
+        let face_a = collect_solid_faces(&store, a).unwrap()[0];
+        let patch = NurbsSurface::from_unweighted(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, 4.0, 0.0),
+                Point3::new(4.0, 0.0, 0.0),
+                Point3::new(4.0, 4.0, 0.0),
+            ],
+            2,
+            2,
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+        store.face_mut(face_a).unwrap().surface = FaceSurface::Nurbs(patch);
+
+        let result = boolean_execute(&mut store, a, b, BooleanOp::Subtract);
+        assert!(
+            result.is_err(),
+            "boolean on a NURBS-faced solid must return an error, not succeed"
         );
     }
 

@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{OperationError, Result};
 use crate::math::Point3;
 use crate::topology::{EdgeCurve, EdgeId, TopologyStore};
 
@@ -44,6 +44,10 @@ impl ClosestPointOnCurve {
             EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                 todo!("ClosestPointOnCurve for Circle/Ellipse")
             }
+            EdgeCurve::Nurbs(_) => Err(OperationError::Failed(
+                "closest point on NURBS edges is not yet supported".into(),
+            )
+            .into()),
         }
     }
 }

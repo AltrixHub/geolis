@@ -53,6 +53,14 @@ impl TessellateCurve {
                     &self.params,
                 )
             }
+            EdgeCurve::Nurbs(nurbs) => {
+                let options = super::CurveTessellationOptions {
+                    chord_tolerance: self.params.tolerance,
+                    ..super::CurveTessellationOptions::default()
+                };
+                let points = super::tessellate_nurbs_curve(nurbs, &options)?;
+                Ok(Polyline { points })
+            }
         }
     }
 }
