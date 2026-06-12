@@ -397,14 +397,22 @@ impl<const D: usize> NurbsCurve<D> {
     /// propagated rather than masked by a silent fallback. `t == 0` returns a
     /// clone.
     // A5.9: single-char bindings (a, b, ph, mh, kind, oldr, ...) and the
-    // index-driven Bezier-segment loops follow The NURBS Book notation.
+    // index-driven Bezier-segment loops follow The NURBS Book notation. The
+    // book's signed `r` (negative when a knot is over-multiple) forces the
+    // isize/usize conversions; the indices are bounded by the buffer sizes by
+    // construction, so the sign/wrap casts are exact in range.
     #[allow(
         clippy::many_single_char_names,
         clippy::needless_range_loop,
         clippy::too_many_lines,
-        clippy::similar_names
+        clippy::similar_names,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
     )]
     pub fn elevate_degree(&self, t: usize) -> Result<Self> {
+        // Homogeneous control points (w * P, w).
+        type H<const D: usize> = (SVector<f64, D>, f64);
+
         if t == 0 {
             return Ok(self.clone());
         }
@@ -412,8 +420,6 @@ impl<const D: usize> NurbsCurve<D> {
         let ph = p + t;
         let ph2 = ph / 2;
 
-        // Homogeneous control points (w * P, w).
-        type H<const D: usize> = (SVector<f64, D>, f64);
         let hw = |i: usize| -> H<D> {
             (
                 self.control_points[i].coords * self.weights[i],
@@ -488,7 +494,11 @@ impl<const D: usize> NurbsCurve<D> {
 
             // Insert knot u[b] r times to make the next segment.
             let lbz = if oldr > 0 { (oldr + 2) as usize / 2 } else { 1 };
-            let rbz = if r > 0 { ph - (r as usize + 1) / 2 } else { ph };
+            let rbz = if r > 0 {
+                ph - (r as usize).div_ceil(2)
+            } else {
+                ph
+            };
 
             if r > 0 {
                 let r_us = r as usize;
@@ -569,10 +579,9 @@ impl<const D: usize> NurbsCurve<D> {
 
             // Set up for the next pass through the loop.
             if b < m {
-                for j in 0..(r as usize) {
-                    bpts[j] = next_bpts[j];
-                }
-                for j in (r as usize)..=p {
+                let r_us = r as usize;
+                bpts[..r_us].copy_from_slice(&next_bpts[..r_us]);
+                for j in r_us..=p {
                     bpts[j] = hw(b - p + j);
                 }
                 a = b;

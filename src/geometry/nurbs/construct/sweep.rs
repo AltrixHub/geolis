@@ -1,5 +1,4 @@
 use crate::error::{GeometryError, Result};
-use crate::geometry::curve::Curve;
 use crate::math::{Point3, Vector3, TOLERANCE};
 
 use crate::geometry::nurbs::{NurbsCurve3D, NurbsSurface};
@@ -181,6 +180,7 @@ fn initial_normal(tangent: &Vector3) -> Result<Vector3> {
 #[allow(clippy::unwrap_used, clippy::cast_precision_loss)]
 mod tests {
     use super::*;
+    use crate::geometry::curve::Curve;
     use crate::geometry::nurbs::KnotVector;
 
     fn unit_circle_xy() -> NurbsCurve3D {
