@@ -292,8 +292,7 @@ fn draw_case(
     if let Ok(footprints) = wall.execute_faces() {
         // Render every footprint ring: outer in green, holes in blue.
         let rings = footprints.iter().flat_map(|fp| {
-            std::iter::once((fp.outer(), GREEN))
-                .chain(fp.holes().iter().map(|h| (h, BLUE)))
+            std::iter::once((fp.outer(), GREEN)).chain(fp.holes().iter().map(|h| (h, BLUE)))
         });
         for (ring, color) in rings {
             let p: Vec<Point3> = ring
