@@ -12,6 +12,7 @@
 //! [`NurbsSurface`]: super::NurbsSurface
 
 mod circle;
+mod circle_uv;
 mod extrude;
 mod interpolate;
 mod loft;

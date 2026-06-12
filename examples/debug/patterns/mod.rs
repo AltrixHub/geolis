@@ -1,8 +1,10 @@
 pub mod boolean;
 pub mod extrude;
 pub mod face_creation;
+pub mod nurbs_constructed;
 pub mod nurbs_curves;
 pub mod nurbs_surface;
+pub mod nurbs_trimmed;
 pub mod primitives;
 pub mod revolve;
 pub mod shell;
@@ -40,6 +42,8 @@ pub const PATTERNS: &[&str] = &[
     "shell",
     "nurbs_curves",
     "nurbs_surface",
+    "nurbs_constructed",
+    "nurbs_trimmed",
 ];
 
 /// Register meshes for the named pattern. Returns `true` if found.
@@ -95,6 +99,14 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "nurbs_surface" => {
             nurbs_surface::register(storage);
+            true
+        }
+        "nurbs_constructed" => {
+            nurbs_constructed::register(storage);
+            true
+        }
+        "nurbs_trimmed" => {
+            nurbs_trimmed::register(storage);
             true
         }
         _ => false,
@@ -246,6 +258,15 @@ pub fn register_edges(
                         );
                     }
                     EdgeCurve::Ellipse(curve) => {
+                        tessellate_curve_edge(
+                            &mut vertices,
+                            curve,
+                            edge.t_start,
+                            edge.t_end,
+                            CURVE_SEGMENTS,
+                        );
+                    }
+                    EdgeCurve::Nurbs(curve) => {
                         tessellate_curve_edge(
                             &mut vertices,
                             curve,
