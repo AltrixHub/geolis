@@ -24,11 +24,13 @@ mod bbox;
 mod curve_curve;
 mod curve_surface;
 mod surface_plane;
+mod surface_surface;
 mod types;
 
 pub use curve_curve::intersect_curves_2d;
 pub use curve_surface::intersect_curve_surface;
 pub use surface_plane::intersect_surface_plane;
+pub use surface_surface::intersect_surfaces;
 pub use types::{
     CurveCurveIntersection2D, CurveSurfaceIntersection, IntersectionOptions,
     SurfaceIntersectionCurve,

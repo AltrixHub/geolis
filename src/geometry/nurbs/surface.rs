@@ -542,7 +542,7 @@ impl NurbsSurface {
         }
         let p = self.degree_u;
         let s = self.knots_u.multiplicity(u);
-        let (knots, grid, new_nu) = refine_grid_u(self, u, p - s)?;
+        let (knots, grid, new_nu) = refine_grid_u(self, u, p - s);
 
         let first = knots
             .iter()
@@ -603,7 +603,7 @@ impl NurbsSurface {
         }
         let p = self.degree_v;
         let s = self.knots_v.multiplicity(v);
-        let (knots, grid, new_nv) = refine_grid_v(self, v, p - s)?;
+        let (knots, grid, new_nv) = refine_grid_v(self, v, p - s);
 
         let first = knots
             .iter()
@@ -724,6 +724,10 @@ impl NurbsSurface {
     }
 }
 
+/// A refined knot vector, the homogeneous `(w*P, w)` u-major grid it produced,
+/// and the new control-point count along the refined axis.
+type RefinedGrid = (Vec<f64>, Vec<(Vector3, f64)>, usize);
+
 /// Per-column knot insertion in u: refines every v-column (which shares
 /// `knots_u`/`degree_u`) by inserting `u` `times` times on the homogeneous
 /// grid. Returns the refined u-knot vector, the new u-major homogeneous grid,
@@ -735,11 +739,7 @@ impl NurbsSurface {
     clippy::needless_range_loop,
     clippy::manual_memcpy
 )]
-fn refine_grid_u(
-    s: &NurbsSurface,
-    u: f64,
-    times: usize,
-) -> Result<(Vec<f64>, Vec<(Vector3, f64)>, usize)> {
+fn refine_grid_u(s: &NurbsSurface, u: f64, times: usize) -> RefinedGrid {
     let p = s.degree_u;
     let np = s.nu;
     let nv = s.nv;
@@ -761,7 +761,7 @@ fn refine_grid_u(
                 grid[i * nv + j] = hw(i, j);
             }
         }
-        return Ok((knots.to_vec(), grid, new_nu));
+        return (knots.to_vec(), grid, new_nu);
     }
 
     for j in 0..nv {
@@ -797,7 +797,7 @@ fn refine_grid_u(
     new_knots.extend_from_slice(&knots[..=k]);
     new_knots.extend(std::iter::repeat_n(u, r));
     new_knots.extend_from_slice(&knots[k + 1..]);
-    Ok((new_knots, grid, new_nu))
+    (new_knots, grid, new_nu)
 }
 
 /// Per-row knot insertion in v: refines every u-row (sharing `knots_v`/
@@ -809,11 +809,7 @@ fn refine_grid_u(
     clippy::needless_range_loop,
     clippy::manual_memcpy
 )]
-fn refine_grid_v(
-    s: &NurbsSurface,
-    v: f64,
-    times: usize,
-) -> Result<(Vec<f64>, Vec<(Vector3, f64)>, usize)> {
+fn refine_grid_v(s: &NurbsSurface, v: f64, times: usize) -> RefinedGrid {
     let p = s.degree_v;
     let np = s.nv;
     let nu = s.nu;
@@ -835,7 +831,7 @@ fn refine_grid_v(
                 grid[i * new_nv + j] = hw(i, j);
             }
         }
-        return Ok((knots.to_vec(), grid, new_nv));
+        return (knots.to_vec(), grid, new_nv);
     }
 
     for i in 0..nu {
@@ -868,7 +864,7 @@ fn refine_grid_v(
     new_knots.extend_from_slice(&knots[..=k]);
     new_knots.extend(std::iter::repeat_n(v, r));
     new_knots.extend_from_slice(&knots[k + 1..]);
-    Ok((new_knots, grid, new_nv))
+    (new_knots, grid, new_nv)
 }
 
 /// Options controlling Newton point inversion on a surface.
