@@ -1,3 +1,8 @@
+//! NURBS curves and surfaces.
+//!
+//! Algorithms follow Piegl & Tiller, *The NURBS Book* (2nd ed.); function
+//! documentation cites algorithm numbers (e.g. A2.2, A4.3).
+
 mod basis;
 mod curve;
 mod knot;
