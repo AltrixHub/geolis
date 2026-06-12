@@ -274,6 +274,14 @@ fn march_direction(
 
         // Boundary termination: either surface's parameters landed on a domain
         // edge (the predictor walked out and the clamp pinned it there).
+        //
+        // Limitation: surfaces that are geometrically closed but parametrically
+        // non-periodic (e.g. an extruded full circle with a UV seam) terminate
+        // here at the seam instead of wrapping across it, so `closed` stays
+        // false even though the branch geometrically returns to its start.
+        // Consumers needing seam-aware closure must reclassify the open branch
+        // (see `operations::boolean::nurbs::loops`). Future work: periodic-domain
+        // wrapping in the marcher.
         let on_boundary = at_boundary(a, next.ua, next.va) || at_boundary(b, next.ub, next.vb);
 
         // Closure.

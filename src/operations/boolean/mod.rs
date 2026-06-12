@@ -4,6 +4,7 @@ mod engine;
 mod face_intersection;
 mod intersect_op;
 mod merge;
+mod nurbs;
 mod select;
 mod split;
 mod subtract;

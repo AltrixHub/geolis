@@ -1,6 +1,7 @@
 pub mod boolean;
 pub mod extrude;
 pub mod face_creation;
+pub mod nurbs_boolean;
 pub mod nurbs_constructed;
 pub mod nurbs_curves;
 pub mod nurbs_surface;
@@ -44,6 +45,7 @@ pub const PATTERNS: &[&str] = &[
     "nurbs_surface",
     "nurbs_constructed",
     "nurbs_trimmed",
+    "nurbs_boolean",
 ];
 
 /// Register meshes for the named pattern. Returns `true` if found.
@@ -107,6 +109,10 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "nurbs_trimmed" => {
             nurbs_trimmed::register(storage);
+            true
+        }
+        "nurbs_boolean" => {
+            nurbs_boolean::register(storage);
             true
         }
         _ => false,
