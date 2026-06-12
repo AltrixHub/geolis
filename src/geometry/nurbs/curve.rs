@@ -34,7 +34,7 @@ impl<const D: usize> NurbsCurve<D> {
     ///
     /// Returns an error if `degree < 1`, there are fewer than `degree + 1`
     /// control points, the weight count differs from the control-point count,
-    /// any weight is not strictly positive, or the knot count is not
+    /// any weight is not strictly positive and finite, or the knot count is not
     /// `control_points.len() + degree + 1`.
     pub fn new(
         control_points: Vec<Point<f64, D>>,
@@ -61,10 +61,11 @@ impl<const D: usize> NurbsCurve<D> {
             ))
             .into());
         }
-        if weights.iter().any(|&w| w < TOLERANCE) {
-            return Err(
-                GeometryError::Degenerate("weights must be strictly positive".into()).into(),
-            );
+        if weights.iter().any(|&w| w <= 0.0 || !w.is_finite()) {
+            return Err(GeometryError::Degenerate(
+                "weights must be strictly positive and finite".into(),
+            )
+            .into());
         }
         let expected_knots = control_points.len() + degree + 1;
         if knots.len() != expected_knots {
@@ -176,6 +177,7 @@ impl<const D: usize> NurbsCurve<D> {
     /// # Errors
     ///
     /// Returns an error if `t` is outside the parameter domain.
+    // TODO(perf): hot-path callers (intersection marching) may want an allocation-free variant.
     pub fn derivatives(&self, t: f64, order: usize) -> Result<Vec<SVector<f64, D>>> {
         use super::basis::{basis_function_derivatives, binomial};
 
@@ -255,16 +257,20 @@ impl<const D: usize> NurbsCurve<D> {
         };
 
         let mut new_hp = vec![(SVector::<f64, D>::zeros(), 0.0); np + r];
+        // Front copy: unaffected leading points new_hp[0..=k-p].
         for i in 0..=(k - p) {
             new_hp[i] = hw(i);
         }
+        // Back copy: unaffected trailing points new_hp[i+r] for i in (k-s)..np.
         for i in (k - s)..np {
             new_hp[i + r] = hw(i);
         }
 
+        // work: the book's Rw temp array over the affected p-s+1 points.
         let mut work: Vec<(SVector<f64, D>, f64)> = (0..=(p - s)).map(|i| hw(k - p + i)).collect();
         for j in 1..=r {
             let l = k - p + j;
+            // Per-insertion alpha blend over the affected window.
             for i in 0..=(p - j - s) {
                 let alpha = (u - knots[l + i]) / (knots[i + k + 1] - knots[l + i]);
                 work[i] = (
@@ -272,10 +278,11 @@ impl<const D: usize> NurbsCurve<D> {
                     work[i + 1].1 * alpha + work[i].1 * (1.0 - alpha),
                 );
             }
+            // Two boundary writes bracketing this insertion.
             new_hp[l] = work[0];
             new_hp[k + r - j - s] = work[p - j - s];
         }
-        // Remaining middle section
+        // Remaining-middle copy of the still-untouched work entries.
         let l = k - p + r;
         for i in (l + 1)..(k - s) {
             new_hp[i] = work[i - l];
@@ -330,6 +337,8 @@ impl<const D: usize> NurbsCurve<D> {
         )?;
 
         // Right: control points [first-1, ..], knots [u; p+1] ++ knots[first+p..]
+        // The domain-interior check guarantees `u` is an interior knot after refinement,
+        // so first >= p + 1 >= 2 and `first - 1` cannot underflow.
         let mut right_knots = vec![u; p + 1];
         right_knots.extend_from_slice(&knots[first + p..]);
         let right = Self::new(
@@ -343,28 +352,29 @@ impl<const D: usize> NurbsCurve<D> {
     }
 
     /// Returns the curve with reversed parameterization (same shape).
-    #[must_use]
-    pub fn reverse(&self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reconstructing the knot vector or curve fails. This
+    /// path is unreachable for a valid curve (the reflected-reversed knots are
+    /// non-decreasing and the structural invariants are preserved), but the
+    /// error is propagated rather than masked by a silent fallback.
+    pub fn reverse(&self) -> Result<Self> {
         let knots = self.knots.as_slice();
         let (a, b) = self.parameter_domain();
-        let mut new_knots: Vec<f64> = knots.iter().rev().map(|&k| a + b - k).collect();
-        // Guard against floating drift breaking monotonicity at equal knots
-        for i in 1..new_knots.len() {
-            if new_knots[i] < new_knots[i - 1] {
-                new_knots[i] = new_knots[i - 1];
-            }
-        }
+        // With `sum` computed once, `sum - k` is monotone under IEEE subtraction:
+        // reversing a non-decreasing sequence yields exactly non-decreasing knots,
+        // so no drift-clamp is needed.
+        let sum = a + b;
+        let new_knots: Vec<f64> = knots.iter().rev().map(|&k| sum - k).collect();
         let control_points: Vec<_> = self.control_points.iter().rev().copied().collect();
         let weights: Vec<_> = self.weights.iter().rev().copied().collect();
-        // Invariants are preserved by construction; avoid unwrap by falling
-        // back to self on the (unreachable) error path.
         Self::new(
             control_points,
             weights,
-            KnotVector::new(new_knots).unwrap_or_else(|_| self.knots.clone()),
+            KnotVector::new(new_knots)?,
             self.degree,
         )
-        .unwrap_or_else(|_| self.clone())
     }
 }
 
@@ -375,8 +385,10 @@ fn dehomogenize<const D: usize>(
     let mut points = Vec::with_capacity(hp.len());
     let mut weights = Vec::with_capacity(hp.len());
     for (wp, w) in hp {
-        if w.abs() < TOLERANCE {
-            return Err(GeometryError::Degenerate("zero homogeneous weight".into()).into());
+        // Convex combination of strictly positive weights is strictly positive,
+        // so this is a defensive guard rather than a tolerance question.
+        if *w <= 0.0 {
+            return Err(GeometryError::Degenerate("non-positive homogeneous weight".into()).into());
         }
         points.push(Point::from(wp / *w));
         weights.push(*w);
@@ -474,6 +486,26 @@ mod tests {
             1,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tiny_weight_constructs_and_evaluates_finite() {
+        let c = NurbsCurve3D::new(
+            vec![
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ],
+            vec![1.0, 1e-12, 1.0],
+            KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap(),
+            2,
+        )
+        .unwrap();
+        for i in 0..=10 {
+            let t = f64::from(i) / 10.0;
+            let p = c.point_at(t).unwrap();
+            assert!(p.coords.iter().all(|c| c.is_finite()), "t={t}");
+        }
     }
 
     #[test]
@@ -629,7 +661,7 @@ mod tests {
     #[test]
     fn reverse_traverses_backwards() {
         let c = quarter_circle();
-        let r = c.reverse();
+        let r = c.reverse().unwrap();
         for i in 0..=20 {
             let t = f64::from(i) / 20.0;
             assert!((r.point_at(1.0 - t).unwrap() - c.point_at(t).unwrap()).norm() < 1e-12);
