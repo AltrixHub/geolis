@@ -3,8 +3,10 @@
 //! Renders four adaptively tessellated surfaces, one per constructor:
 //! 1. extrude  — a circle swept linearly into a cylinder shell,
 //! 2. revolve  — a profile line revolved into a cone,
-//! 3. loft     — three stacked section curves blended into a surface,
-//! 4. sweep    — a circle profile swept along a curved rail.
+//! 3. loft     — six sinusoidally sized circle sections skinned into a
+//!    bulging/necking vase silhouette,
+//! 4. sweep    — a circular profile carried along a helical coil rail
+//!    (radius 2, height 6, 2.5 turns).
 
 use geolis::geometry::nurbs::{NurbsCurve3D, NurbsSurface};
 use geolis::math::{Point3, Vector3};
@@ -62,43 +64,63 @@ fn revolved_cone() -> Option<NurbsSurface> {
     .ok()
 }
 
-/// Lofted surface from three interpolated section curves at rising heights.
+/// Wavy vase: six exact NURBS circle sections stacked along +Z, with radii
+/// modulated by a sine so the silhouette bulges and necks.
 fn lofted_surface() -> Option<NurbsSurface> {
-    let section = |z: f64, bow: f64| -> Option<NurbsCurve3D> {
-        let (curve, _) = NurbsCurve3D::interpolate(
-            &[
-                Point3::new(0.0, 0.0, z),
-                Point3::new(2.0, bow, z),
-                Point3::new(4.0, 0.0, z),
-            ],
-            2,
-        )
-        .ok()?;
-        Some(curve)
-    };
-    let sections = [section(0.0, 0.0)?, section(2.5, 2.0)?, section(5.0, 0.0)?];
+    let mut sections = Vec::with_capacity(6);
+    for k in 0..6 {
+        let z = 1.2 * f64::from(k);
+        let radius = 1.6 + 0.6 * (f64::from(k) * 1.4).sin();
+        let circle =
+            NurbsCurve3D::circle(Point3::new(0.0, 0.0, z), radius, Vector3::z(), Vector3::x())
+                .ok()?;
+        sections.push(circle);
+    }
+    // Circles share degree/knots, so the loft interpolates them exactly.
     NurbsSurface::loft(&sections, None).ok()
 }
 
-/// Swept surface: a circular profile carried along a curved rail.
+/// Helical coil: a small circular profile swept along a helix rail.
+///
+/// The rail is interpolated through helix samples `(2cosθ, 2sinθ, h·θ/θ_max)`
+/// for θ ∈ [0, 2.5·2π]. The sweep rigidly transports the profile from the rail
+/// start with rotation-minimizing frames, so the profile is centred at the rail
+/// start point in the plane perpendicular to the rail start tangent.
 fn swept_surface() -> Option<NurbsSurface> {
-    let profile = NurbsCurve3D::circle(
-        Point3::new(0.0, 0.0, 0.0),
-        0.8,
-        Vector3::new(0.0, 0.0, 1.0),
-        Vector3::new(1.0, 0.0, 0.0),
-    )
-    .ok()?;
-    let (rail, _) = NurbsCurve3D::interpolate(
-        &[
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(2.0, 0.0, 3.0),
-            Point3::new(5.0, 0.0, 4.0),
-            Point3::new(7.0, 0.0, 1.0),
-        ],
-        3,
-    )
-    .ok()?;
+    const HELIX_RADIUS: f64 = 2.0;
+    const HELIX_HEIGHT: f64 = 6.0;
+    const PROFILE_RADIUS: f64 = 0.5;
+    const TURNS: f64 = 2.5;
+    let theta_max = TURNS * std::f64::consts::TAU;
+
+    // ~24 samples along the helix for the interpolated rail.
+    let samples = 24;
+    let mut points = Vec::with_capacity(samples);
+    for i in 0..samples {
+        let theta = theta_max * (i as f64) / ((samples - 1) as f64);
+        points.push(Point3::new(
+            HELIX_RADIUS * theta.cos(),
+            HELIX_RADIUS * theta.sin(),
+            HELIX_HEIGHT * theta / theta_max,
+        ));
+    }
+    let (rail, _) = NurbsCurve3D::interpolate(&points, 3).ok()?;
+
+    // Centre the profile at the rail start, plane perpendicular to the start
+    // tangent (sweep transports control points relative to the rail start).
+    let (t0, _) = rail.parameter_domain();
+    let ders = rail.derivatives(t0, 1).ok()?;
+    let start = Point3::from(ders[0]);
+    let tangent = ders[1].normalize();
+    // Any direction perpendicular to the tangent works as the circle's ref dir.
+    let seed = if tangent.dot(&Vector3::z()).abs() < 0.9 {
+        Vector3::z()
+    } else {
+        Vector3::x()
+    };
+    let perp = (seed - tangent * tangent.dot(&seed)).normalize();
+    let profile = NurbsCurve3D::circle(start, PROFILE_RADIUS, tangent, perp).ok()?;
+
     NurbsSurface::sweep(&profile, &rail).ok()
 }
 
