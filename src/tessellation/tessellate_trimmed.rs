@@ -438,6 +438,45 @@ mod tests {
     }
 
     #[test]
+    fn trimmed_mesh_is_manifold_along_boundaries() {
+        let surface = unit_patch();
+        let outer = rect_loop(0.0, 0.0, 1.0, 1.0, true);
+        let hole_segments = 32;
+        let hole = circle_loop_cw(0.5, 0.5, 0.2, hole_segments);
+        let trim = FaceTrim::new(outer, vec![hole]);
+        let mesh =
+            tessellate_trimmed_nurbs_face(&surface, &trim, &SurfaceTessellationOptions::default())
+                .unwrap();
+
+        // Undirected edge -> use-count over every triangle.
+        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &mesh.indices {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        // Manifold: every edge is shared by exactly 1 (boundary) or 2 (interior)
+        // triangles; nothing is referenced 3+ times.
+        for (&(a, b), &c) in &counts {
+            assert!(
+                c == 1 || c == 2,
+                "edge ({a},{b}) used {c} times (expected 1 or 2)"
+            );
+        }
+
+        // Boundary edges (used exactly once) cover both the hole ring and the
+        // outer rectangle ring, so there are at least as many as the hole's
+        // polyline segment count.
+        let boundary = counts.values().filter(|&&c| c == 1).count();
+        assert!(
+            boundary >= hole_segments,
+            "boundary edge count {boundary} below hole segment count {hole_segments}"
+        );
+    }
+
+    #[test]
     fn hole_larger_than_domain_is_rejected() {
         let surface = unit_patch();
         let outer = rect_loop(0.0, 0.0, 1.0, 1.0, true);
