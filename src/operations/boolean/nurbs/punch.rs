@@ -198,7 +198,7 @@ fn dedup3d(pts: &[Point3]) -> Vec<Point3> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 mod tests {
     use super::*;
     use crate::math::Point3;
