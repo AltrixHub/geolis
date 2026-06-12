@@ -14,10 +14,6 @@
 //!   segment across that gap. The gap is one marching step wide, so the induced
 //!   error is sub-step and bounded.
 
-// Staged module: `full_domain_outer_loop` and `punch_loop` are consumed by
-// `assemble` + engine routing in Task 5. Allowed until then.
-#![allow(dead_code)]
-
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::math::{Point2, Point3, TOLERANCE};

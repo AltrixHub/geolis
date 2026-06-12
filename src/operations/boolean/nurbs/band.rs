@@ -33,9 +33,6 @@
 //! Subtract pushes the band normals INTO the hole, so the band face is built
 //! with `same_sense = false`.
 
-// Staged module: `build_band_face` is consumed by `assemble` in Task 5.
-#![allow(dead_code)]
-
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsSurface};
 use crate::math::{Point2, TOLERANCE};

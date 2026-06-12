@@ -19,6 +19,37 @@
 //! 3. [`band`] — build the tool's hole-wall face between each loop pair.
 //! 4. [`assemble`] — collect result faces into a new shell + solid.
 
+pub(crate) mod assemble;
 pub(crate) mod band;
 pub(crate) mod loops;
 pub(crate) mod punch;
+
+use crate::error::{OperationError, Result};
+use crate::topology::{SolidId, TopologyStore};
+
+use super::select::BooleanOp;
+
+/// Routes a boolean operation on (at least one) NURBS-faced solid.
+///
+/// Only the through-cut [`BooleanOp::Subtract`] is supported; Union and
+/// Intersect return an explicit unsupported error, as does any Subtract that
+/// violates the through-cut preconditions.
+pub(crate) fn try_boolean(
+    store: &mut TopologyStore,
+    solid_a: SolidId,
+    solid_b: SolidId,
+    op: BooleanOp,
+) -> Result<SolidId> {
+    match op {
+        BooleanOp::Subtract => assemble::subtract_through_cut(store, solid_a, solid_b),
+        BooleanOp::Union => Err(OperationError::Failed(
+            "union of NURBS-faced solids is not supported (through-cut subtract only)".into(),
+        )
+        .into()),
+        BooleanOp::Intersect => Err(OperationError::Failed(
+            "intersection of NURBS-faced solids is not supported (through-cut subtract only)"
+                .into(),
+        )
+        .into()),
+    }
+}

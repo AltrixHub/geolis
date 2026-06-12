@@ -6,10 +6,6 @@
 //! closed loops (entry + exit), each lying on a target face. Any deviation is a
 //! typed unsupported error — never silent wrong geometry.
 
-// Staged module: several `pub(crate)` items are consumed in Task 5
-// (`assemble` + engine routing). Allowed until then.
-#![allow(dead_code, unused_imports)]
-
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{
     intersect_surfaces, IntersectionOptions, NurbsSurface, SurfaceIntersectionCurve,
