@@ -180,7 +180,27 @@ fn sample_loop(loop_: &TrimLoop) -> Result<Vec<Point2>> {
 
 /// Appends the start point and interior samples of `curve` (dropping the tail,
 /// which is the next segment's start or the loop closure).
+///
+/// A **degree-1 polyline** is sampled at exactly its control points (no
+/// chord-based resampling, no densification): for degree 1 the control points
+/// lie on the curve, so this reproduces the curve losslessly. This determinism
+/// is what makes two faces whose trim loops were built from the *same* trace
+/// points emit identical 3D vertices along a shared ring (the punch/band cut
+/// rings), eliminating the T-junction cracks at the hole rim. Higher-degree
+/// trim curves (rational arcs such as `circle_uv`) keep the fixed per-segment
+/// adaptive sampling, which they need to approximate their curvature.
 fn append_curve_samples(curve: &NurbsCurve2D, out: &mut Vec<Point2>) -> Result<()> {
+    if curve.degree() == 1 {
+        // Control points of a degree-1 curve are exactly its polyline vertices.
+        // Drop the tail control point: it is the next segment's start (or, for
+        // the final segment, the loop closure handled by `dedup_closed`).
+        let cps = curve.control_points();
+        for p in &cps[..cps.len() - 1] {
+            out.push(*p);
+        }
+        return Ok(());
+    }
+
     let (t0, t1) = curve.parameter_domain();
     for i in 0..PCURVE_SEGMENT_SAMPLES {
         #[allow(clippy::cast_precision_loss)]

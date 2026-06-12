@@ -327,83 +327,142 @@ mod tests {
         }
     }
 
-    /// BLOCKED: a strictly-closed (every edge used exactly twice) mesh check
-    /// cannot pass for solids whose faces are tessellated independently.
-    ///
-    /// The geolis tessellator meshes each face on its own; adjacent faces sample
-    /// their shared boundary curve at different points, leaving mesh-level
-    /// T-junctions (boundary edges) along every curved-face/planar-face border.
-    /// This is a tessellation-conformance limitation, NOT a `BRep` shell-closure
-    /// defect — the solid's shell is topologically closed (faces share wires).
+    /// The hole rings tessellate conformally: after the polyline-trim-loop fix
+    /// (degree-1 trim curves sampled at their control points), the punched
+    /// front/back faces and the band (hole-wall) face emit IDENTICAL 3D vertices
+    /// along each shared SSI ring, so the dense per-segment T-junctions along the
+    /// hole rings are eliminated.
     ///
     /// Measured (position-deduplicated, 1e-6 quantization):
-    /// - plain curved slab (no hole): 384 boundary edges
-    /// - slab − tube (this result): 1788 boundary edges
-    ///   - 384 on the slab outer perimeter (identical to the plain slab —
-    ///     curved front/back vs planar sides),
-    ///   - 1404 on the hole ring (punched front/back rings vs the band ring).
+    /// - plain curved slab (no hole): 384 boundary edges (all perimeter)
+    /// - slab − tube, BEFORE this fix: 1788 boundary edges (384 perimeter +
+    ///   1404 along the hole rings — the dense punch-vs-band sampling mismatch).
+    /// - slab − tube, AFTER this fix: 264 boundary edges. Only 4 of them lie in
+    ///   the hole-ring region, and all 4 sit at the SSI seam azimuth.
     ///
-    /// The 384 perimeter edges prove the cause is generic per-face sampling, not
-    /// the punch/band u-seam: they are present with no boolean applied at all.
-    /// Closing this requires conforming-boundary tessellation (shared boundary
-    /// polylines across adjacent faces), which is out of scope for this fix.
+    /// Those 4 residual ring edges are NOT a sampling mismatch — they are the
+    /// pre-existing seam-gap approximation (documented in `punch.rs`): the SSI
+    /// marcher omits the short arc at the tool's parametric u-seam, so the punch
+    /// closes each ring with a single straight chord across that gap while the
+    /// band bridges the gap as a vertical wall stitch. The two sides therefore
+    /// differ over the one-step seam gap only. Closing this is a separate
+    /// seam-arc-reconstruction task, out of scope for the shared-sampling fix.
     ///
-    /// This test documents and pins the limitation; it does not relax the
-    /// manifold contract above.
+    /// Two assertions pin the result:
+    /// 1. The cut result's total boundary-edge count is no worse than the plain
+    ///    slab's own perimeter nonconformance (plus a small margin); the prior
+    ///    ~1404 hole-ring boundary edges are gone.
+    /// 2. Direct hole-ring conformance: at most [`MAX_SEAM_RING_EDGES`]
+    ///    boundary-edge midpoints lie in the tube-wall ring region (distance to
+    ///    the tube axis within [0.7·r, 1.3·r] while z is inside the slab), and
+    ///    every such edge sits at the seam azimuth (the single seam gap, not
+    ///    spread around the ring).
     #[test]
-    fn strict_watertightness_blocked() {
-        fn boundary_edge_count(store: &TopologyStore, solid: SolidId) -> usize {
+    fn hole_rings_tessellate_conformally() {
+        #[allow(clippy::cast_possible_truncation)]
+        fn canon_id(canon: &mut HashMap<(i64, i64, i64), u32>, p: &Point3) -> u32 {
+            const Q: f64 = 1e6;
+            let k = (
+                (p.x * Q).round() as i64,
+                (p.y * Q).round() as i64,
+                (p.z * Q).round() as i64,
+            );
+            let next = canon.len() as u32;
+            *canon.entry(k).or_insert(next)
+        }
+
+        // Collects boundary edges (used != 2 after position-dedup) as 3D
+        // endpoint pairs.
+        fn boundary_edges(store: &TopologyStore, solid: SolidId) -> Vec<(Point3, Point3)> {
             let mesh = TessellateSolid::new(solid, TessellationParams::default())
                 .execute(store)
                 .unwrap();
-            #[allow(clippy::cast_possible_truncation)]
-            let key_of = |p: &Point3| -> (i64, i64, i64) {
-                const Q: f64 = 1e6;
-                (
-                    (p.x * Q).round() as i64,
-                    (p.y * Q).round() as i64,
-                    (p.z * Q).round() as i64,
-                )
-            };
             let mut canon: HashMap<(i64, i64, i64), u32> = HashMap::new();
-            #[allow(clippy::cast_possible_truncation)]
-            let mut id_of = |p: &Point3| -> u32 {
-                let k = key_of(p);
-                let next = canon.len() as u32;
-                *canon.entry(k).or_insert(next)
-            };
             let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+            let mut endpoints: HashMap<(u32, u32), (Point3, Point3)> = HashMap::new();
             for tri in &mesh.indices {
-                let a = id_of(&mesh.vertices[tri[0] as usize]);
-                let b = id_of(&mesh.vertices[tri[1] as usize]);
-                let c = id_of(&mesh.vertices[tri[2] as usize]);
-                for &(x, y) in &[(a, b), (b, c), (c, a)] {
+                let pa = mesh.vertices[tri[0] as usize];
+                let pb = mesh.vertices[tri[1] as usize];
+                let pc = mesh.vertices[tri[2] as usize];
+                let a = canon_id(&mut canon, &pa);
+                let b = canon_id(&mut canon, &pb);
+                let c = canon_id(&mut canon, &pc);
+                for &(x, y, px, py) in &[(a, b, pa, pb), (b, c, pb, pc), (c, a, pc, pa)] {
                     let key = if x < y { (x, y) } else { (y, x) };
                     *counts.entry(key).or_insert(0) += 1;
+                    endpoints.entry(key).or_insert((px, py));
                 }
             }
-            counts.values().filter(|&&c| c != 2).count()
+            counts
+                .iter()
+                .filter(|(_, &c)| c != 2)
+                .map(|(k, _)| endpoints[k])
+                .collect()
         }
 
-        // Plain slab already has boundary edges from independent per-face
-        // tessellation — the strict check is a tessellator limitation.
+        // Plain slab already exhibits per-face perimeter boundary edges with no
+        // boolean applied — the generic independent-per-face limitation.
         let mut plain_store = TopologyStore::new();
         let plain = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
             .execute(&mut plain_store)
             .unwrap();
-        let plain_boundary = boundary_edge_count(&plain_store, plain);
+        let plain_boundary = boundary_edges(&plain_store, plain).len();
         assert!(
             plain_boundary > 0,
-            "expected the plain slab to already exhibit per-face boundary edges; \
-             if this is 0 the tessellator now conforms boundaries and the strict \
-             watertightness check should be re-enabled"
+            "expected the plain slab to already exhibit per-face perimeter \
+             boundary edges (the pre-existing tessellation limitation)"
         );
 
-        let (store, result) = slab_minus_tube(0.7);
-        let cut_boundary = boundary_edge_count(&store, result);
+        const RADIUS: f64 = 0.7;
+        let (store, result) = slab_minus_tube(RADIUS);
+        let cut_edges = boundary_edges(&store, result);
+        let cut_boundary = cut_edges.len();
+
+        // (1) The cut result carries no MORE boundary edges than the plain
+        // slab's own perimeter nonconformance (plus a small margin). The prior
+        // ~1404 hole-ring T-junctions are eliminated.
+        const MARGIN: usize = 16;
         assert!(
-            cut_boundary >= plain_boundary,
-            "cut result should carry at least the plain slab's boundary edges"
+            cut_boundary <= plain_boundary + MARGIN,
+            "cut result has {cut_boundary} boundary edges, expected \
+             <= {plain_boundary} (plain perimeter) + {MARGIN}; hole-ring \
+             T-junctions appear to have returned"
+        );
+
+        // (2) Direct hole-ring conformance: no boundary-edge midpoint lies in
+        // the tube-wall ring region. The tube axis runs along (3,3,z); a ring
+        // boundary edge would sit at radius ~RADIUS from that axis, inside the
+        // slab body in z.
+        // Only the SSI seam-gap closure may leave ring-region boundary edges,
+        // and only a tiny, fixed number of them (2 per ring × 2 rings).
+        const MAX_SEAM_RING_EDGES: usize = 4;
+        // The seam endpoints sit on the +x side of the ring (the tool's u-seam),
+        // so every residual ring edge must have its midpoint at dx > 0 — i.e.
+        // localized at the seam azimuth, not spread around the ring.
+        let axis = Point3::new(3.0, 3.0, 0.0);
+        let mut ring_edges = 0usize;
+        for (p, q) in &cut_edges {
+            let m = Point3::new((p.x + q.x) * 0.5, (p.y + q.y) * 0.5, (p.z + q.z) * 0.5);
+            let dxy = ((m.x - axis.x).powi(2) + (m.y - axis.y).powi(2)).sqrt();
+            let in_ring_radius = dxy >= 0.7 * RADIUS && dxy <= 1.3 * RADIUS;
+            let in_slab_z = m.z > -1.2 && m.z < 1.7;
+            if in_ring_radius && in_slab_z {
+                ring_edges += 1;
+                assert!(
+                    m.x - axis.x > 0.0,
+                    "ring boundary edge ({:.3},{:.3},{:.3}) is away from the \
+                     seam azimuth — punch/band rings are not conforming off-seam",
+                    m.x,
+                    m.y,
+                    m.z
+                );
+            }
+        }
+        assert!(
+            ring_edges <= MAX_SEAM_RING_EDGES,
+            "{ring_edges} hole-ring boundary edges (expected <= \
+             {MAX_SEAM_RING_EDGES}, the seam-gap closure only); the dense \
+             punch/band sampling mismatch appears to have returned"
         );
     }
 
