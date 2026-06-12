@@ -357,6 +357,22 @@ impl<const D: usize> NurbsCurve<D> {
         Ok((left, right))
     }
 
+    /// Axis-aligned bounding box of the control points.
+    ///
+    /// By the convex-hull property the curve lies entirely inside this box, so
+    /// it is a conservative bound used for intersection-candidate pruning.
+    /// Returns `(min_corner, max_corner)`.
+    #[must_use]
+    pub fn bounding_box(&self) -> (Point<f64, D>, Point<f64, D>) {
+        let mut min = self.control_points[0].coords;
+        let mut max = self.control_points[0].coords;
+        for p in &self.control_points[1..] {
+            min = min.inf(&p.coords);
+            max = max.sup(&p.coords);
+        }
+        (Point::from(min), Point::from(max))
+    }
+
     /// Returns the curve with reversed parameterization (same shape).
     ///
     /// # Errors
@@ -880,6 +896,22 @@ mod tests {
         for i in 0..=20 {
             let t = 0.4 + (1.0 - 0.4) * f64::from(i) / 20.0;
             assert!((right.point_at(t).unwrap() - c.point_at(t).unwrap()).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn bounding_box_contains_sampled_points() {
+        let c = quarter_circle();
+        let (min, max) = c.bounding_box();
+        for i in 0..=50 {
+            let t = f64::from(i) / 50.0;
+            let p = c.point_at(t).unwrap();
+            for k in 0..3 {
+                assert!(
+                    p.coords[k] >= min.coords[k] - 1e-12 && p.coords[k] <= max.coords[k] + 1e-12,
+                    "point at t={t} axis {k} escapes box"
+                );
+            }
         }
     }
 
