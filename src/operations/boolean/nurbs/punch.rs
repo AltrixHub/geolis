@@ -224,7 +224,7 @@ mod tests {
             .unwrap();
         let target = collect_nurbs_faces(&store, &solid_faces(&store, slab));
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
-        let cuts = extract_cut_loops(&store, &target, &tool).unwrap();
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
         // Punch both loops; return the higher-z (front) face for inspection.
         let mut front_face = None;
         let mut front_trace = Vec::new();
@@ -331,7 +331,7 @@ mod tests {
                 .execute(store)
                 .unwrap();
             let tool = collect_nurbs_faces(store, &solid_faces(store, tube));
-            let cuts = extract_cut_loops(store, &target, &tool).unwrap();
+            let cuts = extract_cut_loops(&target, &tool).unwrap();
             // Front loop = higher mean z.
             let pair = &cuts[0];
             let mean_z = |c: &CutLoop| {

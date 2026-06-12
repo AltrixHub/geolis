@@ -36,12 +36,11 @@ pub(crate) struct ToolFaceCut {
 ///
 /// # Errors
 ///
-/// Returns [`OperationError::Failed`] naming the unsupported case when: the tool
-/// has no NURBS side face, an intersection branch is open (partial cut), any
-/// cap-face pair intersects, or a tool side face does not yield exactly two
-/// closed loops.
+/// Returns [`OperationError::Failed`] naming the unsupported case when: an
+/// intersection branch is open / not seam-closed (partial cut), no loops are
+/// found at all (tool disjoint), or a tool side face does not yield exactly two
+/// closed loops. (Cap-face intersection is guarded separately by the caller.)
 pub(crate) fn extract_cut_loops(
-    store: &TopologyStore,
     target_faces: &[(FaceId, NurbsSurface)],
     tool_faces: &[(FaceId, NurbsSurface)],
 ) -> Result<Vec<ToolFaceCut>> {
@@ -79,13 +78,12 @@ pub(crate) fn extract_cut_loops(
         }
     }
 
-    group_per_tool_face(store, loops, tool_faces)
+    group_per_tool_face(&loops, tool_faces)
 }
 
 /// Groups loops per tool side face and validates the exactly-two contract.
 fn group_per_tool_face(
-    _store: &TopologyStore,
-    loops: Vec<CutLoop>,
+    loops: &[CutLoop],
     tool_faces: &[(FaceId, NurbsSurface)],
 ) -> Result<Vec<ToolFaceCut>> {
     let mut cuts = Vec::new();
@@ -258,7 +256,7 @@ mod tests {
         let (store, slab, tube) = slab_and_tube(Point3::new(3.0, 3.0, -1.5), 0.7);
         let target = collect_nurbs_faces(&store, &solid_faces(&store, slab));
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
-        let cuts = extract_cut_loops(&store, &target, &tool).unwrap();
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
         // The tube has one NURBS side face; it must yield exactly 2 loops.
         assert_eq!(cuts.len(), 1, "one tool side face");
         let cut = &cuts[0];
@@ -298,7 +296,7 @@ mod tests {
             .unwrap();
         let tool = vec![(side_face, side_surf)];
 
-        let cuts = extract_cut_loops(&store, &target, &tool).unwrap();
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
         assert_eq!(cuts.len(), 1, "one tilted tool side face");
         assert_ne!(
             cuts[0].loops[0].target_face, cuts[0].loops[1].target_face,
@@ -312,7 +310,7 @@ mod tests {
         let (store, slab, tube) = slab_and_tube(Point3::new(20.0, 20.0, -1.5), 0.7);
         let target = collect_nurbs_faces(&store, &solid_faces(&store, slab));
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
-        let result = extract_cut_loops(&store, &target, &tool);
+        let result = extract_cut_loops(&target, &tool);
         assert!(result.is_err(), "disjoint tube must error (no loops)");
     }
 
@@ -332,7 +330,7 @@ mod tests {
             .unwrap();
         let target = collect_nurbs_faces(&store, &solid_faces(&store, slab));
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
-        let result = extract_cut_loops(&store, &target, &tool);
+        let result = extract_cut_loops(&target, &tool);
         assert!(
             result.is_err(),
             "half-buried tube must be unsupported, got: {result:?}"

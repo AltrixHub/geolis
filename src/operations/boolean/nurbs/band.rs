@@ -264,7 +264,7 @@ mod tests {
             .unwrap();
         let target = collect_nurbs_faces(&store, &solid_faces(&store, slab));
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
-        let cuts = extract_cut_loops(&store, &target, &tool).unwrap();
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
         let tool_surf = tool[0].1.clone();
         let band = build_band_face(&mut store, &cuts[0]).unwrap();
         (store, band, tool_surf)

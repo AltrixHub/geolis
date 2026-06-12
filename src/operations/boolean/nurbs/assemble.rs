@@ -46,7 +46,7 @@ pub(crate) fn subtract_through_cut(
     assert_no_cap_intersection(store, &target_faces, &tool_faces)?;
 
     // Extract + validate the through-cut loops on the ORIGINAL faces.
-    let cuts = extract_cut_loops(store, &target_nurbs, &tool_nurbs)?;
+    let cuts = extract_cut_loops(&target_nurbs, &tool_nurbs)?;
 
     // Copy every target face so the input solid is preserved, recording the
     // original -> copy id map for loop remapping.
@@ -76,7 +76,7 @@ pub(crate) fn subtract_through_cut(
         result_faces.push(band);
     }
 
-    finish_solid(store, result_faces)
+    Ok(finish_solid(store, result_faces))
 }
 
 /// Errors if any tool cap (planar tool face) intersects any target face.
@@ -141,16 +141,16 @@ fn solid_faces(store: &TopologyStore, solid: SolidId) -> Result<Vec<FaceId>> {
 }
 
 /// Wraps a face list into a closed shell + solid.
-fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> Result<SolidId> {
+fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> SolidId {
     use crate::topology::{ShellData, SolidData};
     let shell = store.add_shell(ShellData {
         faces,
         is_closed: true,
     });
-    Ok(store.add_solid(SolidData {
+    store.add_solid(SolidData {
         outer_shell: shell,
         inner_shells: vec![],
-    }))
+    })
 }
 
 #[cfg(test)]

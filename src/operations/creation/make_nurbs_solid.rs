@@ -60,7 +60,7 @@ impl MakeNurbsTube {
         let bottom = self.cap_face(store, self.center, false)?;
         let top = self.cap_face(store, top_center, true)?;
 
-        finish_solid(store, vec![side, bottom, top])
+        Ok(finish_solid(store, vec![side, bottom, top]))
     }
 
     /// Builds a planar circular cap as a polygonal disk. `upward` orients the
@@ -140,11 +140,11 @@ impl MakeCurvedSlab {
         let back = MakeNurbsFace::new(back_surface.clone()).execute(store)?;
         store.face_mut(back)?.same_sense = false;
 
-        let sides = self.side_faces(store, &front_surface, &back_surface)?;
+        let sides = side_faces(store, &front_surface, &back_surface)?;
 
         let mut faces = vec![front, back];
         faces.extend(sides);
-        finish_solid(store, faces)
+        Ok(finish_solid(store, faces))
     }
 
     /// Builds the 4×4 control-net NURBS sheet at vertical offset `dz` from the
@@ -173,71 +173,68 @@ impl MakeCurvedSlab {
         let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])?;
         NurbsSurface::from_unweighted(control, 4, 4, knots.clone(), knots, 3, 3)
     }
+}
 
-    /// Builds the four planar side faces from the front/back boundary curves,
-    /// sampling each boundary into a polyline ribbon and closing it as a quad
-    /// strip face (planar per side because both boundaries share an XY edge).
-    fn side_faces(
-        &self,
-        store: &mut TopologyStore,
-        front: &NurbsSurface,
-        back: &NurbsSurface,
-    ) -> Result<Vec<FaceId>> {
-        const N: usize = 16;
-        let ((u0, u1), (v0, v1)) = front.parameter_domain();
-        // Four domain edges as (u,v) parameter walks. Order chosen so each
-        // ribbon's front-edge + back-edge + verticals wind consistently.
-        let edges: [[(f64, f64); 2]; 4] = [
-            [(u0, v0), (u1, v0)], // y = 0 side
-            [(u1, v0), (u1, v1)], // x = size side
-            [(u1, v1), (u0, v1)], // y = size side
-            [(u0, v1), (u0, v0)], // x = 0 side
-        ];
+/// Builds the four planar side faces from the front/back boundary curves,
+/// sampling each boundary into a polyline ribbon and closing it as a quad strip
+/// face (planar per side because both boundaries share an XY edge).
+fn side_faces(
+    store: &mut TopologyStore,
+    front: &NurbsSurface,
+    back: &NurbsSurface,
+) -> Result<Vec<FaceId>> {
+    const N: usize = 16;
+    let ((u0, u1), (v0, v1)) = front.parameter_domain();
+    // Four domain edges as (u,v) parameter walks. Order chosen so each ribbon's
+    // front-edge + back-edge + verticals wind consistently.
+    let edges: [[(f64, f64); 2]; 4] = [
+        [(u0, v0), (u1, v0)], // y = 0 side
+        [(u1, v0), (u1, v1)], // x = size side
+        [(u1, v1), (u0, v1)], // y = size side
+        [(u0, v1), (u0, v0)], // x = 0 side
+    ];
 
-        let mut faces = Vec::with_capacity(4);
-        for edge in edges {
-            let face = self.side_ribbon(store, front, back, edge, N)?;
-            faces.push(face);
-        }
-        Ok(faces)
+    let mut faces = Vec::with_capacity(4);
+    for edge in edges {
+        let face = side_ribbon(store, front, back, edge, N)?;
+        faces.push(face);
     }
+    Ok(faces)
+}
 
-    /// Builds one planar side face. The front and back patches share the same
-    /// XY boundary (the thickening is a pure vertical translation of the control
-    /// net), so each side lies in a vertical plane and is a valid planar quad
-    /// strip: front edge forward, then down to the back edge, then back edge
-    /// reversed.
-    fn side_ribbon(
-        &self,
-        store: &mut TopologyStore,
-        front: &NurbsSurface,
-        back: &NurbsSurface,
-        edge: [(f64, f64); 2],
-        n: usize,
-    ) -> Result<FaceId> {
-        let [a, b] = edge;
-        let mut ring: Vec<Point3> = Vec::with_capacity(2 * (n + 1));
-        // Front edge a -> b.
-        for i in 0..=n {
-            #[allow(clippy::cast_precision_loss)]
-            let t = i as f64 / n as f64;
-            let u = a.0 + (b.0 - a.0) * t;
-            let v = a.1 + (b.1 - a.1) * t;
-            ring.push(front.point_at(u, v)?);
-        }
-        // Back edge b -> a.
-        for i in 0..=n {
-            #[allow(clippy::cast_precision_loss)]
-            let t = i as f64 / n as f64;
-            let u = b.0 + (a.0 - b.0) * t;
-            let v = b.1 + (a.1 - b.1) * t;
-            ring.push(back.point_at(u, v)?);
-        }
-        // Drop duplicate seam points so MakeWire does not see coincident pairs.
-        dedup_ring(&mut ring);
-        let wire = MakeWire::new(ring, true).execute(store)?;
-        MakeFace::new(wire, vec![]).execute(store)
+/// Builds one planar side face. The front and back patches share the same XY
+/// boundary (the thickening is a pure vertical translation of the control net),
+/// so each side lies in a vertical plane and is a valid planar quad strip: front
+/// edge forward, then down to the back edge, then back edge reversed.
+fn side_ribbon(
+    store: &mut TopologyStore,
+    front: &NurbsSurface,
+    back: &NurbsSurface,
+    edge: [(f64, f64); 2],
+    n: usize,
+) -> Result<FaceId> {
+    let [start, end] = edge;
+    let mut ring: Vec<Point3> = Vec::with_capacity(2 * (n + 1));
+    // Front edge start -> end.
+    for i in 0..=n {
+        #[allow(clippy::cast_precision_loss)]
+        let t = i as f64 / n as f64;
+        let u = start.0 + (end.0 - start.0) * t;
+        let v = start.1 + (end.1 - start.1) * t;
+        ring.push(front.point_at(u, v)?);
     }
+    // Back edge end -> start.
+    for i in 0..=n {
+        #[allow(clippy::cast_precision_loss)]
+        let t = i as f64 / n as f64;
+        let u = end.0 + (start.0 - end.0) * t;
+        let v = end.1 + (start.1 - end.1) * t;
+        ring.push(back.point_at(u, v)?);
+    }
+    // Drop duplicate seam points so MakeWire does not see coincident pairs.
+    dedup_ring(&mut ring);
+    let wire = MakeWire::new(ring, true).execute(store)?;
+    MakeFace::new(wire, vec![]).execute(store)
 }
 
 /// Removes consecutive coincident points and a coincident wrap-around point.
@@ -306,7 +303,7 @@ impl MakeRevolvedSolid {
         let bottom = disk_face(store, Point3::new(0.0, 0.0, z0), r0, false)?;
         let top = disk_face(store, Point3::new(0.0, 0.0, z1), r1, true)?;
 
-        finish_solid(store, vec![wall, bottom, top])
+        Ok(finish_solid(store, vec![wall, bottom, top]))
     }
 }
 
@@ -335,15 +332,15 @@ fn disk_face(
 }
 
 /// Wraps a face list into a closed shell + solid.
-pub(crate) fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> Result<SolidId> {
+pub(crate) fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> SolidId {
     let shell = store.add_shell(ShellData {
         faces,
         is_closed: true,
     });
-    Ok(store.add_solid(SolidData {
+    store.add_solid(SolidData {
         outer_shell: shell,
         inner_shells: vec![],
-    }))
+    })
 }
 
 #[cfg(test)]
