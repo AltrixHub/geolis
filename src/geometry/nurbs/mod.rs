@@ -14,8 +14,9 @@ mod intersect;
 pub use basis::{basis_function_derivatives, basis_functions, binomial};
 pub use curve::{NurbsCurve, NurbsCurve2D, NurbsCurve3D};
 pub use intersect::{
-    intersect_curve_surface, intersect_curves_2d, CurveCurveIntersection2D,
-    CurveSurfaceIntersection, IntersectionOptions, SurfaceIntersectionCurve,
+    intersect_curve_surface, intersect_curves_2d, intersect_surface_plane,
+    CurveCurveIntersection2D, CurveSurfaceIntersection, IntersectionOptions,
+    SurfaceIntersectionCurve,
 };
 pub use knot::KnotVector;
 pub use surface::{InversionOptions, NurbsSurface, SurfaceInversion};

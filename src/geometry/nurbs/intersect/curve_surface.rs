@@ -28,6 +28,8 @@ use super::types::{CurveSurfaceIntersection, IntersectionOptions};
 ///
 /// Returns an error only if a sub-box construction during seeding or a
 /// curve/surface evaluation fails (e.g. a vanishing rational denominator).
+// t/u/v parameters and c/s/f Newton bindings follow The NURBS Book notation.
+#[allow(clippy::many_single_char_names)]
 pub fn intersect_curve_surface(
     curve: &NurbsCurve3D,
     surface: &NurbsSurface,
