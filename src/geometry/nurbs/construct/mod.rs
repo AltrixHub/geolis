@@ -4,3 +4,4 @@ mod interpolate;
 mod loft;
 mod polyline;
 mod revolve;
+mod sweep;
