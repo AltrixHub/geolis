@@ -149,22 +149,39 @@ impl TessellateFace {
                     &self.params,
                 )
             }
-            FaceSurface::Nurbs(nurbs) => tessellate_nurbs_face(nurbs, face.trim.as_ref()),
+            FaceSurface::Nurbs(n) => tessellate_nurbs_face(n, face.trim.as_ref(), same_sense),
         }
     }
 }
 
 /// Tessellates a NURBS face: trimmed faces go through the constrained-Delaunay
 /// path, untrimmed faces through the full-domain adaptive tessellator.
+///
+/// The underlying NURBS tessellators always emit raw surface normals and a fixed
+/// triangle winding (`same_sense = true`). When the face is oriented against the
+/// surface (`same_sense == false`), this flips both — exactly mirroring the
+/// analytic arms (`tessellate_uv_grid`, `tessellate_annular_disc`), which negate
+/// the normal and reverse the winding — so a NURBS back face faces outward like
+/// its analytic counterparts.
 fn tessellate_nurbs_face(
     nurbs: &crate::geometry::nurbs::NurbsSurface,
     trim: Option<&crate::topology::FaceTrim>,
+    same_sense: bool,
 ) -> Result<TriangleMesh> {
     let options = SurfaceTessellationOptions::default();
-    match trim {
-        None => super::tessellate_nurbs_surface(nurbs, &options),
-        Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options),
+    let mut mesh = match trim {
+        None => super::tessellate_nurbs_surface(nurbs, &options)?,
+        Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options)?,
+    };
+    if !same_sense {
+        for n in &mut mesh.normals {
+            *n = -*n;
+        }
+        for tri in &mut mesh.indices {
+            tri.swap(1, 2);
+        }
     }
+    Ok(mesh)
 }
 
 /// Tessellates a planar face using CDT.
@@ -1376,6 +1393,91 @@ mod tests {
             }
         }
     }
+
+    // ── NURBS face same_sense tests ──────────────────────────────
+
+    use crate::geometry::nurbs::{KnotVector, NurbsSurface};
+
+    /// A bulged 3x3 NURBS patch over [0,1]x[0,1] whose normal varies across the
+    /// domain (so a flip is unambiguous, unlike a flat plane).
+    fn bulged_nurbs_surface() -> NurbsSurface {
+        let shape = [[0.0_f64, 0.5, 0.0], [0.5, 1.5, 0.5], [0.0, 0.5, 0.0]];
+        let mut control = Vec::with_capacity(9);
+        for (i, row) in shape.iter().enumerate() {
+            for (j, &z) in row.iter().enumerate() {
+                #[allow(clippy::cast_precision_loss)]
+                control.push(Point3::new(i as f64, j as f64, z));
+            }
+        }
+        let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        NurbsSurface::from_unweighted(control, 3, 3, knots.clone(), knots, 2, 2).unwrap()
+    }
+
+    /// Finds the tessellated vertex closest (in XY) to the surface point at
+    /// `(u, v)` and returns its normal alongside the raw surface normal there.
+    fn nearest_normal_pair(
+        mesh: &TriangleMesh,
+        surface: &NurbsSurface,
+        u: f64,
+        v: f64,
+    ) -> (Vector3, Vector3) {
+        let target = surface.evaluate(u, v).unwrap();
+        let raw = surface.normal(u, v).unwrap();
+        let mut best = 0usize;
+        let mut best_d = f64::INFINITY;
+        for (i, p) in mesh.vertices.iter().enumerate() {
+            let d = (p.x - target.x).powi(2) + (p.y - target.y).powi(2);
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        (mesh.normals[best], raw)
+    }
+
+    #[test]
+    fn nurbs_face_same_sense_true_matches_raw_normal() {
+        let surface = bulged_nurbs_surface();
+        let mut store = crate::topology::TopologyStore::new();
+        let face = MakeNurbsFace::new(surface.clone())
+            .execute(&mut store)
+            .unwrap();
+        // same_sense defaults to true.
+        let mesh = TessellateFace::new(face, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        for &(u, v) in &[(0.25, 0.25), (0.5, 0.5), (0.75, 0.25)] {
+            let (got, raw) = nearest_normal_pair(&mesh, &surface, u, v);
+            let dot = got.dot(&raw);
+            assert!(
+                dot > 0.9,
+                "same_sense=true normal at ({u},{v}) should match raw (dot={dot})"
+            );
+        }
+    }
+
+    #[test]
+    fn nurbs_face_same_sense_false_flips_normal() {
+        let surface = bulged_nurbs_surface();
+        let mut store = crate::topology::TopologyStore::new();
+        let face = MakeNurbsFace::new(surface.clone())
+            .execute(&mut store)
+            .unwrap();
+        store.face_mut(face).unwrap().same_sense = false;
+        let mesh = TessellateFace::new(face, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        for &(u, v) in &[(0.25, 0.25), (0.5, 0.5), (0.75, 0.25)] {
+            let (got, raw) = nearest_normal_pair(&mesh, &surface, u, v);
+            let dot = got.dot(&raw);
+            assert!(
+                dot < -0.9,
+                "same_sense=false normal at ({u},{v}) should oppose raw (dot={dot})"
+            );
+        }
+    }
+
+    use crate::operations::creation::MakeNurbsFace;
 
     #[test]
     fn default_mode_unchanged() {

@@ -6,6 +6,11 @@
 //! forming the hole wall. The whole result solid is tessellated through the
 //! standard pipeline (trimmed constrained-Delaunay for the punched faces and
 //! the band), so the through-cut path is exercised end-to-end.
+//!
+//! The revolved-solid variant (a horizontal-axis tube whose band surface is
+//! geometrically closed but parametrically non-periodic) is deferred: it fails
+//! the v1 seam-closure criterion in the SSI marcher (see
+//! `geometry::nurbs::intersect::surface_surface`).
 
 use geolis::math::Point3;
 use geolis::operations::boolean::Subtract;

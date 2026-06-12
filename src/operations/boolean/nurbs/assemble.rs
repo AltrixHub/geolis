@@ -199,6 +199,9 @@ mod tests {
             .execute(&store)
             .unwrap();
         assert!(!mesh.indices.is_empty());
+        // Position-deduplicated edge-use counts: every edge is used 1 or 2 times
+        // (no edge shared by 3+ triangles). A strict "exactly 2" closure cannot
+        // hold here — see `strict_watertightness_blocked` for why.
         let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
         for tri in &mesh.indices {
             for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
@@ -211,20 +214,142 @@ mod tests {
         }
     }
 
+    /// BLOCKED: a strictly-closed (every edge used exactly twice) mesh check
+    /// cannot pass for solids whose faces are tessellated independently.
+    ///
+    /// The geolis tessellator meshes each face on its own; adjacent faces sample
+    /// their shared boundary curve at different points, leaving mesh-level
+    /// T-junctions (boundary edges) along every curved-face/planar-face border.
+    /// This is a tessellation-conformance limitation, NOT a `BRep` shell-closure
+    /// defect — the solid's shell is topologically closed (faces share wires).
+    ///
+    /// Measured (position-deduplicated, 1e-6 quantization):
+    /// - plain curved slab (no hole): 384 boundary edges
+    /// - slab − tube (this result): 1788 boundary edges
+    ///   - 384 on the slab outer perimeter (identical to the plain slab —
+    ///     curved front/back vs planar sides),
+    ///   - 1404 on the hole ring (punched front/back rings vs the band ring).
+    ///
+    /// The 384 perimeter edges prove the cause is generic per-face sampling, not
+    /// the punch/band u-seam: they are present with no boolean applied at all.
+    /// Closing this requires conforming-boundary tessellation (shared boundary
+    /// polylines across adjacent faces), which is out of scope for this fix.
+    ///
+    /// This test documents and pins the limitation; it does not relax the
+    /// manifold contract above.
+    #[test]
+    fn strict_watertightness_blocked() {
+        fn boundary_edge_count(store: &TopologyStore, solid: SolidId) -> usize {
+            let mesh = TessellateSolid::new(solid, TessellationParams::default())
+                .execute(store)
+                .unwrap();
+            #[allow(clippy::cast_possible_truncation)]
+            let key_of = |p: &Point3| -> (i64, i64, i64) {
+                const Q: f64 = 1e6;
+                (
+                    (p.x * Q).round() as i64,
+                    (p.y * Q).round() as i64,
+                    (p.z * Q).round() as i64,
+                )
+            };
+            let mut canon: HashMap<(i64, i64, i64), u32> = HashMap::new();
+            #[allow(clippy::cast_possible_truncation)]
+            let mut id_of = |p: &Point3| -> u32 {
+                let k = key_of(p);
+                let next = canon.len() as u32;
+                *canon.entry(k).or_insert(next)
+            };
+            let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+            for tri in &mesh.indices {
+                let a = id_of(&mesh.vertices[tri[0] as usize]);
+                let b = id_of(&mesh.vertices[tri[1] as usize]);
+                let c = id_of(&mesh.vertices[tri[2] as usize]);
+                for &(x, y) in &[(a, b), (b, c), (c, a)] {
+                    let key = if x < y { (x, y) } else { (y, x) };
+                    *counts.entry(key).or_insert(0) += 1;
+                }
+            }
+            counts.values().filter(|&&c| c != 2).count()
+        }
+
+        // Plain slab already has boundary edges from independent per-face
+        // tessellation — the strict check is a tessellator limitation.
+        let mut plain_store = TopologyStore::new();
+        let plain = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+            .execute(&mut plain_store)
+            .unwrap();
+        let plain_boundary = boundary_edge_count(&plain_store, plain);
+        assert!(
+            plain_boundary > 0,
+            "expected the plain slab to already exhibit per-face boundary edges; \
+             if this is 0 the tessellator now conforms boundaries and the strict \
+             watertightness check should be re-enabled"
+        );
+
+        let (store, result) = slab_minus_tube(0.7);
+        let cut_boundary = boundary_edge_count(&store, result);
+        assert!(
+            cut_boundary >= plain_boundary,
+            "cut result should carry at least the plain slab's boundary edges"
+        );
+    }
+
     #[test]
     fn result_has_a_real_hole() {
-        // No mesh vertex sits near the tube axis inside the slab interval: the
-        // hole is genuinely open along the tube axis.
+        // Rigorous check: the tube axis (a straight segment running down the
+        // hole at the tube's XY center) must miss the band (hole-wall) NURBS
+        // faces of the result solid — the axis threads the open tube untouched.
+        //
+        // The punched front/back NURBS faces are excluded on purpose: their
+        // *surface* still spans the hole region geometrically (the hole lives in
+        // the trim, which `intersect_curve_surface` does not consult), so the
+        // axis necessarily crosses their underlying surface at the cap z-levels.
+        // The band faces, in contrast, are the actual tube wall, so a centered
+        // axis missing them proves the wall is a genuine open cylinder.
+        use crate::geometry::nurbs::{intersect_curve_surface, IntersectionOptions, NurbsCurve3D};
+
         let (store, result) = slab_minus_tube(0.7);
+
+        // Axis as a degree-1 polyline spanning the full hole length (and a
+        // margin on either side) at the tube's XY center.
+        let axis =
+            NurbsCurve3D::polyline(&[Point3::new(3.0, 3.0, -1.5), Point3::new(3.0, 3.0, 1.7)])
+                .unwrap();
+
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        // Band (hole-wall) faces are the NURBS faces with no inner wires; the
+        // punched front/back copies carry their hole as an inner wire.
+        let band_faces: Vec<_> = collect_nurbs_faces(&store, &shell.faces)
+            .into_iter()
+            .filter(|(fid, _)| store.face(*fid).unwrap().inner_wires.is_empty())
+            .collect();
+        assert!(
+            !band_faces.is_empty(),
+            "result must carry at least one band (hole-wall) face to probe"
+        );
+        let options = IntersectionOptions::default();
+        for (fid, surface) in &band_faces {
+            let hits = intersect_curve_surface(&axis, surface, &options).unwrap();
+            assert!(
+                hits.is_empty(),
+                "tube axis hits band face {fid:?} ({} times) — hole is not open",
+                hits.len()
+            );
+        }
+
+        // Secondary coarse check: no mesh vertex sits near the tube axis inside
+        // the slab interval.
         let mesh = TessellateSolid::new(result, TessellationParams::default())
             .execute(&store)
             .unwrap();
-        let axis = Point3::new(3.0, 3.0, 0.0);
+        let center = Point3::new(3.0, 3.0, 0.0);
         let radius = 0.7;
         for v in &mesh.vertices {
             // Inside the slab body z-band.
             if v.z > -1.2 && v.z < 1.7 {
-                let dxy = ((v.x - axis.x).powi(2) + (v.y - axis.y).powi(2)).sqrt();
+                let dxy = ((v.x - center.x).powi(2) + (v.y - center.y).powi(2)).sqrt();
                 assert!(
                     dxy > radius * 0.8,
                     "vertex ({:.3},{:.3},{:.3}) intrudes into the hole (dxy={dxy})",
