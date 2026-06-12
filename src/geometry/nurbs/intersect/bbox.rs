@@ -1,25 +1,32 @@
 //! Bounding-box subdivision seeding for the intersection solvers.
 //!
-//! The convex-hull property of NURBS gives a cheap conservative AABB from the
-//! control net (see `NurbsCurve::bounding_box` / `NurbsSurface::bounding_box`).
-//! Recursive subdivision prunes parameter space to small boxes whose control
-//! hulls still overlap; the box centres seed the Newton solvers downstream.
+//! Each candidate box carries a parameter range plus a tight AABB obtained by
+//! *direct sampling* of the curve/surface over that range. Sampling (rather than
+//! the control-hull AABB exposed by `NurbsCurve::bounding_box` /
+//! `NurbsSurface::bounding_box`) is essential: rational arcs have loose control
+//! hulls that fail to shrink at axis-aligned tangents, which explodes the
+//! subdivision frontier. A small `pad` at the overlap test plus a coarse leaf
+//! size cover the (non-conservative) sampling gap; downstream Newton refinement
+//! converges from the resulting coarse seeds. Recursive subdivision prunes
+//! parameter space to small overlapping box pairs that seed the solvers.
+
+use std::collections::VecDeque;
 
 use crate::error::Result;
 use crate::geometry::nurbs::{NurbsCurve, NurbsCurve3D, NurbsSurface};
 
-/// A parameter interval on one curve, paired with its 3D control-hull AABB.
+/// A parameter interval on one curve, paired with its tight sampled 3D AABB.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CurveBox<const D: usize> {
     /// Parameter range `[t0, t1]`.
     pub t0: f64,
     pub t1: f64,
-    /// Control-hull AABB min/max as flat `D`-arrays.
+    /// Sampled AABB min/max as flat `D`-arrays.
     pub min: [f64; D],
     pub max: [f64; D],
 }
 
-/// A parameter rectangle on one surface, paired with its 3D control-hull AABB.
+/// A parameter rectangle on one surface, paired with its tight sampled 3D AABB.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SurfaceBox {
     pub u0: f64,
@@ -57,17 +64,10 @@ fn box_extent<const D: usize>(min: &[f64; D], max: &[f64; D]) -> f64 {
     sum.sqrt()
 }
 
-/// Builds a `CurveBox` for the whole curve.
-fn curve_root<const D: usize>(c: &NurbsCurve<D>) -> CurveBox<D> {
+/// Builds a `CurveBox` for the whole curve (tight sampled AABB).
+fn curve_root<const D: usize>(c: &NurbsCurve<D>) -> Result<CurveBox<D>> {
     let (t0, t1) = c.parameter_domain();
-    let (lo, hi) = c.bounding_box();
-    let mut min = [0.0; D];
-    let mut max = [0.0; D];
-    for k in 0..D {
-        min[k] = lo.coords[k];
-        max[k] = hi.coords[k];
-    }
-    CurveBox { t0, t1, min, max }
+    sampled_curve_box(c, t0, t1)
 }
 
 /// Hard cap on the number of candidate pairs any seeder may emit. Far above
@@ -75,13 +75,16 @@ fn curve_root<const D: usize>(c: &NurbsCurve<D>) -> CurveBox<D> {
 /// it and terminates instead of hanging.
 const MAX_SEED_PAIRS: usize = 4096;
 
-/// Recursively subdivides two curves, collecting overlapping parameter-box
-/// pairs whose 3D hulls overlap and whose extents fall below `leaf_extent`
-/// (or once `depth` is exhausted). `pad` accounts for tangential contact.
-///
-/// Only the *larger* of the two boxes is split at each step (interval
-/// subdivision), so the work scales with the number of surviving leaf pairs
-/// rather than exponentially in depth.
+/// Hard cap on the number of subdivision nodes processed. Bounds the breadth of
+/// the BFS frontier so axis-aligned tangents (where AABB pruning is weak) cannot
+/// explode the work. When hit, remaining frontier boxes are flushed as coarse
+/// seeds — Newton refinement downstream still converges from them.
+const MAX_SEED_ITERS: usize = 200_000;
+
+/// Recursively subdivides two curves (BFS), collecting overlapping
+/// parameter-box pairs whose sampled AABBs overlap and whose extents fall below
+/// `leaf_extent` (or once `depth` / the iteration guard is exhausted). `pad`
+/// accounts for tangential contact and the sampling gap.
 pub(super) fn seed_curve_curve<const D: usize>(
     a: &NurbsCurve<D>,
     b: &NurbsCurve<D>,
@@ -90,88 +93,130 @@ pub(super) fn seed_curve_curve<const D: usize>(
     max_depth: usize,
 ) -> Result<Vec<(CurveBox<D>, CurveBox<D>)>> {
     let mut out = Vec::new();
-    let mut stack = vec![(curve_root(a), curve_root(b), 0usize)];
-    while let Some((ba, bb, depth)) = stack.pop() {
-        if out.len() >= MAX_SEED_PAIRS {
+    let mut stack: VecDeque<_> = VecDeque::new();
+    stack.push_back((curve_root(a)?, curve_root(b)?, 0usize));
+    let mut iters = 0usize;
+    while let Some((ba, bb, depth)) = stack.pop_front() {
+        iters += 1;
+        if out.len() >= MAX_SEED_PAIRS || iters > MAX_SEED_ITERS {
+            out.push((ba, bb));
+            out.extend(stack.into_iter().map(|(x, y, _)| (x, y)));
             break;
         }
         if !aabb_overlap(&ba.min, &ba.max, &bb.min, &bb.max, pad) {
             continue;
         }
-        let ext_a = box_extent(&ba.min, &ba.max);
-        let ext_b = box_extent(&bb.min, &bb.max);
-        let small_a = ext_a < leaf_extent || !can_split_curve(&ba);
-        let small_b = ext_b < leaf_extent || !can_split_curve(&bb);
+        let small_a = box_extent(&ba.min, &ba.max) < leaf_extent || !can_split_curve(&ba);
+        let small_b = box_extent(&bb.min, &bb.max) < leaf_extent || !can_split_curve(&bb);
         if (small_a && small_b) || depth >= max_depth {
             out.push((ba, bb));
             continue;
         }
-        // Split whichever box is geometrically larger and still splittable.
-        if !small_a && (small_b || ext_a >= ext_b) {
-            for ca in split_curve_box(a, &ba)? {
-                stack.push((ca, bb, depth + 1));
-            }
+        // Split BOTH splittable boxes and recurse on overlapping child pairs.
+        // Splitting both (rather than one) keeps intermediate nodes from
+        // duplicating an unsplit large box across many small children, which is
+        // what explodes the frontier at axis-aligned tangents.
+        let children_a = if small_a {
+            vec![ba]
         } else {
-            for cb in split_curve_box(b, &bb)? {
-                stack.push((ba, cb, depth + 1));
+            split_curve_box(a, &ba)?
+        };
+        let children_b = if small_b {
+            vec![bb]
+        } else {
+            split_curve_box(b, &bb)?
+        };
+        for &ca in &children_a {
+            for &cb in &children_b {
+                if aabb_overlap(&ca.min, &ca.max, &cb.min, &cb.max, pad) {
+                    stack.push_back((ca, cb, depth + 1));
+                }
             }
         }
     }
+    out.truncate(MAX_SEED_PAIRS);
     Ok(out)
 }
+
+/// Number of samples used to bound a curve sub-interval. A tight sampled AABB
+/// (vs. the loose rational control-hull) is what keeps the subdivision frontier
+/// from exploding at axis-aligned tangents.
+const CURVE_SAMPLES: usize = 8;
 
 /// Whether a curve box's parameter span is wide enough to split.
 fn can_split_curve<const D: usize>(b: &CurveBox<D>) -> bool {
     b.t1 - b.t0 > 1e-7
 }
 
-/// Splits a curve box at its parameter midpoint, recomputing child hulls.
+/// Bisects the box's parameter range and re-bounds each half by direct sampling
+/// of the original curve (no geometric split — cheaper and tighter).
 fn split_curve_box<const D: usize>(c: &NurbsCurve<D>, b: &CurveBox<D>) -> Result<Vec<CurveBox<D>>> {
     let mid = 0.5 * (b.t0 + b.t1);
-    let (left, right) = c.split(mid)?;
     Ok(vec![
-        sub_curve_box(&left, b.t0, mid),
-        sub_curve_box(&right, mid, b.t1),
+        sampled_curve_box(c, b.t0, mid)?,
+        sampled_curve_box(c, mid, b.t1)?,
     ])
 }
 
-/// Wraps a sub-curve's hull with the parameter range it covers.
-fn sub_curve_box<const D: usize>(sub: &NurbsCurve<D>, t0: f64, t1: f64) -> CurveBox<D> {
-    let (lo, hi) = sub.bounding_box();
-    let mut min = [0.0; D];
-    let mut max = [0.0; D];
-    for k in 0..D {
-        min[k] = lo.coords[k];
-        max[k] = hi.coords[k];
+/// Builds a tight AABB for `c` over `[t0, t1]` by sampling `CURVE_SAMPLES`
+/// interior+endpoint points. The convex-hull property guarantees the true
+/// sub-curve hull is contained in the control hull, but sampling gives a far
+/// tighter (though not strictly conservative) box; a `pad` at the overlap test
+/// covers the sampling gap.
+// Sample-index to f64 conversions are exact for the small sample counts.
+#[allow(clippy::cast_precision_loss)]
+fn sampled_curve_box<const D: usize>(c: &NurbsCurve<D>, t0: f64, t1: f64) -> Result<CurveBox<D>> {
+    let mut min = [f64::INFINITY; D];
+    let mut max = [f64::NEG_INFINITY; D];
+    for i in 0..=CURVE_SAMPLES {
+        let t = t0 + (t1 - t0) * (i as f64) / (CURVE_SAMPLES as f64);
+        let p = c.point_at(t)?;
+        for k in 0..D {
+            min[k] = min[k].min(p.coords[k]);
+            max[k] = max[k].max(p.coords[k]);
+        }
     }
-    CurveBox { t0, t1, min, max }
+    Ok(CurveBox { t0, t1, min, max })
 }
 
-/// Builds a `SurfaceBox` for the whole surface.
-fn surface_root(s: &NurbsSurface) -> SurfaceBox {
+/// Samples per parametric direction when bounding a surface sub-rectangle.
+const SURFACE_SAMPLES: usize = 6;
+
+/// Builds a `SurfaceBox` for the whole surface (tight sampled AABB).
+fn surface_root(s: &NurbsSurface) -> Result<SurfaceBox> {
     let ((u0, u1), (v0, v1)) = s.parameter_domain();
-    let (lo, hi) = s.bounding_box();
-    SurfaceBox {
-        u0,
-        u1,
-        v0,
-        v1,
-        min: [lo.x, lo.y, lo.z],
-        max: [hi.x, hi.y, hi.z],
-    }
+    sampled_surface_box(s, u0, u1, v0, v1)
 }
 
-/// Wraps a sub-surface's hull with the parameter rectangle it covers.
-fn sub_surface_box(sub: &NurbsSurface, u0: f64, u1: f64, v0: f64, v1: f64) -> SurfaceBox {
-    let (lo, hi) = sub.bounding_box();
-    SurfaceBox {
+/// Builds a tight AABB for `s` over the parameter rectangle `[u0,u1]x[v0,v1]`
+/// by direct sampling (no geometric split — cheaper and far tighter than the
+/// rational control hull).
+// Sample-index to f64 conversions are exact for the small sample counts.
+#[allow(clippy::cast_precision_loss)]
+fn sampled_surface_box(s: &NurbsSurface, u0: f64, u1: f64, v0: f64, v1: f64) -> Result<SurfaceBox> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for iu in 0..=SURFACE_SAMPLES {
+        let u = u0 + (u1 - u0) * (iu as f64) / (SURFACE_SAMPLES as f64);
+        for iv in 0..=SURFACE_SAMPLES {
+            let v = v0 + (v1 - v0) * (iv as f64) / (SURFACE_SAMPLES as f64);
+            let p = s.point_at(u, v)?;
+            min[0] = min[0].min(p.x);
+            min[1] = min[1].min(p.y);
+            min[2] = min[2].min(p.z);
+            max[0] = max[0].max(p.x);
+            max[1] = max[1].max(p.y);
+            max[2] = max[2].max(p.z);
+        }
+    }
+    Ok(SurfaceBox {
         u0,
         u1,
         v0,
         v1,
-        min: [lo.x, lo.y, lo.z],
-        max: [hi.x, hi.y, hi.z],
-    }
+        min,
+        max,
+    })
 }
 
 /// Whether a surface box still has a splittable parameter span on either axis.
@@ -179,60 +224,26 @@ fn can_split_surface(b: &SurfaceBox) -> bool {
     (b.u1 - b.u0) > 1e-7 || (b.v1 - b.v0) > 1e-7
 }
 
-/// Splits the sub-patch `sub` (whose domain equals box `b`'s rectangle) along
-/// its longer parameter side, recomputing child hulls.
-fn split_surface_box(sub: &NurbsSurface, b: &SurfaceBox) -> Result<Vec<SurfaceBox>> {
+/// Bisects the box along its longer parameter side and re-bounds each half by
+/// direct sampling of the original surface.
+fn split_surface_box(s: &NurbsSurface, b: &SurfaceBox) -> Result<Vec<SurfaceBox>> {
     let du = b.u1 - b.u0;
     let dv = b.v1 - b.v0;
     if du >= dv && du > 1e-7 {
         let mid = 0.5 * (b.u0 + b.u1);
-        let (left, right) = sub.split_u(mid)?;
         Ok(vec![
-            sub_surface_box(&left, b.u0, mid, b.v0, b.v1),
-            sub_surface_box(&right, mid, b.u1, b.v0, b.v1),
+            sampled_surface_box(s, b.u0, mid, b.v0, b.v1)?,
+            sampled_surface_box(s, mid, b.u1, b.v0, b.v1)?,
         ])
     } else if dv > 1e-7 {
         let mid = 0.5 * (b.v0 + b.v1);
-        let (left, right) = sub.split_v(mid)?;
         Ok(vec![
-            sub_surface_box(&left, b.u0, b.u1, b.v0, mid),
-            sub_surface_box(&right, b.u0, b.u1, mid, b.v1),
+            sampled_surface_box(s, b.u0, b.u1, b.v0, mid)?,
+            sampled_surface_box(s, b.u0, b.u1, mid, b.v1)?,
         ])
     } else {
         Ok(vec![*b])
     }
-}
-
-/// The surface sub-patch covering box `b` (for re-hulling its children).
-fn sub_surface(s: &NurbsSurface, b: &SurfaceBox) -> Result<NurbsSurface> {
-    let ((u0, u1), (v0, v1)) = s.parameter_domain();
-    let mut cur = s.clone();
-    let (mut cu0, mut cu1, mut cv0, mut cv1) = (u0, u1, v0, v1);
-    if b.u0 > cu0 + 1e-9 {
-        let (_, right) = cur.split_u(b.u0)?;
-        cur = right;
-        cu0 = b.u0;
-    }
-    if b.u1 < cu1 - 1e-9 {
-        // Re-derive the local domain after the first split.
-        let ((nu0, nu1), _) = cur.parameter_domain();
-        let _ = (nu0, nu1, cu1);
-        let (left, _) = cur.split_u(b.u1)?;
-        cur = left;
-        cu1 = b.u1;
-    }
-    if b.v0 > cv0 + 1e-9 {
-        let (_, right) = cur.split_v(b.v0)?;
-        cur = right;
-        cv0 = b.v0;
-    }
-    if b.v1 < cv1 - 1e-9 {
-        let (left, _) = cur.split_v(b.v1)?;
-        cur = left;
-        cv1 = b.v1;
-    }
-    let _ = (cu0, cu1, cv0, cv1);
-    Ok(cur)
 }
 
 /// Recursively subdivides a curve against a surface, collecting overlapping
@@ -245,33 +256,44 @@ pub(super) fn seed_curve_surface(
     max_depth: usize,
 ) -> Result<Vec<(CurveBox<3>, SurfaceBox)>> {
     let mut out = Vec::new();
-    let mut stack = vec![(curve_root(c), surface_root(s), 0usize)];
-    while let Some((cb, sb, depth)) = stack.pop() {
-        if out.len() >= MAX_SEED_PAIRS {
+    let mut stack: VecDeque<_> = VecDeque::new();
+    stack.push_back((curve_root(c)?, surface_root(s)?, 0usize));
+    let mut iters = 0usize;
+    while let Some((cb, sb, depth)) = stack.pop_front() {
+        iters += 1;
+        if out.len() >= MAX_SEED_PAIRS || iters > MAX_SEED_ITERS {
+            out.push((cb, sb));
+            out.extend(stack.into_iter().map(|(x, y, _)| (x, y)));
             break;
         }
         if !aabb_overlap(&cb.min, &cb.max, &sb.min, &sb.max, pad) {
             continue;
         }
-        let ext_c = box_extent(&cb.min, &cb.max);
-        let ext_s = box_extent(&sb.min, &sb.max);
-        let small_c = ext_c < leaf_extent || !can_split_curve(&cb);
-        let small_s = ext_s < leaf_extent || !can_split_surface(&sb);
+        let small_c = box_extent(&cb.min, &cb.max) < leaf_extent || !can_split_curve(&cb);
+        let small_s = box_extent(&sb.min, &sb.max) < leaf_extent || !can_split_surface(&sb);
         if (small_c && small_s) || depth >= max_depth {
             out.push((cb, sb));
             continue;
         }
-        if !small_c && (small_s || ext_c >= ext_s) {
-            for cc in split_curve_box(c, &cb)? {
-                stack.push((cc, sb, depth + 1));
-            }
+        let children_c = if small_c {
+            vec![cb]
         } else {
-            let sub = sub_surface(s, &sb)?;
-            for cs in split_surface_box(&sub, &sb)? {
-                stack.push((cb, cs, depth + 1));
+            split_curve_box(c, &cb)?
+        };
+        let children_s = if small_s {
+            vec![sb]
+        } else {
+            split_surface_box(s, &sb)?
+        };
+        for &cc in &children_c {
+            for &cs in &children_s {
+                if aabb_overlap(&cc.min, &cc.max, &cs.min, &cs.max, pad) {
+                    stack.push_back((cc, cs, depth + 1));
+                }
             }
         }
     }
+    out.truncate(MAX_SEED_PAIRS);
     Ok(out)
 }
 
@@ -285,34 +307,44 @@ pub(super) fn seed_surface_surface(
     max_depth: usize,
 ) -> Result<Vec<(SurfaceBox, SurfaceBox)>> {
     let mut out = Vec::new();
-    let mut stack = vec![(surface_root(a), surface_root(b), 0usize)];
-    while let Some((ba, bb, depth)) = stack.pop() {
-        if out.len() >= MAX_SEED_PAIRS {
+    let mut stack: VecDeque<_> = VecDeque::new();
+    stack.push_back((surface_root(a)?, surface_root(b)?, 0usize));
+    let mut iters = 0usize;
+    while let Some((ba, bb, depth)) = stack.pop_front() {
+        iters += 1;
+        if out.len() >= MAX_SEED_PAIRS || iters > MAX_SEED_ITERS {
+            out.push((ba, bb));
+            out.extend(stack.into_iter().map(|(x, y, _)| (x, y)));
             break;
         }
         if !aabb_overlap(&ba.min, &ba.max, &bb.min, &bb.max, pad) {
             continue;
         }
-        let ext_a = box_extent(&ba.min, &ba.max);
-        let ext_b = box_extent(&bb.min, &bb.max);
-        let small_a = ext_a < leaf_extent || !can_split_surface(&ba);
-        let small_b = ext_b < leaf_extent || !can_split_surface(&bb);
+        let small_a = box_extent(&ba.min, &ba.max) < leaf_extent || !can_split_surface(&ba);
+        let small_b = box_extent(&bb.min, &bb.max) < leaf_extent || !can_split_surface(&bb);
         if (small_a && small_b) || depth >= max_depth {
             out.push((ba, bb));
             continue;
         }
-        if !small_a && (small_b || ext_a >= ext_b) {
-            let sub = sub_surface(a, &ba)?;
-            for ca in split_surface_box(&sub, &ba)? {
-                stack.push((ca, bb, depth + 1));
-            }
+        let children_a = if small_a {
+            vec![ba]
         } else {
-            let sub = sub_surface(b, &bb)?;
-            for cb in split_surface_box(&sub, &bb)? {
-                stack.push((ba, cb, depth + 1));
+            split_surface_box(a, &ba)?
+        };
+        let children_b = if small_b {
+            vec![bb]
+        } else {
+            split_surface_box(b, &bb)?
+        };
+        for &ca in &children_a {
+            for &cb in &children_b {
+                if aabb_overlap(&ca.min, &ca.max, &cb.min, &cb.max, pad) {
+                    stack.push_back((ca, cb, depth + 1));
+                }
             }
         }
     }
+    out.truncate(MAX_SEED_PAIRS);
     Ok(out)
 }
 

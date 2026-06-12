@@ -21,8 +21,10 @@
 //! in [`IntersectionOptions`] bounds every marching loop.
 
 mod bbox;
+mod curve_curve;
 mod types;
 
+pub use curve_curve::intersect_curves_2d;
 pub use types::{
     CurveCurveIntersection2D, CurveSurfaceIntersection, IntersectionOptions,
     SurfaceIntersectionCurve,
