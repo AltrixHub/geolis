@@ -288,8 +288,20 @@ fn draw_case(
     };
     let centerlines = vec![pline.clone()];
 
-    let raw_boundaries = WallOutline2D::new(vec![pline], half_w)
-        .execute()
+    // `execute_faces` returns validated, union-assembled footprints. Flatten
+    // every footprint's outer ring and holes into a single boundary list so
+    // the example's own miter-clip / split pass can run over them.
+    let raw_boundaries: Vec<Pline> = WallOutline2D::new(vec![pline], half_w)
+        .execute_faces()
+        .map(|footprints| {
+            footprints
+                .into_iter()
+                .flat_map(|fp| {
+                    let (outer, holes) = fp.into_parts();
+                    std::iter::once(outer).chain(holes)
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     // LEFT: RED = raw WallOutline2D output (BEFORE any processing)

@@ -671,6 +671,7 @@ dependencies = [
  "nalgebra",
  "revion_app",
  "revion_core",
+ "revion_design_system",
  "revion_ui",
  "slotmap",
  "spade",
@@ -2101,6 +2102,17 @@ dependencies = [
  "lyon",
  "ulid",
  "winit",
+]
+
+[[package]]
+name = "revion_design_system"
+version = "0.1.0"
+dependencies = [
+ "revion_core",
+ "revion_macros",
+ "revion_ui",
+ "strum",
+ "tracing",
 ]
 
 [[package]]

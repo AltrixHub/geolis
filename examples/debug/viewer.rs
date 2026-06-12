@@ -5,30 +5,23 @@
 
 #![allow(clippy::too_many_lines)]
 
+use revion_design_system::Theme;
 use revion_ui::cx_builders::{div, text, viewport};
 use revion_ui::value_objects::{Dimension, Edges};
 use revion_ui::{
     style::{AlignItems, FlexDirection, JustifyContent, LayoutStyle, VisualStyle},
-    MeshStorage, RenderContext, Theme, VNode, ViewerType,
+    MeshStorage, RenderContext, View, ViewerType,
 };
 
-/// Minimal application state — holds only mesh storage.
-#[derive(Debug, Clone, Default)]
-pub struct AppState {
-    pub mesh_storage: MeshStorage,
-}
-
 /// Root UI component — dual 2D / 3D viewports with a status bar.
-pub fn app_component(ctx: &mut RenderContext) -> VNode {
+///
+/// The mesh storage is captured at app startup and rendered as-is; the
+/// viewer holds no reactive state of its own.
+pub fn app_component(ctx: &mut RenderContext, mesh_storage: &MeshStorage) -> View {
     let theme = Theme::dark();
 
-    let mesh_storage = ctx
-        .store::<AppState>()
-        .map(|s: revion_ui::Store<AppState>| s.with(|state| state.mesh_storage.clone()))
-        .unwrap_or_default();
-
-    let viewport_2d = build_viewport_2d(ctx, &theme, &mesh_storage);
-    let viewport_3d = build_viewport_3d(ctx, &theme, &mesh_storage);
+    let viewport_2d = build_viewport_2d(ctx, &theme, mesh_storage);
+    let viewport_3d = build_viewport_3d(ctx, &theme, mesh_storage);
 
     div()
         .style(VisualStyle::new().background_color(theme.colors.background))
@@ -129,7 +122,7 @@ pub fn app_component(ctx: &mut RenderContext) -> VNode {
         .build_cx(ctx)
 }
 
-fn build_viewport_2d(ctx: &mut RenderContext, theme: &Theme, mesh_storage: &MeshStorage) -> VNode {
+fn build_viewport_2d(ctx: &mut RenderContext, theme: &Theme, mesh_storage: &MeshStorage) -> View {
     viewport(ViewerType::Viewer2D)
         .style(VisualStyle::new().border(1.0, theme.colors.primary))
         .layout(
@@ -142,7 +135,7 @@ fn build_viewport_2d(ctx: &mut RenderContext, theme: &Theme, mesh_storage: &Mesh
         .build_cx(ctx)
 }
 
-fn build_viewport_3d(ctx: &mut RenderContext, theme: &Theme, mesh_storage: &MeshStorage) -> VNode {
+fn build_viewport_3d(ctx: &mut RenderContext, theme: &Theme, mesh_storage: &MeshStorage) -> View {
     viewport(ViewerType::Viewer3D)
         .style(VisualStyle::new().border(1.0, theme.colors.warning))
         .layout(

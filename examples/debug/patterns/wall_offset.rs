@@ -289,16 +289,20 @@ fn draw_case(
         closed,
     };
     let wall = WallOutline2D::new(vec![pline], half_w);
-    if let Ok(outlines) = wall.execute() {
-        for (i, ol) in outlines.iter().enumerate() {
-            let p: Vec<Point3> = ol
+    if let Ok(footprints) = wall.execute_faces() {
+        // Render every footprint ring: outer in green, holes in blue.
+        let rings = footprints.iter().flat_map(|fp| {
+            std::iter::once((fp.outer(), GREEN))
+                .chain(fp.holes().iter().map(|h| (h, BLUE)))
+        });
+        for (ring, color) in rings {
+            let p: Vec<Point3> = ring
                 .vertices
                 .iter()
                 .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
                 .collect();
-            let color = if i == 0 { GREEN } else { BLUE };
             if let Ok(s) = StrokeStyle::new(0.08) {
-                register_stroke(storage, &p, s, ol.closed, color);
+                register_stroke(storage, &p, s, ring.closed, color);
             }
         }
     }
