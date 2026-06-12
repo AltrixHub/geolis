@@ -22,7 +22,6 @@ mod viewer;
 
 use revion_app::App;
 use revion_ui::{MeshStorage, RevionError};
-use viewer::AppState;
 
 fn main() -> Result<(), RevionError> {
     // Default: WARN for everything, INFO for geolis.
@@ -33,16 +32,13 @@ fn main() -> Result<(), RevionError> {
         .add_directive("geolis=info".parse().unwrap_or_default());
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    // Build mesh storage with test data
+    // Build mesh storage with test data. `MeshStorage` is internally
+    // reference-counted, so the clone captured by the component closure
+    // shares the same backing storage.
     let storage = MeshStorage::new();
     test_meshes::register_test_meshes(&storage);
 
-    let state = AppState {
-        mesh_storage: storage,
-    };
-
     let mut app = App::new("Geolis Debug Viewer")?;
-    app.context_mut().provide_store(state)?;
-    app.build_with_component(viewer::app_component)?;
+    app.build_with_component(move |ctx| viewer::app_component(ctx, &storage))?;
     app.run()
 }

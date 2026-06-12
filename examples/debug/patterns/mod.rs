@@ -1,6 +1,8 @@
 pub mod boolean;
 pub mod extrude;
 pub mod face_creation;
+pub mod nurbs_curves;
+pub mod nurbs_surface;
 pub mod primitives;
 pub mod revolve;
 pub mod shell;
@@ -36,6 +38,8 @@ pub const PATTERNS: &[&str] = &[
     "primitives",
     "split",
     "shell",
+    "nurbs_curves",
+    "nurbs_surface",
 ];
 
 /// Register meshes for the named pattern. Returns `true` if found.
@@ -83,6 +87,14 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
         }
         "shell" => {
             shell::register(storage);
+            true
+        }
+        "nurbs_curves" => {
+            nurbs_curves::register(storage);
+            true
+        }
+        "nurbs_surface" => {
+            nurbs_surface::register(storage);
             true
         }
         _ => false,

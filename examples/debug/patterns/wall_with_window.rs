@@ -2,7 +2,7 @@ use geolis::geometry::pline::{Pline, PlineVertex};
 use geolis::math::{Point3, Vector3};
 use geolis::operations::boolean::Subtract;
 use geolis::operations::creation::{MakeBox, MakeFace, MakeWire};
-use geolis::operations::offset::WallOutline2D;
+use geolis::operations::offset::{WallFootprint2D, WallOutline2D};
 use geolis::operations::shaping::Extrude;
 use geolis::tessellation::{StrokeStyle, TessellateSolid, TessellationParams};
 use geolis::topology::TopologyStore;
@@ -39,13 +39,13 @@ fn render_solid(
     }
 }
 
-/// Draws a centerline and returns the wall outline points.
+/// Draws a centerline and returns the first wall footprint (outer + holes).
 fn draw_centerline_and_offset(
     storage: &MeshStorage,
     centerline: &Pline,
     bx: f64,
     by: f64,
-) -> Option<Vec<Pline>> {
+) -> Option<WallFootprint2D> {
     let center_pts: Vec<Point3> = centerline
         .vertices
         .iter()
@@ -60,7 +60,7 @@ fn draw_centerline_and_offset(
     );
 
     let wall = WallOutline2D::new(vec![centerline.clone()], WALL_HALF_WIDTH);
-    wall.execute().ok()
+    wall.execute_faces().ok()?.into_iter().next()
 }
 
 pub fn register(storage: &MeshStorage) {
@@ -85,14 +85,12 @@ fn case_straight_wall(storage: &MeshStorage, bx: f64, by: f64) {
         closed: false,
     };
 
-    let Some(outlines) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
-        return;
-    };
-    let Some(outline) = outlines.into_iter().next() else {
+    let Some(footprint) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
         return;
     };
 
-    let wall_pts: Vec<Point3> = outline
+    let wall_pts: Vec<Point3> = footprint
+        .outer()
         .vertices
         .iter()
         .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
@@ -140,14 +138,12 @@ fn case_l_wall(storage: &MeshStorage, bx: f64, by: f64) {
         closed: false,
     };
 
-    let Some(outlines) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
-        return;
-    };
-    let Some(outline) = outlines.into_iter().next() else {
+    let Some(footprint) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
         return;
     };
 
-    let wall_pts: Vec<Point3> = outline
+    let wall_pts: Vec<Point3> = footprint
+        .outer()
         .vertices
         .iter()
         .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
@@ -196,14 +192,12 @@ fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
         closed: true,
     };
 
-    let Some(outlines) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
-        return;
-    };
-    let Some(outer) = outlines.first() else {
+    let Some(footprint) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
         return;
     };
 
-    let wall_pts: Vec<Point3> = outer
+    let wall_pts: Vec<Point3> = footprint
+        .outer()
         .vertices
         .iter()
         .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
@@ -213,20 +207,18 @@ fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
         return;
     };
 
-    // If there's an inner outline, use it as a hole in the face
-    let inner_wires = if outlines.len() > 1 {
-        let inner_pts: Vec<Point3> = outlines[1]
+    // Each footprint hole becomes a face hole.
+    let mut inner_wires = Vec::new();
+    for hole in footprint.holes() {
+        let inner_pts: Vec<Point3> = hole
             .vertices
             .iter()
             .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
             .collect();
-        match MakeWire::new(inner_pts, true).execute(&mut store) {
-            Ok(w) => vec![w],
-            Err(_) => vec![],
+        if let Ok(w) = MakeWire::new(inner_pts, true).execute(&mut store) {
+            inner_wires.push(w);
         }
-    } else {
-        vec![]
-    };
+    }
 
     let Ok(face) = MakeFace::new(outer_wire, inner_wires).execute(&mut store) else {
         return;
