@@ -151,7 +151,10 @@ impl TessellateFace {
             }
             FaceSurface::Nurbs(nurbs) => {
                 let options = SurfaceTessellationOptions::default();
-                super::tessellate_nurbs_surface(nurbs, &options)
+                match &face.trim {
+                    None => super::tessellate_nurbs_surface(nurbs, &options),
+                    Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options),
+                }
             }
         }
     }

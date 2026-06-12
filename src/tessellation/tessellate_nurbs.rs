@@ -182,14 +182,28 @@ pub fn tessellate_nurbs_surface(
     validate_surface_options(options)?;
 
     let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
+    let (u_params, v_params) = adaptive_grid_parameters(surface, options);
+    build_grid_mesh(surface, &u_params, &v_params, u_min, u_max, v_min, v_max)
+}
 
+/// Computes the adaptive `u`/`v` sampling-parameter lists for `surface` under
+/// `options`: each axis starts at `min_divisions` uniform intervals (merged with
+/// that axis's interior knot lines) and is doubled while the adjacent-sample
+/// normal deviation exceeds `normal_tolerance`, capped at `max_divisions`.
+///
+/// Shared by the full-domain surface tessellator and the trimmed tessellator so
+/// both use the identical refinement; the caller is responsible for validating
+/// `options`.
+pub(crate) fn adaptive_grid_parameters(
+    surface: &NurbsSurface,
+    options: &SurfaceTessellationOptions,
+) -> (Vec<f64>, Vec<f64>) {
+    let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
     let interior_u = interior_knots(surface.knots_u().as_slice(), u_min, u_max);
     let interior_v = interior_knots(surface.knots_v().as_slice(), v_min, v_max);
-
     let u_params = refine_axis(surface, options, u_min, u_max, &interior_u, Axis::U);
     let v_params = refine_axis(surface, options, v_min, v_max, &interior_v, Axis::V);
-
-    build_grid_mesh(surface, &u_params, &v_params, u_min, u_max, v_min, v_max)
+    (u_params, v_params)
 }
 
 /// Direction along which an adjacent-sample normal check is taken.
