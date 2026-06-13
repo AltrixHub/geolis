@@ -19,6 +19,8 @@ mod test;
 
 use revion_ui::MeshStorage;
 
+pub use patterns::SceneBounds;
+
 /// Parsed CLI arguments.
 struct CliArgs {
     /// Use test (ground truth) patterns instead of algorithm output.
@@ -42,19 +44,24 @@ fn parse_args() -> CliArgs {
 }
 
 /// Register test meshes, selecting the pattern from the CLI arguments.
-pub fn register_test_meshes(storage: &MeshStorage) {
+///
+/// Returns the accumulated 3D scene bounds for the rendered pattern, used by
+/// the caller to frame the initial 3D camera. The `--test` ground-truth path
+/// does not compute bounds and yields `None`, leaving revion's default camera
+/// in place.
+pub fn register_test_meshes(storage: &MeshStorage) -> Option<SceneBounds> {
     let args = parse_args();
     let name = &args.pattern;
 
     if args.test_mode {
         if test::register(storage, name) {
-            return;
+            return None;
         }
         eprintln!("[debug] unknown test pattern: {name}");
         eprintln!("[debug] available (--test): {}", test::PATTERNS.join(", "));
     } else {
-        if patterns::register(storage, name) {
-            return;
+        if let Some(bounds) = patterns::register(storage, name) {
+            return Some(bounds);
         }
         eprintln!("[debug] unknown pattern: {name}");
         eprintln!("[debug] available: {}", patterns::PATTERNS.join(", "));
@@ -62,5 +69,5 @@ pub fn register_test_meshes(storage: &MeshStorage) {
     }
 
     eprintln!("[debug] falling back to: stroke_joins");
-    patterns::register(storage, "stroke_joins");
+    patterns::register(storage, "stroke_joins")
 }

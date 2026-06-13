@@ -11,7 +11,7 @@ use geolis::tessellation::{tessellate_nurbs_curve, CurveTessellationOptions, Str
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -24,7 +24,14 @@ fn stroke_style() -> StrokeStyle {
 }
 
 /// Tessellate a NURBS curve and register it as a translated stroke.
-fn register_curve(storage: &MeshStorage, curve: &NurbsCurve3D, bx: f64, by: f64, color: Color) {
+fn register_curve(
+    storage: &MeshStorage,
+    bounds: &mut SceneBounds,
+    curve: &NurbsCurve3D,
+    bx: f64,
+    by: f64,
+    color: Color,
+) {
     let options = CurveTessellationOptions::default();
     let Ok(points) = tessellate_nurbs_curve(curve, &options) else {
         return;
@@ -33,15 +40,23 @@ fn register_curve(storage: &MeshStorage, curve: &NurbsCurve3D, bx: f64, by: f64,
         .iter()
         .map(|p| Point3::new(p.x + bx, p.y + by, p.z))
         .collect();
-    register_stroke(storage, &translated, stroke_style(), false, color);
+    register_stroke(storage, bounds, &translated, stroke_style(), false, color);
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 1: interpolated free-form 3D curve.
     {
         let bx = 0.0;
         let by = 0.0;
-        register_label(storage, bx - 1.5, by + 6.0, "1", LABEL_SIZE, LABEL_COLOR);
+        register_label(
+            storage,
+            bounds,
+            bx - 1.5,
+            by + 6.0,
+            "1",
+            LABEL_SIZE,
+            LABEL_COLOR,
+        );
 
         let waypoints = [
             Point3::new(0.0, 0.0, 0.0),
@@ -51,7 +66,7 @@ pub fn register(storage: &MeshStorage) {
             Point3::new(9.0, 0.0, 1.0),
         ];
         if let Ok((curve, _params)) = NurbsCurve3D::interpolate(&waypoints, 3) {
-            register_curve(storage, &curve, bx, by, GREEN);
+            register_curve(storage, bounds, &curve, bx, by, GREEN);
         }
     }
 
@@ -59,7 +74,15 @@ pub fn register(storage: &MeshStorage) {
     {
         let bx = 0.0;
         let by = -10.0;
-        register_label(storage, bx - 1.5, by + 4.0, "2", LABEL_SIZE, LABEL_COLOR);
+        register_label(
+            storage,
+            bounds,
+            bx - 1.5,
+            by + 4.0,
+            "2",
+            LABEL_SIZE,
+            LABEL_COLOR,
+        );
 
         if let Ok(curve) = NurbsCurve3D::circle(
             Point3::new(bx, by, 0.0),
@@ -69,7 +92,7 @@ pub fn register(storage: &MeshStorage) {
         ) {
             // The circle is already centered at (bx, by); render without an
             // extra offset.
-            register_curve(storage, &curve, 0.0, 0.0, BLUE);
+            register_curve(storage, bounds, &curve, 0.0, 0.0, BLUE);
         }
     }
 
@@ -77,7 +100,15 @@ pub fn register(storage: &MeshStorage) {
     {
         let bx = 8.0;
         let by = -10.0;
-        register_label(storage, bx - 1.5, by + 4.0, "3", LABEL_SIZE, LABEL_COLOR);
+        register_label(
+            storage,
+            bounds,
+            bx - 1.5,
+            by + 4.0,
+            "3",
+            LABEL_SIZE,
+            LABEL_COLOR,
+        );
 
         if let Ok(curve) = NurbsCurve3D::arc(
             Point3::new(bx, by, 0.0),
@@ -87,7 +118,7 @@ pub fn register(storage: &MeshStorage) {
             0.0,
             std::f64::consts::FRAC_PI_2,
         ) {
-            register_curve(storage, &curve, 0.0, 0.0, ORANGE);
+            register_curve(storage, bounds, &curve, 0.0, 0.0, ORANGE);
         }
     }
 }

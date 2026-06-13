@@ -5,7 +5,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_face, register_label, register_stroke};
+use super::{register_face, register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -14,9 +14,15 @@ const GREEN: Color = Color::rgb(100, 200, 100);
 const BLUE: Color = Color::rgb(100, 150, 255);
 
 /// Runs `MakeWire` -> `MakeFace` -> `TessellateFace` pipeline and renders the result.
-fn render_face(storage: &MeshStorage, points: &[Point3], outline_color: Color, mesh_color: Color) {
+fn render_face(
+    storage: &MeshStorage,
+    bounds: &mut SceneBounds,
+    points: &[Point3],
+    outline_color: Color,
+    mesh_color: Color,
+) {
     if let Ok(style) = StrokeStyle::new(0.05) {
-        register_stroke(storage, points, style, true, outline_color);
+        register_stroke(storage, bounds, points, style, true, outline_color);
     }
 
     let mut topo = TopologyStore::new();
@@ -27,38 +33,62 @@ fn render_face(storage: &MeshStorage, points: &[Point3], outline_color: Color, m
         return;
     };
     if let Ok(mesh) = TessellateFace::new(face, TessellationParams::default()).execute(&topo) {
-        register_face(storage, mesh, mesh_color);
+        register_face(storage, bounds, mesh, mesh_color);
     }
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 1: Triangle
     let bx = -12.0;
     let by = 2.0;
-    register_label(storage, bx - 2.0, by + 5.5, "1", LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        bounds,
+        bx - 2.0,
+        by + 5.5,
+        "1",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     let tri = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
         Point3::new(bx + 2.0, by + 4.0, 0.0),
     ];
-    render_face(storage, &tri, GRAY, GREEN);
+    render_face(storage, bounds, &tri, GRAY, GREEN);
 
     // Case 2: Square
     let bx = -4.0;
     let by = 2.0;
-    register_label(storage, bx - 2.0, by + 5.5, "2", LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        bounds,
+        bx - 2.0,
+        by + 5.5,
+        "2",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     let sq = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
         Point3::new(bx + 4.0, by + 4.0, 0.0),
         Point3::new(bx, by + 4.0, 0.0),
     ];
-    render_face(storage, &sq, GRAY, BLUE);
+    render_face(storage, bounds, &sq, GRAY, BLUE);
 
     // Case 3: L-shape (concave)
     let bx = 4.0;
     let by = 2.0;
-    register_label(storage, bx - 2.0, by + 5.5, "3", LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        bounds,
+        bx - 2.0,
+        by + 5.5,
+        "3",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     let l_shape = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
@@ -67,12 +97,20 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 2.0, by + 4.0, 0.0),
         Point3::new(bx, by + 4.0, 0.0),
     ];
-    render_face(storage, &l_shape, GRAY, GREEN);
+    render_face(storage, bounds, &l_shape, GRAY, GREEN);
 
     // Case 4: Square with hole
     let bx = 14.0;
     let by = 2.0;
-    register_label(storage, bx - 2.0, by + 5.5, "4", LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        bounds,
+        bx - 2.0,
+        by + 5.5,
+        "4",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     let outer = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 6.0, by, 0.0),
@@ -86,8 +124,8 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 1.5, by + 4.5, 0.0),
     ];
     if let Ok(style) = StrokeStyle::new(0.05) {
-        register_stroke(storage, &outer, style, true, GRAY);
-        register_stroke(storage, &inner, style, true, GRAY);
+        register_stroke(storage, bounds, &outer, style, true, GRAY);
+        register_stroke(storage, bounds, &inner, style, true, GRAY);
     }
 
     let mut topo = TopologyStore::new();
@@ -101,6 +139,6 @@ pub fn register(storage: &MeshStorage) {
         return;
     };
     if let Ok(mesh) = TessellateFace::new(face, TessellationParams::default()).execute(&topo) {
-        register_face(storage, mesh, BLUE);
+        register_face(storage, bounds, mesh, BLUE);
     }
 }

@@ -19,14 +19,18 @@ use revion_ui::{
 /// viewer's only reactive state is the 3D shading mode toggle (Lit vs
 /// matcap rainbow — the latter maps view-space normals to hue, which makes
 /// surface curvature continuity easy to inspect).
-pub fn app_component(ctx: &mut RenderContext, mesh_storage: &MeshStorage) -> View {
+pub fn app_component(
+    ctx: &mut RenderContext,
+    mesh_storage: &MeshStorage,
+    camera: Option<([f32; 3], [f32; 3])>,
+) -> View {
     let theme = Theme::dark();
     // Matcap by default: NURBS surface inspection reads best with the
     // normal-to-hue material; the status-bar button switches back to Lit.
     let display_mode = ctx.signal(DisplayMode3D::MatcapRainbow);
 
     let viewport_2d = build_viewport_2d(ctx, &theme, mesh_storage);
-    let viewport_3d = build_viewport_3d(ctx, &theme, mesh_storage, display_mode);
+    let viewport_3d = build_viewport_3d(ctx, &theme, mesh_storage, display_mode, camera);
 
     div()
         .style(VisualStyle::new().background_color(theme.colors.background))
@@ -165,8 +169,9 @@ fn build_viewport_3d(
     theme: &Theme,
     mesh_storage: &MeshStorage,
     display_mode: Signal<DisplayMode3D>,
+    camera: Option<([f32; 3], [f32; 3])>,
 ) -> View {
-    viewport(ViewerType::Viewer3D)
+    let vp = viewport(ViewerType::Viewer3D)
         .style(VisualStyle::new().border(1.0, theme.colors.warning))
         .layout(
             LayoutStyle::new()
@@ -175,6 +180,11 @@ fn build_viewport_3d(
                 .flex_grow(1.0),
         )
         .mesh_storage(mesh_storage.clone())
-        .display_mode_fn(move || display_mode.get())
-        .build_cx(ctx)
+        .display_mode_fn(move || display_mode.get());
+    let vp = if let Some((eye, target)) = camera {
+        vp.camera_3d(eye, target)
+    } else {
+        vp
+    };
+    vp.build_cx(ctx)
 }

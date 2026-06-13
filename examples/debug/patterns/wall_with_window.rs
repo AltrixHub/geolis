@@ -9,7 +9,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label, register_stroke};
+use super::{register_edges, register_face, register_label, register_stroke, SceneBounds};
 
 fn stroke_style() -> StrokeStyle {
     StrokeStyle::new(0.05).unwrap_or_else(|_| unreachable!())
@@ -26,22 +26,24 @@ const WALL_HALF_WIDTH: f64 = 0.15;
 
 fn render_solid(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     store: &TopologyStore,
     solid: geolis::topology::SolidId,
     mesh_color: Color,
     edge_color: Color,
 ) {
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(store) {
-        register_face(storage, mesh, mesh_color);
+        register_face(storage, bounds, mesh, mesh_color);
     }
     if let Ok(solid_data) = store.solid(solid) {
-        register_edges(storage, store, solid_data.outer_shell, edge_color);
+        register_edges(storage, bounds, store, solid_data.outer_shell, edge_color);
     }
 }
 
 /// Draws a centerline and returns the first wall footprint (outer + holes).
 fn draw_centerline_and_offset(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     centerline: &Pline,
     bx: f64,
     by: f64,
@@ -53,6 +55,7 @@ fn draw_centerline_and_offset(
         .collect();
     register_stroke(
         storage,
+        bounds,
         &center_pts,
         stroke_style(),
         centerline.closed,
@@ -63,20 +66,28 @@ fn draw_centerline_and_offset(
     wall.execute_faces().ok()?.into_iter().next()
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 1: Simple straight wall with one window
-    case_straight_wall(storage, -12.0, 0.0);
+    case_straight_wall(storage, bounds, -12.0, 0.0);
 
     // Case 2: L-shaped wall with window on the longer segment
-    case_l_wall(storage, 0.0, 0.0);
+    case_l_wall(storage, bounds, 0.0, 0.0);
 
     // Case 3: Closed rectangular room with a window
-    case_room_with_window(storage, -12.0, -14.0);
+    case_room_with_window(storage, bounds, -12.0, -14.0);
 }
 
 /// Case 1: Straight wall segment with a window opening.
-fn case_straight_wall(storage: &MeshStorage, bx: f64, by: f64) {
-    register_label(storage, bx - 1.5, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+fn case_straight_wall(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, by: f64) {
+    register_label(
+        storage,
+        bounds,
+        bx - 1.5,
+        by + 8.0,
+        "1",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
 
     let mut store = TopologyStore::new();
 
@@ -85,7 +96,7 @@ fn case_straight_wall(storage: &MeshStorage, bx: f64, by: f64) {
         closed: false,
     };
 
-    let Some(footprint) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
+    let Some(footprint) = draw_centerline_and_offset(storage, bounds, &centerline, bx, by) else {
         return;
     };
 
@@ -120,12 +131,20 @@ fn case_straight_wall(storage: &MeshStorage, bx: f64, by: f64) {
         return;
     };
 
-    render_solid(storage, &store, result, GREEN, EDGE_COLOR);
+    render_solid(storage, bounds, &store, result, GREEN, EDGE_COLOR);
 }
 
 /// Case 2: L-shaped wall with a window on the longer segment.
-fn case_l_wall(storage: &MeshStorage, bx: f64, by: f64) {
-    register_label(storage, bx - 1.5, by + 10.0, "2", LABEL_SIZE, LABEL_COLOR);
+fn case_l_wall(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, by: f64) {
+    register_label(
+        storage,
+        bounds,
+        bx - 1.5,
+        by + 10.0,
+        "2",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
 
     let mut store = TopologyStore::new();
 
@@ -138,7 +157,7 @@ fn case_l_wall(storage: &MeshStorage, bx: f64, by: f64) {
         closed: false,
     };
 
-    let Some(footprint) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
+    let Some(footprint) = draw_centerline_and_offset(storage, bounds, &centerline, bx, by) else {
         return;
     };
 
@@ -173,12 +192,20 @@ fn case_l_wall(storage: &MeshStorage, bx: f64, by: f64) {
         return;
     };
 
-    render_solid(storage, &store, result, GREEN, EDGE_COLOR);
+    render_solid(storage, bounds, &store, result, GREEN, EDGE_COLOR);
 }
 
 /// Case 3: Closed rectangular room with a window on one wall.
-fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
-    register_label(storage, bx - 1.5, by + 12.0, "3", LABEL_SIZE, LABEL_COLOR);
+fn case_room_with_window(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, by: f64) {
+    register_label(
+        storage,
+        bounds,
+        bx - 1.5,
+        by + 12.0,
+        "3",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
 
     let mut store = TopologyStore::new();
 
@@ -192,7 +219,7 @@ fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
         closed: true,
     };
 
-    let Some(footprint) = draw_centerline_and_offset(storage, &centerline, bx, by) else {
+    let Some(footprint) = draw_centerline_and_offset(storage, bounds, &centerline, bx, by) else {
         return;
     };
 
@@ -241,5 +268,5 @@ fn case_room_with_window(storage: &MeshStorage, bx: f64, by: f64) {
         return;
     };
 
-    render_solid(storage, &store, result, GREEN, EDGE_COLOR);
+    render_solid(storage, bounds, &store, result, GREEN, EDGE_COLOR);
 }

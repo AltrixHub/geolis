@@ -6,7 +6,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label, register_stroke};
+use super::{register_edges, register_face, register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -15,31 +15,37 @@ const GREEN: Color = Color::rgb(100, 200, 100);
 const BLUE: Color = Color::rgb(100, 150, 255);
 const RED: Color = Color::rgb(220, 80, 80);
 
+/// Revolution axis (origin + direction) for [`render_revolve`].
+struct RevolveAxis {
+    origin: Point3,
+    dir: Vector3,
+}
+
 /// Runs `MakeWire` -> `MakeFace` -> `Revolve` -> `TessellateSolid` and renders.
 ///
 /// If `angle` is `Some`, creates a partial revolve; otherwise full 360°.
 fn render_revolve(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     points: &[Point3],
-    axis_origin: Point3,
-    axis_dir: Vector3,
+    axis: &RevolveAxis,
     angle: Option<f64>,
     outline_color: Color,
     mesh_color: Color,
 ) {
     // Draw profile outline
     if let Ok(style) = StrokeStyle::new(0.05) {
-        register_stroke(storage, points, style, true, outline_color);
+        register_stroke(storage, bounds, points, style, true, outline_color);
     }
 
     // Draw axis as a thin line
     if let Ok(style) = StrokeStyle::new(0.02) {
         let axis_len = 8.0;
         let axis_line = [
-            axis_origin - axis_dir * (axis_len / 2.0),
-            axis_origin + axis_dir * (axis_len / 2.0),
+            axis.origin - axis.dir * (axis_len / 2.0),
+            axis.origin + axis.dir * (axis_len / 2.0),
         ];
-        register_stroke(storage, &axis_line, style, false, RED);
+        register_stroke(storage, bounds, &axis_line, style, false, RED);
     }
 
     let mut topo = TopologyStore::new();
@@ -49,7 +55,7 @@ fn render_revolve(
     let Ok(face) = MakeFace::new(wire, vec![]).execute(&mut topo) else {
         return;
     };
-    let mut revolve = Revolve::new(face, axis_origin, axis_dir);
+    let mut revolve = Revolve::new(face, axis.origin, axis.dir);
     if let Some(a) = angle {
         revolve = revolve.with_angle(a);
     }
@@ -57,11 +63,17 @@ fn render_revolve(
         return;
     };
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(&topo) {
-        register_face(storage, mesh, mesh_color);
+        register_face(storage, bounds, mesh, mesh_color);
     }
 
     if let Ok(solid_data) = topo.solid(solid) {
-        register_edges(storage, &topo, solid_data.outer_shell, outline_color);
+        register_edges(
+            storage,
+            bounds,
+            &topo,
+            solid_data.outer_shell,
+            outline_color,
+        );
     }
 }
 
@@ -72,6 +84,7 @@ fn render_revolve(
 #[allow(clippy::too_many_arguments)]
 fn register_case(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     label: &str,
     ax: f64,
     ay: f64,
@@ -80,12 +93,23 @@ fn register_case(
     mesh_color: Color,
 ) {
     // Label positioned above-left of the revolve in the 2D (XY) projection.
-    register_label(storage, ax - 5.0, ay + 6.0, label, LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        bounds,
+        ax - 5.0,
+        ay + 6.0,
+        label,
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     render_revolve(
         storage,
+        bounds,
         profile,
-        Point3::new(ax, ay, 0.0),
-        Vector3::z(),
+        &RevolveAxis {
+            origin: Point3::new(ax, ay, 0.0),
+            dir: Vector3::z(),
+        },
         angle,
         GRAY,
         mesh_color,
@@ -93,7 +117,7 @@ fn register_case(
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Profile height (z = 0..H) shared by all cases.
     let h = 6.0;
 
@@ -111,7 +135,7 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(col[0] + 4.0, y1, h),
         Point3::new(col[0] + 2.0, y1, h),
     ];
-    register_case(storage, "1", col[0], y1, &sq, None, GREEN);
+    register_case(storage, bounds, "1", col[0], y1, &sq, None, GREEN);
 
     // Case 2: Triangle with vertex on axis → cone
     let tri = [
@@ -119,7 +143,7 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(col[1] + 3.0, y1, 0.0),
         Point3::new(col[1] + 3.0, y1, h),
     ];
-    register_case(storage, "2", col[1], y1, &tri, None, BLUE);
+    register_case(storage, bounds, "2", col[1], y1, &tri, None, BLUE);
 
     // Case 3: Trapezoid → truncated cone (frustum)
     let trap = [
@@ -128,7 +152,7 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(col[2] + 3.0, y1, h),
         Point3::new(col[2] + 2.0, y1, h),
     ];
-    register_case(storage, "3", col[2], y1, &trap, None, GREEN);
+    register_case(storage, bounds, "3", col[2], y1, &trap, None, GREEN);
 
     // ── Row 2 (y = -14): Partial revolve ────────────────────────
 
@@ -143,6 +167,7 @@ pub fn register(storage: &MeshStorage) {
     ];
     register_case(
         storage,
+        bounds,
         "4",
         col[0],
         y2,
@@ -159,6 +184,7 @@ pub fn register(storage: &MeshStorage) {
     ];
     register_case(
         storage,
+        bounds,
         "5",
         col[1],
         y2,
@@ -176,6 +202,7 @@ pub fn register(storage: &MeshStorage) {
     ];
     register_case(
         storage,
+        bounds,
         "6",
         col[2],
         y2,

@@ -14,7 +14,7 @@ use geolis::topology::{FaceTrim, TopologyStore, TrimLoop};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_face, register_label};
+use super::{register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -67,8 +67,8 @@ fn circular_hole() -> Option<TrimLoop> {
     Some(TrimLoop::new(vec![cw]))
 }
 
-pub fn register(storage: &MeshStorage) {
-    register_label(storage, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
+    register_label(storage, bounds, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
     let Some(surface) = wavy_patch() else {
         return;
@@ -91,5 +91,5 @@ pub fn register(storage: &MeshStorage) {
     let Ok(mesh) = TessellateFace::new(face, TessellationParams::default()).execute(&store) else {
         return;
     };
-    register_face(storage, mesh, TEAL);
+    register_face(storage, bounds, mesh, TEAL);
 }

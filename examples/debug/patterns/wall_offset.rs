@@ -7,7 +7,7 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -268,6 +268,7 @@ fn room_with_near_corner_diagonal() -> Vec<(f64, f64)> {
 
 fn draw_case(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     pts: &[(f64, f64)],
     half_w: f64,
     closed: bool,
@@ -280,7 +281,7 @@ fn draw_case(
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
     if let Ok(s) = StrokeStyle::new(0.05) {
-        register_stroke(storage, &center, s, closed, GRAY);
+        register_stroke(storage, bounds, &center, s, closed, GRAY);
     }
 
     // Algorithm output.
@@ -301,7 +302,7 @@ fn draw_case(
                 .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
                 .collect();
             if let Ok(s) = StrokeStyle::new(0.08) {
-                register_stroke(storage, &p, s, ring.closed, color);
+                register_stroke(storage, bounds, &p, s, ring.closed, color);
             }
         }
     }
@@ -311,7 +312,7 @@ fn draw_case(
 
 /// Register `wall_offset` pattern meshes.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // (centerline, half_width, closed, base_x, base_y, label_x, label_y)
     let cases: Vec<(Vec<(f64, f64)>, f64, bool, f64, f64, f64, f64)> = vec![
         (single_line(), 0.3, false, 0.0, 0.0, -1.5, 1.5),
@@ -388,12 +389,13 @@ pub fn register(storage: &MeshStorage) {
     for (i, (pts, hw, closed, bx, by, lx, ly)) in cases.iter().enumerate() {
         register_label(
             storage,
+            bounds,
             *lx,
             *ly,
             &format!("{}", i + 1),
             LABEL_SIZE,
             LABEL_COLOR,
         );
-        draw_case(storage, pts, *hw, *closed, *bx, *by);
+        draw_case(storage, bounds, pts, *hw, *closed, *bx, *by);
     }
 }

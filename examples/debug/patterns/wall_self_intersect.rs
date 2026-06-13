@@ -12,7 +12,7 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.0;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -273,6 +273,7 @@ fn zigzag_4_overlap() -> Vec<(f64, f64)> {
 
 fn draw_case(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     pts: &[(f64, f64)],
     half_w: f64,
     bx: f64,
@@ -312,7 +313,7 @@ fn draw_case(
         .iter()
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
-    register_stroke(storage, &center, thin, false, GRAY);
+    register_stroke(storage, bounds, &center, thin, false, GRAY);
 
     for ol in &raw_boundaries {
         let p: Vec<Point3> = ol
@@ -320,7 +321,7 @@ fn draw_case(
             .iter()
             .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
             .collect();
-        register_stroke(storage, &p, medium, ol.closed, RED);
+        register_stroke(storage, bounds, &p, medium, ol.closed, RED);
     }
 
     // RIGHT: GREEN = algorithm output (keep both loops)
@@ -332,7 +333,7 @@ fn draw_case(
         .iter()
         .map(|&(x, y)| Point3::new(x + rx, y + by, 0.0))
         .collect();
-    register_stroke(storage, &center2, thin, false, GRAY);
+    register_stroke(storage, bounds, &center2, thin, false, GRAY);
 
     for ol in &resolved {
         let p: Vec<Point3> = ol
@@ -340,12 +341,28 @@ fn draw_case(
             .iter()
             .map(|v| Point3::new(v.x + rx, v.y + by, 0.0))
             .collect();
-        register_stroke(storage, &p, medium, ol.closed, GREEN);
+        register_stroke(storage, bounds, &p, medium, ol.closed, GREEN);
     }
 
     // Labels
-    register_label(storage, bx - 1.0, by - 2.5, label, LABEL_SIZE, LABEL_COLOR);
-    register_label(storage, rx - 1.0, by - 2.5, label, LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        bounds,
+        bx - 1.0,
+        by - 2.5,
+        label,
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
+    register_label(
+        storage,
+        bounds,
+        rx - 1.0,
+        by - 2.5,
+        label,
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
 }
 
 // ── Registration ────────────────────────────────────────────────────
@@ -354,10 +371,10 @@ fn draw_case(
 ///
 /// Left column: RED = raw WallOutline2D output (BEFORE, may self-intersect)
 /// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Labels for columns
-    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
-    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
+    register_label(storage, bounds, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
+    register_label(storage, bounds, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
 
     let cases: Vec<(&str, Vec<(f64, f64)>, f64)> = vec![
         ("1", v_slight_overlap(), 0.15), // 3pt V, slight overlap, thin
@@ -369,6 +386,6 @@ pub fn register(storage: &MeshStorage) {
 
     for (i, (label, pts, hw)) in cases.iter().enumerate() {
         let by = -(i as f64) * 12.0;
-        draw_case(storage, pts, *hw, 0.0, by, label);
+        draw_case(storage, bounds, pts, *hw, 0.0, by, label);
     }
 }
