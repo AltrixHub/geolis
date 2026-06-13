@@ -10,7 +10,7 @@ use geolis::tessellation::{tessellate_nurbs_surface, SurfaceTessellationOptions,
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_face, register_label};
+use super::{register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -18,13 +18,20 @@ const GREEN: Color = Color::rgb(120, 200, 140);
 const BLUE: Color = Color::rgb(120, 170, 230);
 
 /// Tessellate a surface, translate it by `(bx, by)`, and register the shaded mesh.
-fn register_surface(storage: &MeshStorage, surface: &NurbsSurface, bx: f64, by: f64, color: Color) {
+fn register_surface(
+    storage: &MeshStorage,
+    bounds: &mut SceneBounds,
+    surface: &NurbsSurface,
+    bx: f64,
+    by: f64,
+    color: Color,
+) {
     let options = SurfaceTessellationOptions::default();
     let Ok(mut mesh) = tessellate_nurbs_surface(surface, &options) else {
         return;
     };
     translate(&mut mesh, bx, by);
-    register_face(storage, mesh, color);
+    register_face(storage, bounds, mesh, color);
 }
 
 /// Offset every vertex in the XY plane (normals/UVs are unaffected).
@@ -79,14 +86,22 @@ fn quarter_cylinder() -> Option<NurbsSurface> {
     .ok()
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 1: free-form bump patch.
     {
         let bx = 0.0;
         let by = 0.0;
-        register_label(storage, bx - 1.5, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+        register_label(
+            storage,
+            bounds,
+            bx - 1.5,
+            by + 8.0,
+            "1",
+            LABEL_SIZE,
+            LABEL_COLOR,
+        );
         if let Some(surface) = bump_patch() {
-            register_surface(storage, &surface, bx, by, GREEN);
+            register_surface(storage, bounds, &surface, bx, by, GREEN);
         }
     }
 
@@ -94,9 +109,17 @@ pub fn register(storage: &MeshStorage) {
     {
         let bx = 10.0;
         let by = 0.0;
-        register_label(storage, bx - 1.5, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
+        register_label(
+            storage,
+            bounds,
+            bx - 1.5,
+            by + 8.0,
+            "2",
+            LABEL_SIZE,
+            LABEL_COLOR,
+        );
         if let Some(surface) = quarter_cylinder() {
-            register_surface(storage, &surface, bx, by, BLUE);
+            register_surface(storage, bounds, &surface, bx, by, BLUE);
         }
     }
 }

@@ -38,4 +38,6 @@ pub fn register(storage: &MeshStorage, name: &str) -> bool {
 
 // Re-export shared utilities from patterns for child modules.
 #[allow(unused_imports)]
-pub use super::patterns::{register_edges, register_face, register_label, register_stroke};
+pub use super::patterns::{
+    register_edges, register_face, register_label, register_stroke, SceneBounds,
+};

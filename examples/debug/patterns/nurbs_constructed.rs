@@ -14,7 +14,7 @@ use geolis::tessellation::{tessellate_nurbs_surface, SurfaceTessellationOptions,
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_face, register_label};
+use super::{register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -23,13 +23,20 @@ const BLUE: Color = Color::rgb(120, 170, 230);
 const ORANGE: Color = Color::rgb(230, 160, 90);
 const PURPLE: Color = Color::rgb(180, 140, 220);
 
-fn register_surface(storage: &MeshStorage, surface: &NurbsSurface, bx: f64, by: f64, color: Color) {
+fn register_surface(
+    storage: &MeshStorage,
+    bounds: &mut SceneBounds,
+    surface: &NurbsSurface,
+    bx: f64,
+    by: f64,
+    color: Color,
+) {
     let options = SurfaceTessellationOptions::default();
     let Ok(mut mesh) = tessellate_nurbs_surface(surface, &options) else {
         return;
     };
     translate(&mut mesh, bx, by);
-    register_face(storage, mesh, color);
+    register_face(storage, bounds, mesh, color);
 }
 
 fn translate(mesh: &mut TriangleMesh, bx: f64, by: f64) {
@@ -94,10 +101,10 @@ fn swept_surface() -> Option<NurbsSurface> {
     let theta_max = TURNS * std::f64::consts::TAU;
 
     // ~24 samples along the helix for the interpolated rail.
-    let samples = 24;
-    let mut points = Vec::with_capacity(samples);
+    let samples = 24_u32;
+    let mut points = Vec::with_capacity(samples as usize);
     for i in 0..samples {
-        let theta = theta_max * (i as f64) / ((samples - 1) as f64);
+        let theta = theta_max * f64::from(i) / f64::from(samples - 1);
         points.push(Point3::new(
             HELIX_RADIUS * theta.cos(),
             HELIX_RADIUS * theta.sin(),
@@ -124,7 +131,7 @@ fn swept_surface() -> Option<NurbsSurface> {
     NurbsSurface::sweep(&profile, &rail).ok()
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     let cases: [(f64, f64, &str, Color, Option<NurbsSurface>); 4] = [
         (0.0, 0.0, "1", GREEN, extruded_cylinder()),
         (10.0, 0.0, "2", BLUE, revolved_cone()),
@@ -132,9 +139,17 @@ pub fn register(storage: &MeshStorage) {
         (30.0, 0.0, "4", PURPLE, swept_surface()),
     ];
     for (bx, by, label, color, surface) in cases {
-        register_label(storage, bx - 1.5, by + 8.0, label, LABEL_SIZE, LABEL_COLOR);
+        register_label(
+            storage,
+            bounds,
+            bx - 1.5,
+            by + 8.0,
+            label,
+            LABEL_SIZE,
+            LABEL_COLOR,
+        );
         if let Some(surface) = surface {
-            register_surface(storage, &surface, bx, by, color);
+            register_surface(storage, bounds, &surface, bx, by, color);
         }
     }
 }

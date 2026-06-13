@@ -20,15 +20,15 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label};
+use super::{register_edges, register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 const SLAB_COLOR: Color = Color::rgb(120, 190, 210);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
-pub fn register(storage: &MeshStorage) {
-    register_label(storage, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
+    register_label(storage, bounds, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
     let mut store = TopologyStore::new();
 
@@ -50,9 +50,9 @@ pub fn register(storage: &MeshStorage) {
     else {
         return;
     };
-    register_face(storage, mesh, SLAB_COLOR);
+    register_face(storage, bounds, mesh, SLAB_COLOR);
 
     if let Ok(solid) = store.solid(result) {
-        register_edges(storage, &store, solid.outer_shell, EDGE_COLOR);
+        register_edges(storage, bounds, &store, solid.outer_shell, EDGE_COLOR);
     }
 }

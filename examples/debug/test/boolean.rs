@@ -6,7 +6,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label, register_stroke};
+use super::{register_edges, register_face, register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -40,36 +40,53 @@ fn make_box(
 
 fn render_solid(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     store: &TopologyStore,
     solid: geolis::topology::SolidId,
     mesh_color: Color,
     edge_color: Color,
 ) {
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(store) {
-        register_face(storage, mesh, mesh_color);
+        register_face(storage, bounds, mesh, mesh_color);
     }
     if let Ok(solid_data) = store.solid(solid) {
-        register_edges(storage, store, solid_data.outer_shell, edge_color);
+        register_edges(storage, bounds, store, solid_data.outer_shell, edge_color);
     }
 }
 
-fn stroke(storage: &MeshStorage, points: &[Point3], closed: bool, color: Color) {
+fn stroke(
+    storage: &MeshStorage,
+    bounds: &mut SceneBounds,
+    points: &[Point3],
+    closed: bool,
+    color: Color,
+) {
     if let Ok(style) = StrokeStyle::new(0.05) {
-        register_stroke(storage, points, style, closed, color);
+        register_stroke(storage, bounds, points, style, closed, color);
     }
 }
 
 pub fn register(storage: &MeshStorage) {
+    let mut bounds = SceneBounds::empty();
+
     // Case 1: Subtract — wall(6x6x4) - window(3x3x5)
     // Show input boxes as 3D solids
     let bx = -14.0;
     let by = 0.0;
-    register_label(storage, bx - 2.0, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        &mut bounds,
+        bx - 2.0,
+        by + 8.0,
+        "1",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     {
         let mut store = TopologyStore::new();
         // Wall (gray solid)
         if let Some(wall) = make_box(&mut store, bx, by, 0.0, 6.0, 6.0, 4.0) {
-            render_solid(storage, &store, wall, GRAY, EDGE_COLOR);
+            render_solid(storage, &mut bounds, &store, wall, GRAY, EDGE_COLOR);
         }
         // Window opening (green wireframe outline at z=0 and z=4)
         let hole_bottom = [
@@ -84,11 +101,17 @@ pub fn register(storage: &MeshStorage) {
             Point3::new(bx + 4.5, by + 4.5, 4.0),
             Point3::new(bx + 1.5, by + 4.5, 4.0),
         ];
-        stroke(storage, &hole_bottom, true, GREEN);
-        stroke(storage, &hole_top, true, GREEN);
+        stroke(storage, &mut bounds, &hole_bottom, true, GREEN);
+        stroke(storage, &mut bounds, &hole_top, true, GREEN);
         // Vertical edges of the hole
         for i in 0..4 {
-            stroke(storage, &[hole_bottom[i], hole_top[i]], false, GREEN);
+            stroke(
+                storage,
+                &mut bounds,
+                &[hole_bottom[i], hole_top[i]],
+                false,
+                GREEN,
+            );
         }
     }
 
@@ -97,14 +120,22 @@ pub fn register(storage: &MeshStorage) {
     // Box B: (bx+2..bx+6, by+2..by+6, 1..4)
     let bx = -4.0;
     let by = 0.0;
-    register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        &mut bounds,
+        bx - 2.0,
+        by + 8.0,
+        "2",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     {
         let mut store = TopologyStore::new();
         if let Some(a) = make_box(&mut store, bx, by, 0.0, 4.0, 4.0, 3.0) {
-            render_solid(storage, &store, a, GRAY, EDGE_COLOR);
+            render_solid(storage, &mut bounds, &store, a, GRAY, EDGE_COLOR);
         }
         if let Some(b) = make_box(&mut store, bx + 2.0, by + 2.0, 1.0, 4.0, 4.0, 3.0) {
-            render_solid(storage, &store, b, BLUE, EDGE_COLOR);
+            render_solid(storage, &mut bounds, &store, b, BLUE, EDGE_COLOR);
         }
     }
 
@@ -114,7 +145,15 @@ pub fn register(storage: &MeshStorage) {
     // Expected: (bx+2..bx+4, by+2..by+4, 1..3)
     let bx = 8.0;
     let by = 0.0;
-    register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
+    register_label(
+        storage,
+        &mut bounds,
+        bx - 2.0,
+        by + 8.0,
+        "3",
+        LABEL_SIZE,
+        LABEL_COLOR,
+    );
     {
         let mut store = TopologyStore::new();
         // Input boxes as gray wireframe
@@ -130,10 +169,10 @@ pub fn register(storage: &MeshStorage) {
             Point3::new(bx + 4.0, by + 4.0, 3.0),
             Point3::new(bx, by + 4.0, 3.0),
         ];
-        stroke(storage, &a_bottom, true, GRAY);
-        stroke(storage, &a_top, true, GRAY);
+        stroke(storage, &mut bounds, &a_bottom, true, GRAY);
+        stroke(storage, &mut bounds, &a_top, true, GRAY);
         for i in 0..4 {
-            stroke(storage, &[a_bottom[i], a_top[i]], false, GRAY);
+            stroke(storage, &mut bounds, &[a_bottom[i], a_top[i]], false, GRAY);
         }
 
         let b_bottom = [
@@ -148,15 +187,15 @@ pub fn register(storage: &MeshStorage) {
             Point3::new(bx + 6.0, by + 6.0, 4.0),
             Point3::new(bx + 2.0, by + 6.0, 4.0),
         ];
-        stroke(storage, &b_bottom, true, GRAY);
-        stroke(storage, &b_top, true, GRAY);
+        stroke(storage, &mut bounds, &b_bottom, true, GRAY);
+        stroke(storage, &mut bounds, &b_top, true, GRAY);
         for i in 0..4 {
-            stroke(storage, &[b_bottom[i], b_top[i]], false, GRAY);
+            stroke(storage, &mut bounds, &[b_bottom[i], b_top[i]], false, GRAY);
         }
 
         // Expected intersection: 2x2x2 box at (bx+2, by+2, 1) to (bx+4, by+4, 3)
         if let Some(expected) = make_box(&mut store, bx + 2.0, by + 2.0, 1.0, 2.0, 2.0, 2.0) {
-            render_solid(storage, &store, expected, RED, EDGE_COLOR);
+            render_solid(storage, &mut bounds, &store, expected, RED, EDGE_COLOR);
         }
     }
 }
