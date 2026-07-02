@@ -14,10 +14,12 @@
 //! ### Why it works
 //!
 //! Each loop's `uv_b` trace is a single-valued graph `v = f(u)` over the tool's
-//! `u` domain (the SSI marcher terminates at the `u` seam, so each trace spans
-//! nearly the full `u` range at a roughly constant `v`). The entry loop sits at
-//! a lower mean `v` than the exit loop (the loops are pre-sorted by mean `v` in
-//! [`super::loops`]). Stitching
+//! `u` domain. The SSI marcher terminates at the `u` seam, but seam-closed
+//! branches are **seam-filled** upstream ([`super::loops::fill_seam_gap`]) with
+//! true intersection samples whose tool `u` is kept wrapped into `[u0, u1]`, so
+//! each trace now spans the **full** `u` domain (reaching both `u0` and `u1`) at
+//! a roughly constant `v`. The entry loop sits at a lower mean `v` than the exit
+//! loop (the loops are pre-sorted by mean `v` in [`super::loops`]). Stitching
 //!
 //! ```text
 //!   entry trace  (u increasing)
@@ -27,6 +29,13 @@
 //!
 //! yields a ribbon polygon that is simple (non-self-intersecting) in the
 //! unrolled rectangle, so the generic trimmed CDT meshes it without a seam cut.
+//! Because the seam-filled traces reach `u0` and `u1`, the ribbon's left (`u0`)
+//! and right (`u1`) closing edges land on the same seam azimuth and coincide in
+//! 3D, covering the seam wedge that was previously left unmeshed. The two rings
+//! (entry/exit) share the exact seam samples with the punched target faces, so
+//! the hole rim tessellates conformally with no slit at the seam. If the seam
+//! fill did not converge, the ribbon degrades to its former span (interior `u`
+//! only) — the honest fallback, leaving the pre-existing sub-step seam gap.
 //!
 //! ### Orientation
 //!

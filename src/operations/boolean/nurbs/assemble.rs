@@ -335,28 +335,25 @@ mod tests {
     ///
     /// Measured (position-deduplicated, 1e-6 quantization):
     /// - plain curved slab (no hole): 384 boundary edges (all perimeter)
-    /// - slab − tube, BEFORE this fix: 1788 boundary edges (384 perimeter +
-    ///   1404 along the hole rings — the dense punch-vs-band sampling mismatch).
-    /// - slab − tube, AFTER this fix: 264 boundary edges. Only 4 of them lie in
-    ///   the hole-ring region, and all 4 sit at the SSI seam azimuth.
-    ///
-    /// Those 4 residual ring edges are NOT a sampling mismatch — they are the
-    /// pre-existing seam-gap approximation (documented in `punch.rs`): the SSI
-    /// marcher omits the short arc at the tool's parametric u-seam, so the punch
-    /// closes each ring with a single straight chord across that gap while the
-    /// band bridges the gap as a vertical wall stitch. The two sides therefore
-    /// differ over the one-step seam gap only. Closing this is a separate
-    /// seam-arc-reconstruction task, out of scope for the shared-sampling fix.
+    /// - slab − tube, BEFORE the shared-sampling fix: 1788 boundary edges (384
+    ///   perimeter + 1404 along the hole rings — the dense punch-vs-band mismatch).
+    /// - slab − tube, before the SEAM-FILL fix: 264 boundary edges, 4 of them in
+    ///   the hole-ring region at the SSI seam azimuth (the punch chord vs. band
+    ///   vertical-stitch disagreement at the tool's u-seam).
+    /// - slab − tube, AFTER the seam-fill fix: 0 hole-ring boundary edges. The
+    ///   seam wedge is filled with true intersection samples shared by both the
+    ///   punch ring (`uv_a`) and the band ribbon (`uv_b`, see
+    ///   `super::super::loops::fill_seam_gap`), so the two sides conform across
+    ///   the seam and the band ribbon spans the full tool u domain.
     ///
     /// Two assertions pin the result:
     /// 1. The cut result's total boundary-edge count is no worse than the plain
     ///    slab's own perimeter nonconformance (plus a small margin); the prior
     ///    ~1404 hole-ring boundary edges are gone.
-    /// 2. Direct hole-ring conformance: at most [`MAX_SEAM_RING_EDGES`]
-    ///    boundary-edge midpoints lie in the tube-wall ring region (distance to
-    ///    the tube axis within [0.7·r, 1.3·r] while z is inside the slab), and
-    ///    every such edge sits at the seam azimuth (the single seam gap, not
-    ///    spread around the ring).
+    /// 2. Direct hole-ring conformance: NO boundary-edge midpoint lies in the
+    ///    tube-wall ring region (distance to the tube axis within [0.7·r, 1.3·r]
+    ///    while z is inside the slab). The seam gap is now filled, so even the
+    ///    former seam-azimuth residual is gone.
     #[test]
     fn hole_rings_tessellate_conformally() {
         #[allow(clippy::cast_possible_truncation)]
@@ -429,16 +426,12 @@ mod tests {
              T-junctions appear to have returned"
         );
 
-        // (2) Direct hole-ring conformance: no boundary-edge midpoint lies in
+        // (2) Direct hole-ring conformance: NO boundary-edge midpoint lies in
         // the tube-wall ring region. The tube axis runs along (3,3,z); a ring
         // boundary edge would sit at radius ~RADIUS from that axis, inside the
-        // slab body in z.
-        // Only the SSI seam-gap closure may leave ring-region boundary edges,
-        // and only a tiny, fixed number of them (2 per ring × 2 rings).
-        const MAX_SEAM_RING_EDGES: usize = 4;
-        // The seam endpoints sit on the +x side of the ring (the tool's u-seam),
-        // so every residual ring edge must have its midpoint at dx > 0 — i.e.
-        // localized at the seam azimuth, not spread around the ring.
+        // slab body in z. The seam wedge is now filled with shared intersection
+        // samples (see `fill_seam_gap`), so even the former seam-azimuth residual
+        // (up to 4 edges) is gone.
         let axis = Point3::new(3.0, 3.0, 0.0);
         let mut ring_edges = 0usize;
         for (p, q) in &cut_edges {
@@ -448,21 +441,13 @@ mod tests {
             let in_slab_z = m.z > -1.2 && m.z < 1.7;
             if in_ring_radius && in_slab_z {
                 ring_edges += 1;
-                assert!(
-                    m.x - axis.x > 0.0,
-                    "ring boundary edge ({:.3},{:.3},{:.3}) is away from the \
-                     seam azimuth — punch/band rings are not conforming off-seam",
-                    m.x,
-                    m.y,
-                    m.z
-                );
             }
         }
-        assert!(
-            ring_edges <= MAX_SEAM_RING_EDGES,
-            "{ring_edges} hole-ring boundary edges (expected <= \
-             {MAX_SEAM_RING_EDGES}, the seam-gap closure only); the dense \
-             punch/band sampling mismatch appears to have returned"
+        assert_eq!(
+            ring_edges, 0,
+            "expected 0 hole-ring boundary edges after the seam-fill fix, \
+             found {ring_edges}; the punch/band rings are not conforming along \
+             the tube wall"
         );
     }
 
