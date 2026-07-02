@@ -68,6 +68,28 @@ impl Length {
                 }
                 Ok(sum * step / 3.0)
             }
+            EdgeCurve::Nurbs(nurbs) => {
+                // Arc length by Simpson's rule on the speed |dP/dt| over the
+                // edge's parameter interval.
+                let segments = 100_usize;
+                #[allow(clippy::cast_precision_loss)]
+                let step = (edge.t_end - edge.t_start) / segments as f64;
+                let mut sum = 0.0;
+                for idx in 0..=segments {
+                    #[allow(clippy::cast_precision_loss)]
+                    let param = edge.t_start + step * idx as f64;
+                    let speed = nurbs.derivatives(param, 1)?[1].norm();
+                    let weight = if idx == 0 || idx == segments {
+                        1.0
+                    } else if idx % 2 == 1 {
+                        4.0
+                    } else {
+                        2.0
+                    };
+                    sum += weight * speed;
+                }
+                Ok((sum * step / 3.0).abs())
+            }
         }
     }
 }

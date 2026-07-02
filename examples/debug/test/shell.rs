@@ -6,7 +6,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label};
+use super::{register_edges, register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -37,19 +37,21 @@ fn make_box(
 
 fn render(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     store: &TopologyStore,
     solid: geolis::topology::SolidId,
     color: Color,
 ) {
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(store) {
-        register_face(storage, mesh, color);
+        register_face(storage, bounds, mesh, color);
     }
     if let Ok(s) = store.solid(solid) {
-        register_edges(storage, store, s.outer_shell, EDGE);
+        register_edges(storage, bounds, store, s.outer_shell, EDGE);
     }
 }
 
 pub fn register(storage: &MeshStorage) {
+    let mut bounds = SceneBounds::empty();
     let spacing = 14.0_f64;
 
     // ─────────────────────────────────────────────────────────────
@@ -93,7 +95,7 @@ pub fn register(storage: &MeshStorage) {
         ];
         for &(min, max) in pieces {
             if let Some(solid) = make_box(&mut store, min, max) {
-                render(storage, &store, solid, BLUE);
+                render(storage, &mut bounds, &store, solid, BLUE);
             }
         }
     }
@@ -139,7 +141,7 @@ pub fn register(storage: &MeshStorage) {
         ];
         for &(min, max) in pieces {
             if let Some(solid) = make_box(&mut store, min, max) {
-                render(storage, &store, solid, RED);
+                render(storage, &mut bounds, &store, solid, RED);
             }
         }
     }

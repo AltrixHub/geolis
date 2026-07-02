@@ -20,6 +20,13 @@ pub fn boolean_execute(
     solid_b: SolidId,
     op: BooleanOp,
 ) -> Result<SolidId> {
+    // NURBS routing: if either solid has a NURBS face, the planar pipeline does
+    // not apply. The through-cut subtract handles it; everything else returns an
+    // explicit unsupported error.
+    if solid_has_nurbs_face(store, solid_a)? || solid_has_nurbs_face(store, solid_b)? {
+        return super::nurbs::try_boolean(store, solid_a, solid_b, op);
+    }
+
     // Step 1: AABB early-out
     let aabb_a = compute_solid_aabb(store, solid_a)?;
     let aabb_b = compute_solid_aabb(store, solid_b)?;
@@ -132,6 +139,17 @@ fn polygon_centroid(points: &[Point3]) -> Point3 {
         points.iter().map(|p| p.y).sum::<f64>() * inv_n,
         points.iter().map(|p| p.z).sum::<f64>() * inv_n,
     )
+}
+
+/// Whether any face of the solid's outer shell is a NURBS face.
+fn solid_has_nurbs_face(store: &TopologyStore, solid_id: SolidId) -> Result<bool> {
+    let shell = store.shell(store.solid(solid_id)?.outer_shell)?;
+    for &fid in &shell.faces {
+        if matches!(store.face(fid)?.surface, FaceSurface::Nurbs(_)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Collects all face IDs from a solid's outer shell.
@@ -295,6 +313,12 @@ fn copy_solid(store: &mut TopologyStore, solid_id: SolidId) -> Result<SolidId> {
         let inner_polygons = collect_inner_wire_polygons(store, *face_id)?;
         let face = store.face(*face_id)?;
         let FaceSurface::Plane(ref plane) = face.surface else {
+            if matches!(face.surface, FaceSurface::Nurbs(_)) {
+                return Err(OperationError::Failed(
+                    "boolean operations on NURBS faces are not yet supported".into(),
+                )
+                .into());
+            }
             todo!("Boolean operations for non-planar faces")
         };
 
@@ -315,7 +339,7 @@ fn copy_solid(store: &mut TopologyStore, solid_id: SolidId) -> Result<SolidId> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::math::Vector3;
@@ -378,6 +402,72 @@ mod tests {
             faces_with_holes, 2,
             "expected 2 faces with inner wires (holes)"
         );
+    }
+
+    /// Union/Intersect on a NURBS-faced solid stay unsupported (only the
+    /// through-cut Subtract is handled). Replaces the previous pin that asserted
+    /// every NURBS boolean errors.
+    #[test]
+    fn nurbs_faced_solid_union_intersect_unsupported() {
+        use crate::geometry::nurbs::{KnotVector, NurbsSurface};
+
+        let build = || {
+            let mut store = TopologyStore::new();
+            let a = make_box(&mut store, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0);
+            let b = make_box(&mut store, 1.0, 1.0, -0.5, 2.0, 2.0, 5.0);
+            let face_a = collect_solid_faces(&store, a).unwrap()[0];
+            let patch = NurbsSurface::from_unweighted(
+                vec![
+                    Point3::new(0.0, 0.0, 0.0),
+                    Point3::new(0.0, 4.0, 0.0),
+                    Point3::new(4.0, 0.0, 0.0),
+                    Point3::new(4.0, 4.0, 0.0),
+                ],
+                2,
+                2,
+                KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+                KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+                1,
+                1,
+            )
+            .unwrap();
+            store.face_mut(face_a).unwrap().surface = FaceSurface::Nurbs(patch);
+            (store, a, b)
+        };
+
+        let (mut store, a, b) = build();
+        assert!(
+            boolean_execute(&mut store, a, b, BooleanOp::Union).is_err(),
+            "Union on a NURBS-faced solid must stay unsupported"
+        );
+        let (mut store, a, b) = build();
+        assert!(
+            boolean_execute(&mut store, a, b, BooleanOp::Intersect).is_err(),
+            "Intersect on a NURBS-faced solid must stay unsupported"
+        );
+        // A NURBS Subtract that is NOT a clean through-cut also errors (no panic).
+        let (mut store, a, b) = build();
+        assert!(
+            boolean_execute(&mut store, a, b, BooleanOp::Subtract).is_err(),
+            "non-through-cut NURBS Subtract must error, not panic"
+        );
+    }
+
+    /// The supported case: a curved NURBS slab minus a NURBS tube punches a real
+    /// through-hole and returns a manifold solid via `boolean_execute`.
+    #[test]
+    fn nurbs_through_cut_subtract_succeeds() {
+        use crate::operations::creation::{MakeCurvedSlab, MakeNurbsTube};
+
+        let mut store = TopologyStore::new();
+        let slab = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+            .execute(&mut store)
+            .unwrap();
+        let tube = MakeNurbsTube::new(Point3::new(3.0, 3.0, -1.5), 0.7, 5.0)
+            .execute(&mut store)
+            .unwrap();
+        let result = boolean_execute(&mut store, slab, tube, BooleanOp::Subtract);
+        assert!(result.is_ok(), "through-cut subtract failed: {result:?}");
     }
 
     #[test]

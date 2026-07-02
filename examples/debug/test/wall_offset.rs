@@ -5,7 +5,7 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -892,6 +892,7 @@ fn case_29_inner_tl() -> Vec<(f64, f64)> {
 
 fn draw_ground_truth(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     centerline: &[(f64, f64)],
     outer: &[(f64, f64)],
     holes: &[&[(f64, f64)]],
@@ -905,7 +906,7 @@ fn draw_ground_truth(
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
     if let Ok(s) = StrokeStyle::new(0.05) {
-        register_stroke(storage, &cl, s, closed, GRAY);
+        register_stroke(storage, bounds, &cl, s, closed, GRAY);
     }
 
     // Expected outer boundary in green.
@@ -914,7 +915,7 @@ fn draw_ground_truth(
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
     if let Ok(s) = StrokeStyle::new(0.08) {
-        register_stroke(storage, &op, s, true, GREEN);
+        register_stroke(storage, bounds, &op, s, true, GREEN);
     }
 
     // Expected holes in blue.
@@ -924,7 +925,7 @@ fn draw_ground_truth(
             .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
             .collect();
         if let Ok(s) = StrokeStyle::new(0.08) {
-            register_stroke(storage, &hp, s, true, BLUE);
+            register_stroke(storage, bounds, &hp, s, true, BLUE);
         }
     }
 }
@@ -934,6 +935,8 @@ fn draw_ground_truth(
 /// Register `wall_offset` ground truth meshes.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
 pub fn register(storage: &MeshStorage) {
+    let mut bounds = SceneBounds::empty();
+
     let c5_hole = case_5_hole();
     let c6_hole = case_6_hole();
     let c11_inner = case_11_inner();
@@ -1266,6 +1269,6 @@ pub fn register(storage: &MeshStorage) {
             LABEL_SIZE,
             LABEL_COLOR,
         );
-        draw_ground_truth(storage, cl, outer, holes, *closed, *bx, *by);
+        draw_ground_truth(storage, &mut bounds, cl, outer, holes, *closed, *bx, *by);
     }
 }

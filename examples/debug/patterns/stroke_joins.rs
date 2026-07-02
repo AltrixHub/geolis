@@ -5,7 +5,7 @@ use geolis::tessellation::{LineJoin, StrokeStyle};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 /// Label size and color.
 const LABEL_SIZE: f64 = 0.8;
@@ -13,7 +13,7 @@ const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 
 /// Register stroke-join comparison meshes.
 #[allow(clippy::too_many_lines)]
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Polyline definitions: (base points, width, closed)
     let shapes: &[(&[Point3], f64, bool)] = &[
         // Zigzag — sharp (~30°) angles
@@ -125,7 +125,7 @@ pub fn register(storage: &MeshStorage) {
 
             if let Ok(style) = StrokeStyle::new(width) {
                 let style = style.with_line_join(join);
-                register_stroke(storage, &shifted, style, closed, colors[idx]);
+                register_stroke(storage, bounds, &shifted, style, closed, colors[idx]);
             }
         }
     }

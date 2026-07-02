@@ -2,3 +2,4 @@
 /target
 .ai/instructions.md
 .ai/outputs/*
+.worktrees/

@@ -486,6 +486,7 @@ fn create_side_face(
         outer_wire: wire,
         inner_wires: vec![],
         same_sense,
+        trim: None,
     }))
 }
 
@@ -552,6 +553,7 @@ fn create_partial_side_face(
         outer_wire: wire,
         inner_wires: vec![],
         same_sense,
+        trim: None,
     }))
 }
 

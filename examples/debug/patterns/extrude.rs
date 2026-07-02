@@ -6,7 +6,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label, register_stroke};
+use super::{register_edges, register_face, register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -19,13 +19,14 @@ const HEIGHT: f64 = 3.0;
 /// Runs `MakeWire` -> `MakeFace` -> `Extrude` -> `TessellateSolid` and renders the result.
 fn render_extrude(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     points: &[Point3],
     height: f64,
     outline_color: Color,
     mesh_color: Color,
 ) {
     if let Ok(style) = StrokeStyle::new(0.05) {
-        register_stroke(storage, points, style, true, outline_color);
+        register_stroke(storage, bounds, points, style, true, outline_color);
     }
 
     let mut topo = TopologyStore::new();
@@ -39,16 +40,22 @@ fn render_extrude(
         return;
     };
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(&topo) {
-        register_face(storage, mesh, mesh_color);
+        register_face(storage, bounds, mesh, mesh_color);
     }
 
     // BRep edges as GPU lines (3D viewport only)
     if let Ok(solid_data) = topo.solid(solid) {
-        register_edges(storage, &topo, solid_data.outer_shell, outline_color);
+        register_edges(
+            storage,
+            bounds,
+            &topo,
+            solid_data.outer_shell,
+            outline_color,
+        );
     }
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 1: Triangle
     let bx = -12.0;
     let by = 2.0;
@@ -58,7 +65,7 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 4.0, by, 0.0),
         Point3::new(bx + 2.0, by + 4.0, 0.0),
     ];
-    render_extrude(storage, &tri, HEIGHT, GRAY, GREEN);
+    render_extrude(storage, bounds, &tri, HEIGHT, GRAY, GREEN);
 
     // Case 2: Square
     let bx = -4.0;
@@ -70,7 +77,7 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 4.0, by + 4.0, 0.0),
         Point3::new(bx, by + 4.0, 0.0),
     ];
-    render_extrude(storage, &sq, HEIGHT, GRAY, BLUE);
+    render_extrude(storage, bounds, &sq, HEIGHT, GRAY, BLUE);
 
     // Case 3: L-shape (concave)
     let bx = 4.0;
@@ -84,5 +91,5 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 2.0, by + 4.0, 0.0),
         Point3::new(bx, by + 4.0, 0.0),
     ];
-    render_extrude(storage, &l_shape, HEIGHT, GRAY, GREEN);
+    render_extrude(storage, bounds, &l_shape, HEIGHT, GRAY, GREEN);
 }

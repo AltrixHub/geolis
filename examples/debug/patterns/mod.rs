@@ -1,6 +1,12 @@
 pub mod boolean;
 pub mod extrude;
 pub mod face_creation;
+pub mod nurbs_boolean;
+pub mod nurbs_constructed;
+pub mod nurbs_curves;
+pub mod nurbs_surface;
+pub mod nurbs_trimmed;
+pub mod nurbs_window;
 pub mod primitives;
 pub mod revolve;
 pub mod shell;
@@ -23,6 +29,93 @@ use revion_core::{
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
+/// Axis-aligned bounds of everything a pattern registered, used to frame the
+/// initial 3D camera.
+///
+/// Accumulates every 3D vertex emitted by the mesh-registering helpers. Starts
+/// empty; `is_empty()` stays true until the first `include` call, so a pattern
+/// that registers nothing (or only 2D content) yields no camera override.
+#[derive(Debug, Clone, Copy)]
+pub struct SceneBounds {
+    min: [f64; 3],
+    max: [f64; 3],
+    empty: bool,
+}
+
+impl SceneBounds {
+    /// An empty bounds that has not yet seen any vertex.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            min: [f64::INFINITY; 3],
+            max: [f64::NEG_INFINITY; 3],
+            empty: true,
+        }
+    }
+
+    /// Whether no vertex has been included yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.empty
+    }
+
+    /// Expand the bounds to contain point `p`.
+    pub fn include(&mut self, p: [f64; 3]) {
+        for (axis, &value) in p.iter().enumerate() {
+            if value < self.min[axis] {
+                self.min[axis] = value;
+            }
+            if value > self.max[axis] {
+                self.max[axis] = value;
+            }
+        }
+        self.empty = false;
+    }
+
+    /// Center of the bounds. Returns the origin when empty.
+    #[must_use]
+    pub fn center(&self) -> [f64; 3] {
+        if self.empty {
+            return [0.0; 3];
+        }
+        [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+            (self.min[2] + self.max[2]) * 0.5,
+        ]
+    }
+
+    /// Length of the bounding-box diagonal. Returns `0.0` when empty.
+    #[must_use]
+    pub fn diagonal(&self) -> f64 {
+        if self.empty {
+            return 0.0;
+        }
+        let dx = self.max[0] - self.min[0];
+        let dy = self.max[1] - self.min[1];
+        let dz = self.max[2] - self.min[2];
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    /// Include a `RawVertex3D`'s position (f32 → f64).
+    fn include_vertex_3d(&mut self, v: &RawVertex3D) {
+        self.include([
+            f64::from(v.position[0]),
+            f64::from(v.position[1]),
+            f64::from(v.position[2]),
+        ]);
+    }
+
+    /// Include a `LineVertex3D`'s position (f32 → f64).
+    fn include_line_vertex_3d(&mut self, v: &LineVertex3D) {
+        self.include([
+            f64::from(v.position[0]),
+            f64::from(v.position[1]),
+            f64::from(v.position[2]),
+        ]);
+    }
+}
+
 /// All available pattern names.
 pub const PATTERNS: &[&str] = &[
     "stroke_joins",
@@ -36,57 +129,94 @@ pub const PATTERNS: &[&str] = &[
     "primitives",
     "split",
     "shell",
+    "nurbs_curves",
+    "nurbs_surface",
+    "nurbs_constructed",
+    "nurbs_trimmed",
+    "nurbs_boolean",
+    "nurbs_window",
 ];
 
-/// Register meshes for the named pattern. Returns `true` if found.
-pub fn register(storage: &MeshStorage, name: &str) -> bool {
-    match name {
+/// Register meshes for the named pattern.
+///
+/// Returns the accumulated 3D scene bounds when the pattern is found, or `None`
+/// when the name is unknown. Callers use the bounds to frame the initial 3D
+/// camera; a found-but-2D-only pattern yields a `SceneBounds` whose
+/// [`SceneBounds::is_empty`] is `true`.
+pub fn register(storage: &MeshStorage, name: &str) -> Option<SceneBounds> {
+    let mut bounds = SceneBounds::empty();
+    let found = match name {
         "stroke_joins" => {
-            stroke_joins::register(storage);
+            stroke_joins::register(storage, &mut bounds);
             true
         }
         "wall_offset" => {
-            wall_offset::register(storage);
+            wall_offset::register(storage, &mut bounds);
             true
         }
         "face_creation" => {
-            face_creation::register(storage);
+            face_creation::register(storage, &mut bounds);
             true
         }
         "extrude" => {
-            extrude::register(storage);
+            extrude::register(storage, &mut bounds);
             true
         }
         "revolve" => {
-            revolve::register(storage);
+            revolve::register(storage, &mut bounds);
             true
         }
         "boolean" => {
-            boolean::register(storage);
+            boolean::register(storage, &mut bounds);
             true
         }
         "wall_self_intersect" => {
-            wall_self_intersect::register(storage);
+            wall_self_intersect::register(storage, &mut bounds);
             true
         }
         "wall_with_window" => {
-            wall_with_window::register(storage);
+            wall_with_window::register(storage, &mut bounds);
             true
         }
         "primitives" => {
-            primitives::register(storage);
+            primitives::register(storage, &mut bounds);
             true
         }
         "split" => {
-            split::register(storage);
+            split::register(storage, &mut bounds);
             true
         }
         "shell" => {
-            shell::register(storage);
+            shell::register(storage, &mut bounds);
+            true
+        }
+        "nurbs_curves" => {
+            nurbs_curves::register(storage, &mut bounds);
+            true
+        }
+        "nurbs_surface" => {
+            nurbs_surface::register(storage, &mut bounds);
+            true
+        }
+        "nurbs_constructed" => {
+            nurbs_constructed::register(storage, &mut bounds);
+            true
+        }
+        "nurbs_trimmed" => {
+            nurbs_trimmed::register(storage, &mut bounds);
+            true
+        }
+        "nurbs_boolean" => {
+            nurbs_boolean::register(storage, &mut bounds);
+            true
+        }
+        "nurbs_window" => {
+            nurbs_window::register(storage, &mut bounds);
             true
         }
         _ => false,
-    }
+    };
+    found.then_some(bounds)
 }
 
 // ── Shared utilities ────────────────────────────────────────────────
@@ -137,6 +267,7 @@ pub fn into_raw_mesh_3d(mesh: TriangleMesh, color: Color) -> RawMesh3D {
 /// Tessellate a stroke and register both 2D and 3D meshes.
 pub fn register_stroke(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     points: &[Point3],
     style: StrokeStyle,
     closed: bool,
@@ -148,17 +279,30 @@ pub fn register_stroke(
     }
     let op = TessellateStroke::new(points.to_vec(), style, closed);
     if let Ok(mesh) = op.execute() {
-        storage.upsert_3d(RawMesh3DId::new(), Arc::new(into_raw_mesh_3d(mesh, color)));
+        let raw = into_raw_mesh_3d(mesh, color);
+        for v in &raw.vertices {
+            bounds.include_vertex_3d(v);
+        }
+        storage.upsert_3d(RawMesh3DId::new(), Arc::new(raw));
     }
 }
 
 /// Register a face mesh (2D + 3D) from a `TriangleMesh`.
-pub fn register_face(storage: &MeshStorage, mesh: TriangleMesh, color: Color) {
+pub fn register_face(
+    storage: &MeshStorage,
+    bounds: &mut SceneBounds,
+    mesh: TriangleMesh,
+    color: Color,
+) {
     storage.upsert_2d(
         RawMesh2DId::new(),
         Arc::new(into_raw_mesh_2d(mesh.clone(), color)),
     );
-    storage.upsert_3d(RawMesh3DId::new(), Arc::new(into_raw_mesh_3d(mesh, color)));
+    let raw = into_raw_mesh_3d(mesh, color);
+    for v in &raw.vertices {
+        bounds.include_vertex_3d(v);
+    }
+    storage.upsert_3d(RawMesh3DId::new(), Arc::new(raw));
 }
 
 /// Collect unique edges from a shell and register them as a single GPU `Line3D`.
@@ -169,6 +313,7 @@ pub fn register_face(storage: &MeshStorage, mesh: TriangleMesh, color: Color) {
 #[allow(clippy::cast_possible_truncation)]
 pub fn register_edges(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     topo: &TopologyStore,
     shell_id: ShellId,
     color: Color,
@@ -242,12 +387,24 @@ pub fn register_edges(
                             CURVE_SEGMENTS,
                         );
                     }
+                    EdgeCurve::Nurbs(curve) => {
+                        tessellate_curve_edge(
+                            &mut vertices,
+                            curve,
+                            edge.t_start,
+                            edge.t_end,
+                            CURVE_SEGMENTS,
+                        );
+                    }
                 }
             }
         }
     }
 
     if !vertices.is_empty() {
+        for v in &vertices {
+            bounds.include_line_vertex_3d(v);
+        }
         let line = Line3D::new(vertices, LineTopology::LineList, color);
         storage.upsert_line(Line3DId::new(), Arc::new(line));
     }
@@ -283,6 +440,8 @@ fn tessellate_curve_edge(
 /// `text` may contain digits `0`–`9`; other characters are skipped.
 /// `size` controls the height of each digit character.
 #[allow(clippy::cast_possible_truncation, clippy::many_single_char_names)]
+/// Labels are annotations: they are intentionally excluded from the scene
+/// bounds so they never affect the initial camera framing.
 pub fn register_label(storage: &MeshStorage, x: f64, y: f64, text: &str, size: f64, color: Color) {
     let digit_w = size * 0.6;
     let digit_h = size;

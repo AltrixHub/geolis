@@ -12,7 +12,7 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.0;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -273,6 +273,7 @@ fn zigzag_4_overlap() -> Vec<(f64, f64)> {
 
 fn draw_case(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     pts: &[(f64, f64)],
     half_w: f64,
     bx: f64,
@@ -288,8 +289,20 @@ fn draw_case(
     };
     let centerlines = vec![pline.clone()];
 
-    let raw_boundaries = WallOutline2D::new(vec![pline], half_w)
-        .execute()
+    // `execute_faces` returns validated, union-assembled footprints. Flatten
+    // every footprint's outer ring and holes into a single boundary list so
+    // the example's own miter-clip / split pass can run over them.
+    let raw_boundaries: Vec<Pline> = WallOutline2D::new(vec![pline], half_w)
+        .execute_faces()
+        .map(|footprints| {
+            footprints
+                .into_iter()
+                .flat_map(|fp| {
+                    let (outer, holes) = fp.into_parts();
+                    std::iter::once(outer).chain(holes)
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     // LEFT: RED = raw WallOutline2D output (BEFORE any processing)
@@ -300,7 +313,7 @@ fn draw_case(
         .iter()
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
-    register_stroke(storage, &center, thin, false, GRAY);
+    register_stroke(storage, bounds, &center, thin, false, GRAY);
 
     for ol in &raw_boundaries {
         let p: Vec<Point3> = ol
@@ -308,7 +321,7 @@ fn draw_case(
             .iter()
             .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
             .collect();
-        register_stroke(storage, &p, medium, ol.closed, RED);
+        register_stroke(storage, bounds, &p, medium, ol.closed, RED);
     }
 
     // RIGHT: GREEN = algorithm output (keep both loops)
@@ -320,7 +333,7 @@ fn draw_case(
         .iter()
         .map(|&(x, y)| Point3::new(x + rx, y + by, 0.0))
         .collect();
-    register_stroke(storage, &center2, thin, false, GRAY);
+    register_stroke(storage, bounds, &center2, thin, false, GRAY);
 
     for ol in &resolved {
         let p: Vec<Point3> = ol
@@ -328,7 +341,7 @@ fn draw_case(
             .iter()
             .map(|v| Point3::new(v.x + rx, v.y + by, 0.0))
             .collect();
-        register_stroke(storage, &p, medium, ol.closed, GREEN);
+        register_stroke(storage, bounds, &p, medium, ol.closed, GREEN);
     }
 
     // Labels
@@ -342,7 +355,7 @@ fn draw_case(
 ///
 /// Left column: RED = raw WallOutline2D output (BEFORE, may self-intersect)
 /// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Labels for columns
     register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
     register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
@@ -357,6 +370,6 @@ pub fn register(storage: &MeshStorage) {
 
     for (i, (label, pts, hw)) in cases.iter().enumerate() {
         let by = -(i as f64) * 12.0;
-        draw_case(storage, pts, *hw, 0.0, by, label);
+        draw_case(storage, bounds, pts, *hw, 0.0, by, label);
     }
 }

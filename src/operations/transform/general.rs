@@ -82,6 +82,22 @@ impl GeneralTransform {
                 EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                     todo!("GeneralTransform for Circle/Ellipse edges")
                 }
+                EdgeCurve::Nurbs(nurbs) => {
+                    // Affine transform applies directly to control points; weights,
+                    // knots, and degree (hence the parameter domain) are invariant.
+                    let new_points = nurbs
+                        .control_points()
+                        .iter()
+                        .map(|p| transform_point(&self.matrix, p))
+                        .collect();
+                    let new_nurbs = crate::geometry::nurbs::NurbsCurve3D::new(
+                        new_points,
+                        nurbs.weights().to_vec(),
+                        nurbs.knots().clone(),
+                        nurbs.degree(),
+                    )?;
+                    (EdgeCurve::Nurbs(new_nurbs), edge.t_start, edge.t_end)
+                }
             };
 
             let edge = store.edge_mut(edge_id)?;

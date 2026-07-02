@@ -3,7 +3,7 @@ use geolis::tessellation::{StrokeStyle, TriangleMesh};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_face, register_label, register_stroke};
+use super::{register_face, register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -55,6 +55,8 @@ fn square_mesh(bx: f64, by: f64) -> TriangleMesh {
 }
 
 pub fn register(storage: &MeshStorage) {
+    let mut bounds = SceneBounds::empty();
+
     let Some(style) = make_style() else {
         return;
     };
@@ -68,8 +70,8 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 4.0, by, 0.0),
         Point3::new(bx + 2.0, by + 4.0, 0.0),
     ];
-    register_stroke(storage, &tri_pts, style, true, GRAY);
-    register_face(storage, triangle_mesh(bx, by), GREEN);
+    register_stroke(storage, &mut bounds, &tri_pts, style, true, GRAY);
+    register_face(storage, &mut bounds, triangle_mesh(bx, by), GREEN);
 
     // Case 2: Square
     let bx = -4.0;
@@ -81,8 +83,8 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 4.0, by + 4.0, 0.0),
         Point3::new(bx, by + 4.0, 0.0),
     ];
-    register_stroke(storage, &sq_pts, style, true, GRAY);
-    register_face(storage, square_mesh(bx, by), BLUE);
+    register_stroke(storage, &mut bounds, &sq_pts, style, true, GRAY);
+    register_face(storage, &mut bounds, square_mesh(bx, by), BLUE);
 
     // Case 3: L-shape (concave) — 4 triangles, 6 vertices
     let bx = 4.0;
@@ -96,7 +98,7 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 2.0, by + 4.0, 0.0),
         Point3::new(bx, by + 4.0, 0.0),
     ];
-    register_stroke(storage, &l_pts, style, true, GRAY);
+    register_stroke(storage, &mut bounds, &l_pts, style, true, GRAY);
     let l_mesh = TriangleMesh {
         vertices: vec![
             Point3::new(bx, by, 0.0),
@@ -117,7 +119,7 @@ pub fn register(storage: &MeshStorage) {
         ],
         indices: vec![[0, 1, 2], [0, 2, 3], [0, 3, 5], [3, 4, 5]],
     };
-    register_face(storage, l_mesh, GREEN);
+    register_face(storage, &mut bounds, l_mesh, GREEN);
 
     // Case 4: Square with hole — outer 6x6, inner 3x3 centered
     let bx = 14.0;
@@ -135,8 +137,8 @@ pub fn register(storage: &MeshStorage) {
         Point3::new(bx + 4.5, by + 4.5, 0.0),
         Point3::new(bx + 1.5, by + 4.5, 0.0),
     ];
-    register_stroke(storage, &outer_pts, style, true, GRAY);
-    register_stroke(storage, &inner_pts, style, true, GRAY);
+    register_stroke(storage, &mut bounds, &outer_pts, style, true, GRAY);
+    register_stroke(storage, &mut bounds, &inner_pts, style, true, GRAY);
     // For ground truth, we show the outline only (mesh is complex to hand-compute)
     // The algorithm output pattern (Step 3) will show the actual tessellation.
 }
