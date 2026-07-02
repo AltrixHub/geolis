@@ -21,6 +21,7 @@
 
 pub(crate) mod assemble;
 pub(crate) mod band;
+pub(crate) mod intersect;
 pub(crate) mod loops;
 pub(crate) mod punch;
 
@@ -31,9 +32,10 @@ use super::select::BooleanOp;
 
 /// Routes a boolean operation on (at least one) NURBS-faced solid.
 ///
-/// Only the through-cut [`BooleanOp::Subtract`] is supported; Union and
-/// Intersect return an explicit unsupported error, as does any Subtract that
-/// violates the through-cut preconditions.
+/// The through-cut [`BooleanOp::Subtract`] (keep-outside) and
+/// [`BooleanOp::Intersect`] (keep-inside) are supported; Union returns an
+/// explicit unsupported error, as does any operation that violates the
+/// through-cut preconditions.
 pub(crate) fn try_boolean(
     store: &mut TopologyStore,
     solid_a: SolidId,
@@ -42,12 +44,9 @@ pub(crate) fn try_boolean(
 ) -> Result<SolidId> {
     match op {
         BooleanOp::Subtract => assemble::subtract_through_cut(store, solid_a, solid_b),
+        BooleanOp::Intersect => intersect::intersect_through_cut(store, solid_a, solid_b),
         BooleanOp::Union => Err(OperationError::Failed(
-            "union of NURBS-faced solids is not supported (through-cut subtract only)".into(),
-        )
-        .into()),
-        BooleanOp::Intersect => Err(OperationError::Failed(
-            "intersection of NURBS-faced solids is not supported (through-cut subtract only)"
+            "union of NURBS-faced solids is not supported (through-cut subtract/intersect only)"
                 .into(),
         )
         .into()),
