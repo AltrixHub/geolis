@@ -47,6 +47,25 @@ pub fn tessellate_nurbs_curve(
     curve: &NurbsCurve3D,
     options: &CurveTessellationOptions,
 ) -> Result<Vec<Point3>> {
+    let params = tessellate_nurbs_curve_params(curve, options)?;
+    params.iter().map(|&t| curve.point_at(t)).collect()
+}
+
+/// Adaptively samples a NURBS curve, returning the ordered **parameter** values
+/// (endpoints included) rather than the evaluated points.
+///
+/// This is the geometry-only sampling used to make adjacent faces conform: two
+/// faces that share a boundary curve sample it at the identical parameter set,
+/// so their boundary polylines coincide exactly (see [`conforming_boundary_uv`]).
+///
+/// # Errors
+///
+/// Returns [`TessellationError::InvalidParameters`] if `chord_tolerance` is not
+/// strictly positive, or propagates any evaluation error from the curve.
+pub(crate) fn tessellate_nurbs_curve_params(
+    curve: &NurbsCurve3D,
+    options: &CurveTessellationOptions,
+) -> Result<Vec<f64>> {
     if options.chord_tolerance <= 0.0 {
         return Err(TessellationError::InvalidParameters(
             "chord_tolerance must be strictly positive".to_owned(),
@@ -57,25 +76,25 @@ pub fn tessellate_nurbs_curve(
     let (t_min, t_max) = curve.parameter_domain();
     let seeds = seed_parameters(curve, t_min, t_max);
 
-    // Start with the first seed point, then append each interval's interior +
-    // end points so endpoints are shared exactly once.
-    let mut points = Vec::new();
+    // Start with the first seed parameter, then append each interval's interior +
+    // end parameters so endpoints are shared exactly once.
+    let mut params = Vec::new();
     let mut prev_end = Sample {
         t: seeds[0],
         point: curve.point_at(seeds[0])?,
     };
-    points.push(prev_end.point);
+    params.push(prev_end.t);
     for window in seeds.windows(2) {
         let end = Sample {
             t: window[1],
             point: curve.point_at(window[1])?,
         };
-        bisect_curve(curve, prev_end, end, options, 0, &mut points)?;
-        points.push(end.point);
+        bisect_curve(curve, prev_end, end, options, 0, &mut params)?;
+        params.push(end.t);
         prev_end = end;
     }
 
-    Ok(points)
+    Ok(params)
 }
 
 /// A curve sample: parameter plus its evaluated point.
@@ -102,11 +121,11 @@ fn seed_parameters(curve: &NurbsCurve3D, t_min: f64, t_max: f64) -> Vec<f64> {
     seeds
 }
 
-/// Recursively appends interior sample points for the open interval
+/// Recursively appends interior sample **parameters** for the open interval
 /// `(start.t, end.t)`.
 ///
-/// `start` / `end` are the already-evaluated endpoints. The midpoint is
-/// appended only when the curve deviates from the chord beyond tolerance and
+/// `start` / `end` are the already-evaluated endpoints. The midpoint parameter
+/// is appended only when the curve deviates from the chord beyond tolerance and
 /// depth remains; the `end` endpoint is appended by the caller.
 fn bisect_curve(
     curve: &NurbsCurve3D,
@@ -114,7 +133,7 @@ fn bisect_curve(
     end: Sample,
     options: &CurveTessellationOptions,
     depth: usize,
-    out: &mut Vec<Point3>,
+    out: &mut Vec<f64>,
 ) -> Result<()> {
     let mid_t = 0.5 * (start.t + end.t);
     let mid = Sample {
@@ -130,9 +149,100 @@ fn bisect_curve(
     }
 
     bisect_curve(curve, start, mid, options, depth + 1, out)?;
-    out.push(mid.point);
+    out.push(mid.t);
     bisect_curve(curve, mid, end, options, depth + 1, out)?;
     Ok(())
+}
+
+/// Chord tolerance (model units) for boundary-curve sampling shared by adjacent
+/// faces. Because both faces sample the *same* boundary curve at the *same*
+/// parameters, the inter-face deviation is exact regardless of this value; it
+/// only governs how finely the silhouette itself is approximated.
+pub(crate) const BOUNDARY_CHORD_TOLERANCE: f64 = 1e-3;
+
+/// Builds the curve-intrinsic UV boundary polyline for a NURBS face whose outer
+/// boundary is the full parameter rectangle.
+///
+/// Each of the four boundary isocurves is sampled at its own chord-adaptive
+/// parameters ([`tessellate_nurbs_curve_params`]) — a function of the curve
+/// geometry alone. Any other face that shares one of these boundary curves (for
+/// example a ruled side wall extruded from it) samples the identical curve at
+/// the identical parameters, so the two faces emit coincident 3D boundary
+/// vertices and no silhouette sliver forms. The returned loop is CCW in UV:
+/// `v_min` edge (u increasing), `u_max` edge (v increasing), `v_max` edge (u
+/// decreasing), `u_min` edge (v decreasing).
+///
+/// # Errors
+///
+/// Propagates isocurve extraction or curve-sampling errors.
+pub(crate) fn conforming_boundary_uv(
+    surface: &NurbsSurface,
+    chord_tolerance: f64,
+) -> Result<Vec<Point2>> {
+    let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
+    let options = CurveTessellationOptions {
+        chord_tolerance,
+        max_depth: 16,
+    };
+
+    // Boundary isocurves with their parameter axis:
+    //   v_min / v_max edges vary u (knots_u domain [u_min, u_max]).
+    //   u_min / u_max edges vary v (knots_v domain [v_min, v_max]).
+    let u_at_vmin = tessellate_nurbs_curve_params(&surface.isocurve_v(v_min)?, &options)?;
+    let v_at_umax = tessellate_nurbs_curve_params(&surface.isocurve_u(u_max)?, &options)?;
+    let u_at_vmax = tessellate_nurbs_curve_params(&surface.isocurve_v(v_max)?, &options)?;
+    let v_at_umin = tessellate_nurbs_curve_params(&surface.isocurve_u(u_min)?, &options)?;
+
+    let mut pts: Vec<Point2> = Vec::new();
+    for &u in &u_at_vmin {
+        pts.push(Point2::new(u, v_min));
+    }
+    for &v in &v_at_umax {
+        pts.push(Point2::new(u_max, v));
+    }
+    for &u in u_at_vmax.iter().rev() {
+        pts.push(Point2::new(u, v_max));
+    }
+    for &v in v_at_umin.iter().rev() {
+        pts.push(Point2::new(u_min, v));
+    }
+
+    // Drop consecutive near-duplicate points (corner joins) and the closing
+    // wrap-around duplicate so the CDT never receives a zero-length constraint.
+    pts.dedup_by(|a, b| (*a - *b).norm() < 1e-9);
+    while pts.len() >= 2 && (pts[0] - pts[pts.len() - 1]).norm() < 1e-9 {
+        pts.pop();
+    }
+    Ok(pts)
+}
+
+/// Reports whether an untrimmed NURBS surface's parameter rectangle maps to a
+/// non-degenerate quadrilateral boundary (four distinct corners).
+///
+/// Closed/seam surfaces (a revolved wall, an extruded tube whose `u` wraps) or
+/// pole-collapsed patches fail this test: their opposite boundary edges
+/// coincide, so the rectangle-outline CDT path is inapplicable and the caller
+/// falls back to the tensor-grid tessellator.
+pub(crate) fn nurbs_surface_is_open(surface: &NurbsSurface) -> bool {
+    let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
+    let corners = [
+        surface.point_at(u_min, v_min),
+        surface.point_at(u_max, v_min),
+        surface.point_at(u_max, v_max),
+        surface.point_at(u_min, v_max),
+    ];
+    let corners: Vec<Point3> = match corners.into_iter().collect::<Result<_>>() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for i in 0..corners.len() {
+        for j in (i + 1)..corners.len() {
+            if (corners[i] - corners[j]).norm() < crate::math::TOLERANCE {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Options for adaptive NURBS surface tessellation.

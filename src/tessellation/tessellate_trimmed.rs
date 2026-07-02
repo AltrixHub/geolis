@@ -7,6 +7,33 @@
 //! centroid lies outside the trim region (outside the outer loop or inside a
 //! hole) are discarded, and the surviving vertices are mapped through the
 //! surface to 3D.
+//!
+//! ## Boundary conformance (design decision)
+//!
+//! Adjacent faces of a solid own independent per-face wires (no shared `BRep`
+//! edge topology), so each face used to tessellate a shared boundary curve with
+//! its own chord subdivision. Where the chords disagreed, one face's mesh poked
+//! past its neighbour at the silhouette (a visible sliver).
+//!
+//! The fix is **design (a): solid-agnostic boundary-conforming sampling**. Any
+//! face whose outer boundary is the full parameter rectangle — an untrimmed face
+//! (via [`tessellate_untrimmed_conforming`]) or a punched target face whose
+//! outer loop is the domain rectangle (detected by [`loop_is_domain_rectangle`])
+//! — samples that boundary at the *curve-intrinsic* parameters of each boundary
+//! isocurve ([`super::tessellate_nurbs::conforming_boundary_uv`]). Because that
+//! sampling is a function of the boundary curve's geometry alone, two faces that
+//! share a curve (e.g. a curved top face and the ruled side wall extruded from
+//! its boundary) independently arrive at the *identical* parameter set and emit
+//! coincident 3D vertices — the deviation collapses to floating-point noise with
+//! no densification. The CDT decouples the boundary from the interior grid, so
+//! this needs no cross-face communication and no shared-edge topology.
+//!
+//! Path toward **design (b)** (true shared-edge `BRep` adjacency with per-`EdgeId`
+//! cached boundary polylines): once creation ops and the boolean share edges
+//! between adjacent faces, the boundary polyline could be sampled once per edge
+//! and looked up by both faces, making conformance structural rather than
+//! geometric. That is a larger refactor of the topology layer and the boolean's
+//! face copying; the geometry-only approach here is the proportionate step.
 
 use std::collections::HashMap;
 
@@ -20,7 +47,9 @@ use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
 use crate::topology::{FaceTrim, TrimLoop};
 
-use super::tessellate_nurbs::adaptive_grid_parameters;
+use super::tessellate_nurbs::{
+    adaptive_grid_parameters, conforming_boundary_uv, BOUNDARY_CHORD_TOLERANCE,
+};
 use super::{SurfaceTessellationOptions, TriangleMesh};
 
 /// Number of samples per pcurve segment when converting a trim loop to a UV
@@ -48,18 +77,79 @@ pub fn tessellate_trimmed_nurbs_face(
 ) -> Result<TriangleMesh> {
     validate_options(options)?;
 
-    // 1. Sample each loop into a UV polyline.
-    let outer = sample_loop(&trim.outer)?;
+    // 1. Sample each loop into a UV polyline. When the outer loop is the full
+    //    parameter rectangle (e.g. a punched target face whose silhouette is the
+    //    original NURBS boundary), sample it at the boundary-curve-intrinsic
+    //    parameters so it conforms with adjacent faces that share those curves.
+    let outer = outer_loop_uv(surface, &trim.outer)?;
     let holes: Vec<Vec<Point2>> = trim.holes.iter().map(sample_loop).collect::<Result<_>>()?;
 
-    // 2. Adaptive UV grid (shared with the full-domain tessellator).
+    tessellate_cdt(surface, &outer, &holes, options)
+}
+
+/// Tessellates an untrimmed NURBS face whose outer boundary is the full
+/// parameter rectangle, using the boundary-conforming CDT path.
+///
+/// Adjacent faces sharing a boundary curve sample it identically (see
+/// [`conforming_boundary_uv`]), so their meshes meet with no silhouette sliver —
+/// unlike the tensor-grid tessellator, whose per-face boundary chords disagree.
+///
+/// # Errors
+///
+/// Propagates option-validation, boundary-sampling, and CDT construction errors.
+pub(crate) fn tessellate_untrimmed_conforming(
+    surface: &NurbsSurface,
+    options: &SurfaceTessellationOptions,
+) -> Result<TriangleMesh> {
+    validate_options(options)?;
+    let outer = conforming_boundary_uv(surface, BOUNDARY_CHORD_TOLERANCE)?;
+    tessellate_cdt(surface, &outer, &[], options)
+}
+
+/// Chooses the outer-loop UV sampling: boundary-conforming when the loop is the
+/// full parameter rectangle, otherwise the loop's own (e.g. SSI ring) sampling.
+fn outer_loop_uv(surface: &NurbsSurface, outer: &TrimLoop) -> Result<Vec<Point2>> {
+    if loop_is_domain_rectangle(surface, outer) {
+        conforming_boundary_uv(surface, BOUNDARY_CHORD_TOLERANCE)
+    } else {
+        sample_loop(outer)
+    }
+}
+
+/// Reports whether every control point of `loop_` lies on the surface's
+/// parameter-domain boundary — i.e. the loop is the full-domain rectangle (as
+/// built by the punch pipeline), not an interior SSI trim ring.
+fn loop_is_domain_rectangle(surface: &NurbsSurface, loop_: &TrimLoop) -> bool {
+    let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
+    let eps = 1e-7;
+    let on_boundary = |p: &Point2| {
+        ((p.x - u_min).abs() < eps || (p.x - u_max).abs() < eps)
+            || ((p.y - v_min).abs() < eps || (p.y - v_max).abs() < eps)
+    };
+    loop_
+        .curves
+        .iter()
+        .all(|c| c.control_points().iter().all(on_boundary))
+}
+
+/// Constrained-Delaunay tessellation of a NURBS surface from pre-sampled UV
+/// outer/hole loops. Interior grid samples (from the shared adaptive refinement)
+/// that fall strictly inside the trim region are added as Steiner points;
+/// triangles whose centroid is outside the region are discarded.
+fn tessellate_cdt(
+    surface: &NurbsSurface,
+    outer: &[Point2],
+    holes: &[Vec<Point2>],
+    options: &SurfaceTessellationOptions,
+) -> Result<TriangleMesh> {
+    // Adaptive UV grid (shared with the full-domain tessellator).
     let (u_params, v_params) = adaptive_grid_parameters(surface, options);
 
-    // 3. Constrained Delaunay triangulation.
+    // Constrained Delaunay triangulation.
     let mut cdt = ConstrainedDelaunayTriangulation::<SpadePoint2<f64>>::new();
 
-    insert_constraint_loop(&mut cdt, &outer)?;
-    for hole in &holes {
+    insert_constraint_loop(&mut cdt, outer)?;
+    for hole in holes {
         insert_constraint_loop(&mut cdt, hole)?;
     }
 
@@ -67,7 +157,7 @@ pub fn tessellate_trimmed_nurbs_face(
     for &u in &u_params {
         for &v in &v_params {
             let p = Point2::new(u, v);
-            if point_in_region(&p, &outer, &holes) {
+            if point_in_region(&p, outer, holes) {
                 // Ignore individual insertion failures (e.g. a point landing on
                 // an existing constraint vertex); the constraint loops already
                 // pin the boundary.
@@ -92,7 +182,7 @@ pub fn tessellate_trimmed_nurbs_face(
             let p2 = verts[2].position();
             Point2::new((p0.x + p1.x + p2.x) / 3.0, (p0.y + p1.y + p2.y) / 3.0)
         };
-        if !point_in_region(&centroid, &outer, &holes) {
+        if !point_in_region(&centroid, outer, holes) {
             continue;
         }
 

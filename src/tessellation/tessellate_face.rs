@@ -170,6 +170,13 @@ fn tessellate_nurbs_face(
 ) -> Result<TriangleMesh> {
     let options = SurfaceTessellationOptions::default();
     let mut mesh = match trim {
+        // Untrimmed faces with a non-degenerate rectangular boundary go through
+        // the boundary-conforming CDT path so adjacent faces sharing a boundary
+        // curve meet without a silhouette sliver. Closed/seam surfaces (whose
+        // opposite boundary edges coincide) keep the tensor-grid tessellator.
+        None if super::nurbs_surface_is_open(nurbs) => {
+            super::tessellate_untrimmed_conforming(nurbs, &options)?
+        }
         None => super::tessellate_nurbs_surface(nurbs, &options)?,
         Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options)?,
     };
