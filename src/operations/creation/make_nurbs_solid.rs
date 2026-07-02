@@ -6,6 +6,7 @@
 
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{NurbsCurve3D, NurbsSurface};
+use crate::geometry::surface::Surface;
 use crate::math::{Point3, Vector3, TOLERANCE};
 use crate::topology::{FaceId, ShellData, SolidData, SolidId, TopologyStore};
 
@@ -90,8 +91,10 @@ impl MakeNurbsTube {
 /// The front face is a bicubic-ish NURBS patch with a gentle central rise; the
 /// back face is the front control net translated down by `thickness` (a
 /// control-net offset — an approximation of a true offset surface, exact here
-/// because the translation is rigid). Four planar side faces close the slab
-/// from the front/back boundary curves.
+/// because the translation is rigid). Four exact ruled NURBS side faces close
+/// the slab: each is `NurbsSurface::extrude` of a front boundary isocurve along
+/// `(0, 0, -thickness)`, so every side boundary is geometrically identical to
+/// the front/back curved boundaries (no lens-shaped gaps).
 ///
 /// The slab spans `[0, size] x [0, size]` in XY; the front patch sits at
 /// `z = base_z + bulge * shape(u,v)` and the back patch `thickness` below it.
@@ -140,7 +143,7 @@ impl MakeCurvedSlab {
         let back = MakeNurbsFace::new(back_surface.clone()).execute(store)?;
         store.face_mut(back)?.same_sense = false;
 
-        let sides = side_faces(store, &front_surface, &back_surface)?;
+        let sides = side_faces(store, &front_surface, self.thickness)?;
 
         let mut faces = vec![front, back];
         faces.extend(sides);
@@ -175,74 +178,49 @@ impl MakeCurvedSlab {
     }
 }
 
-/// Builds the four planar side faces from the front/back boundary curves,
-/// sampling each boundary into a polyline ribbon and closing it as a quad strip
-/// face (planar per side because both boundaries share an XY edge).
+/// Builds the four exact ruled NURBS side faces of the slab.
+///
+/// The back sheet is the front control net translated by `(0, 0, -thickness)`,
+/// so each side wall is exactly the ruled surface between a front boundary
+/// isocurve and that same curve translated down by `thickness`. That ruled
+/// surface is `NurbsSurface::extrude(front_boundary, (0, 0, -thickness))`
+/// (`degree_v = 1`, exact): its `v = 0` boundary isocurve reproduces the front
+/// face's corresponding boundary curve and its `v = 1` isocurve the back face's,
+/// so the side faces meet the curved front/back faces with no lens-shaped gap.
 fn side_faces(
     store: &mut TopologyStore,
     front: &NurbsSurface,
-    back: &NurbsSurface,
+    thickness: f64,
 ) -> Result<Vec<FaceId>> {
-    const N: usize = 16;
-    let ((u0, u1), (v0, v1)) = front.parameter_domain();
-    // Four domain edges as (u,v) parameter walks. Order chosen so each ribbon's
-    // front-edge + back-edge + verticals wind consistently.
-    let edges: [[(f64, f64); 2]; 4] = [
-        [(u0, v0), (u1, v0)], // y = 0 side
-        [(u1, v0), (u1, v1)], // x = size side
-        [(u1, v1), (u0, v1)], // y = size side
-        [(u0, v1), (u0, v0)], // x = 0 side
-    ];
+    let extrude_dir = Vector3::new(0.0, 0.0, -thickness);
+    // XY center of the slab, used to orient each side normal outward.
+    let center = front.point_at(0.5, 0.5)?;
 
     let mut faces = Vec::with_capacity(4);
-    for edge in edges {
-        let face = side_ribbon(store, front, back, edge, N)?;
+    for boundary in front.boundary_curves()? {
+        let side_surface = NurbsSurface::extrude(&boundary, extrude_dir)?;
+        let face = MakeNurbsFace::new(side_surface.clone()).execute(store)?;
+        // Flip the sense on the sides whose natural normal points inward, so
+        // every side face's normal points away from the slab body.
+        if !side_normal_points_outward(&side_surface, &center)? {
+            store.face_mut(face)?.same_sense = false;
+        }
         faces.push(face);
     }
     Ok(faces)
 }
 
-/// Builds one planar side face. The front and back patches share the same XY
-/// boundary (the thickening is a pure vertical translation of the control net),
-/// so each side lies in a vertical plane and is a valid planar quad strip: front
-/// edge forward, then down to the back edge, then back edge reversed.
-fn side_ribbon(
-    store: &mut TopologyStore,
-    front: &NurbsSurface,
-    back: &NurbsSurface,
-    edge: [(f64, f64); 2],
-    n: usize,
-) -> Result<FaceId> {
-    let [start, end] = edge;
-    let mut ring: Vec<Point3> = Vec::with_capacity(2 * (n + 1));
-    // Front edge start -> end.
-    for i in 0..=n {
-        #[allow(clippy::cast_precision_loss)]
-        let t = i as f64 / n as f64;
-        let u = start.0 + (end.0 - start.0) * t;
-        let v = start.1 + (end.1 - start.1) * t;
-        ring.push(front.point_at(u, v)?);
-    }
-    // Back edge end -> start.
-    for i in 0..=n {
-        #[allow(clippy::cast_precision_loss)]
-        let t = i as f64 / n as f64;
-        let u = end.0 + (start.0 - end.0) * t;
-        let v = end.1 + (start.1 - end.1) * t;
-        ring.push(back.point_at(u, v)?);
-    }
-    // Drop duplicate seam points so MakeWire does not see coincident pairs.
-    dedup_ring(&mut ring);
-    let wire = MakeWire::new(ring, true).execute(store)?;
-    MakeFace::new(wire, vec![]).execute(store)
-}
-
-/// Removes consecutive coincident points and a coincident wrap-around point.
-fn dedup_ring(pts: &mut Vec<Point3>) {
-    pts.dedup_by(|a, b| (*a - *b).norm() < TOLERANCE);
-    while pts.len() >= 2 && (pts[0] - pts[pts.len() - 1]).norm() < TOLERANCE {
-        pts.pop();
-    }
+/// Reports whether the ruled side surface's natural normal (at its midpoint)
+/// points away from the slab body, measured radially in XY from `center`.
+fn side_normal_points_outward(side: &NurbsSurface, center: &Point3) -> Result<bool> {
+    let ((u_min, u_max), (v_min, v_max)) = side.parameter_domain();
+    let u = 0.5 * (u_min + u_max);
+    let v = 0.5 * (v_min + v_max);
+    let mid = side.point_at(u, v)?;
+    let normal = Surface::normal(side, u, v)?;
+    // Radial outward direction in the XY plane (side walls are vertical-ish).
+    let outward = Vector3::new(mid.x - center.x, mid.y - center.y, 0.0);
+    Ok(normal.dot(&outward) >= 0.0)
 }
 
 /// A closed solid of revolution: a planar profile revolved a full turn about an
@@ -395,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn slab_builds_six_faces_two_nurbs() {
+    fn slab_builds_six_nurbs_faces() {
         let mut store = TopologyStore::new();
         let solid = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
             .execute(&mut store)
@@ -409,7 +387,75 @@ mod tests {
             .iter()
             .filter(|&&f| matches!(store.face(f).unwrap().surface, FaceSurface::Nurbs(_)))
             .count();
-        assert_eq!(nurbs_faces, 2, "front + back are NURBS");
+        assert_eq!(
+            nurbs_faces, 6,
+            "front + back + 4 exact ruled side faces are all NURBS"
+        );
+    }
+
+    /// Extracts the NURBS surface backing a face, panicking otherwise.
+    fn nurbs_of(store: &TopologyStore, face: FaceId) -> NurbsSurface {
+        match &store.face(face).unwrap().surface {
+            FaceSurface::Nurbs(n) => n.clone(),
+            other => panic!("expected a NURBS face, got {other:?}"),
+        }
+    }
+
+    /// Asserts two 3D NURBS curves coincide geometrically: sampled at 50 shared
+    /// parameter fractions, every pair of points is within 1e-9.
+    fn assert_curves_coincide(a: &NurbsCurve3D, b: &NurbsCurve3D, label: &str) {
+        let (a0, a1) = a.parameter_domain();
+        let (b0, b1) = b.parameter_domain();
+        for i in 0..=50 {
+            let f = f64::from(i) / 50.0;
+            let pa = a.point_at(a0 + (a1 - a0) * f).unwrap();
+            let pb = b.point_at(b0 + (b1 - b0) * f).unwrap();
+            let d = (pa - pb).norm();
+            assert!(
+                d < 1e-9,
+                "{label}: boundary mismatch at f={f}: distance {d}"
+            );
+        }
+    }
+
+    /// The exact ruled side faces close the gaps: each side face's top (`v=0`)
+    /// boundary isocurve coincides with the front face's corresponding boundary
+    /// curve, and its bottom (`v=1`) isocurve with the back face's — geometric
+    /// coincidence, not merely shared corner points. The old planar sides (chord
+    /// through the corners) failed this by design.
+    #[test]
+    fn slab_side_boundaries_coincide_with_faces() {
+        let mut store = TopologyStore::new();
+        let solid = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+            .execute(&mut store)
+            .unwrap();
+        let shell = store
+            .shell(store.solid(solid).unwrap().outer_shell)
+            .unwrap();
+        // Faces are stored as [front, back, side_0 .. side_3], where side_i is
+        // extruded from front.boundary_curves()[i] (same isocurve order for the
+        // back), so side_i pairs with front/back boundary curve i.
+        let front = nurbs_of(&store, shell.faces[0]);
+        let back = nurbs_of(&store, shell.faces[1]);
+        let front_boundaries = front.boundary_curves().unwrap();
+        let back_boundaries = back.boundary_curves().unwrap();
+
+        for (i, &face) in shell.faces[2..6].iter().enumerate() {
+            let side = nurbs_of(&store, face);
+            let ((_, _), (v_min, v_max)) = side.parameter_domain();
+            let top = side.isocurve_v(v_min).unwrap();
+            let bottom = side.isocurve_v(v_max).unwrap();
+            assert_curves_coincide(
+                &top,
+                &front_boundaries[i],
+                &format!("side {i} top vs front"),
+            );
+            assert_curves_coincide(
+                &bottom,
+                &back_boundaries[i],
+                &format!("side {i} bottom vs back"),
+            );
+        }
     }
 
     #[test]
