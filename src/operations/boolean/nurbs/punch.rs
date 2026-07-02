@@ -9,10 +9,14 @@
 //! - The hole pcurve is a **degree-1 polyline** through the SSI trace points
 //!   (not a fitted rational arc); the trimmed CDT tessellator samples loops into
 //!   polylines anyway, so this is lossless for tessellation.
-//! - The SSI trace omits the short arc at the tool's parametric seam (the
-//!   marcher terminates there). The loop is closed with a single straight
-//!   segment across that gap. The gap is one marching step wide, so the induced
-//!   error is sub-step and bounded.
+//! - Seam-closed SSI branches are **seam-filled** upstream (see
+//!   [`super::loops::fill_seam_gap`]): the wedge at the tool's parametric u-seam
+//!   is populated with true intersection samples shared by the punch (`uv_a`)
+//!   and band (`uv_b`) rings. The final wrap segment then closes a genuinely small
+//!   sub-step arc rather than chording across the whole seam. If the seam fill
+//!   fails (Newton non-convergence), the wrap segment falls back to the original
+//!   single straight chord across the (unfilled) gap — bounded and documented,
+//!   never fabricated geometry.
 
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
@@ -95,7 +99,9 @@ fn uv_segment(a: Point2, b: Point2) -> NurbsCurve2D {
 }
 
 /// Converts a target-UV SSI trace into a clockwise (hole) `TrimLoop` of degree-1
-/// segments, closing the seam gap with a straight segment.
+/// segments. The trace is seam-filled upstream, so the wrap-around segment closes
+/// a small sub-step arc (it only degrades to a straight seam chord if the seam
+/// fill could not converge).
 fn hole_loop_from_trace(uv_a: &[Point2]) -> Result<TrimLoop> {
     let mut pts = dedup_uv(uv_a);
     if pts.len() < 3 {
@@ -114,7 +120,8 @@ fn hole_loop_from_trace(uv_a: &[Point2]) -> Result<TrimLoop> {
     for i in 0..n {
         let a = pts[i];
         let b = pts[(i + 1) % n];
-        // The wrap-around segment (i = n-1) closes the seam gap.
+        // The wrap-around segment (i = n-1) closes the ring; with seam-filled
+        // traces it is a short sub-step arc, not a chord across the seam.
         curves.push(uv_segment(a, b));
     }
     Ok(TrimLoop::new(curves))

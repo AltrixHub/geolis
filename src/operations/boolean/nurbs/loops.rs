@@ -6,10 +6,13 @@
 //! closed loops (entry + exit), each lying on a target face. Any deviation is a
 //! typed unsupported error — never silent wrong geometry.
 
+use nalgebra::Matrix3;
+
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{
     intersect_surfaces, IntersectionOptions, NurbsSurface, SurfaceIntersectionCurve,
 };
+use crate::math::Point2;
 use crate::topology::{FaceId, FaceSurface, TopologyStore};
 
 /// One closed intersection loop between a target face and a tool side face.
@@ -56,7 +59,7 @@ pub(crate) fn extract_cut_loops(
             // `b`, so `uv_a` lands on the target (where we punch) and `uv_b` on
             // the tool (where we band).
             let branches = intersect_surfaces(target_surf, tool_surf, &options)?;
-            for branch in branches {
+            for mut branch in branches {
                 if branch.points.len() < 3 {
                     continue;
                 }
@@ -68,6 +71,15 @@ pub(crate) fn extract_cut_loops(
                             .into(),
                     )
                     .into());
+                }
+                // A seam-closed branch (`closed == false` but endpoints pinned to
+                // the tool's opposite u-boundaries) is missing the short arc at
+                // the tool's parametric u-seam. Fill that wedge with true
+                // intersection samples so the punch (uv_a) ring and the band
+                // (uv_b) ring share the same geometry across the seam. Genuinely
+                // closed branches (`closed == true`) already span their loop.
+                if !branch.closed {
+                    fill_seam_gap(&mut branch, target_surf, tool_surf, &options);
                 }
                 loops.push(CutLoop {
                     target_face: *target_id,
@@ -180,6 +192,214 @@ const SEAM_EPS: f64 = 0.12;
 /// Maximum v mismatch (in tool parameter units) between the two seam endpoints.
 const SEAM_V_EPS: f64 = 0.05;
 
+/// Fills the u-seam wedge of a seam-closed branch with true intersection samples.
+///
+/// The SSI marcher terminates at the tool's parametric u-seam, so a seam-closed
+/// branch's `uv_b` trace spans only the interior `(u_lo, u_hi)` of the tool u
+/// domain and omits the wedge `[u0, u_lo] ∪ [u_hi, u1]` that straddles the seam.
+/// The punch would otherwise close its ring with one straight chord across that
+/// wedge while the band would leave the wedge unmeshed — the two disagree,
+/// leaving a visible slit at the seam azimuth.
+///
+/// This appends `K` refined samples that walk the wedge from the trace's `last`
+/// endpoint across the seam to (just before) its `first` endpoint, **reaching
+/// both `u0` and `u1` exactly** so the band ribbon spans the full u domain (no
+/// unmeshed wedge) and the punch ring follows the real arc (no chord). For each
+/// sample the tool `u` is fixed and a 3×3 Newton solves the true intersection
+/// `S_target(u_a, v_a) = S_tool(u_fixed, v_b)` for the three unknowns
+/// `(u_a, v_a, v_b)`, mirroring the corrector in `surface_surface.rs` but with
+/// the tool `u` pinned. Each sample is appended to the synchronized
+/// `points` / `uv_a` / `uv_b` (`uv_a` = target, `uv_b` = tool).
+///
+/// ## Seam-wrap convention (band UV)
+///
+/// The tool side surface is geometrically closed but parametrically non-periodic
+/// (`u0` and `u1` map to the same seam azimuth). The appended `uv_b` samples keep
+/// their tool `u` **wrapped into `[u0, u1]`** — not unrolled past `u1` — because
+/// the trimmed tessellator evaluates 3D via `surface.point_at(u, v)`, which
+/// requires `u ∈ [u0, u1]`. Sorting the wrapped `u` then yields a ribbon covering
+/// the full `[u0, u1]`; its left (`u0`) and right (`u1`) closing edges land on the
+/// same seam azimuth and coincide in 3D, so the band stays a simple polygon in
+/// the unrolled rectangle and closes conformally with the punch ring.
+///
+/// On Newton non-convergence for any sample the branch is left unmodified and the
+/// punch chord / band stitch remain as honest fallbacks (a genuinely unfillable
+/// gap keeps the pre-existing sub-step approximation rather than fabricating
+/// geometry).
+fn fill_seam_gap(
+    branch: &mut SurfaceIntersectionCurve,
+    target: &NurbsSurface,
+    tool: &NurbsSurface,
+    options: &IntersectionOptions,
+) {
+    let Some(&last_a) = branch.uv_a.last() else {
+        return;
+    };
+    let (Some(&first_b), Some(&last_b)) = (branch.uv_b.first(), branch.uv_b.last()) else {
+        return;
+    };
+    let ((u0, u1), _) = tool.parameter_domain();
+    let period = u1 - u0;
+    if period <= f64::EPSILON {
+        return;
+    }
+
+    // Marching step in tool u (median consecutive |Δu| of the raw trace).
+    let step_u = median_step_u(&branch.uv_b).max(period * 1e-3);
+
+    // Orientation: which u-boundary is the trace's `last` endpoint closest to?
+    // `last` is walked toward its own boundary; `first` is approached from the
+    // opposite one, so the appended chain crosses the seam once.
+    let last_near_hi = (u1 - last_b.x).abs() <= (last_b.x - u0).abs();
+    let hi_bound = if last_near_hi { u1 } else { u0 };
+    let lo_bound = if last_near_hi { u0 } else { u1 };
+
+    // Segment counts sized to the marching step; `max(2, …)` guarantees the seam
+    // boundary itself is sampled and keeps the total `K = n_hi + n_lo >= 4`.
+    let hi_span = hi_bound - last_b.x;
+    let lo_span = first_b.x - lo_bound;
+    let n_hi = sample_count(hi_span, step_u);
+    let n_lo = sample_count(lo_span, step_u);
+
+    // Collect samples first; only commit if every Newton solve converges.
+    let mut new_points = Vec::with_capacity(n_hi + n_lo);
+    let mut new_uv_a = Vec::with_capacity(n_hi + n_lo);
+    let mut new_uv_b = Vec::with_capacity(n_hi + n_lo);
+    let mut seed = (last_a.x, last_a.y, last_b.y);
+
+    // High side: from `last` (exclusive) up to the near boundary (inclusive).
+    for i in 1..=n_hi {
+        #[allow(clippy::cast_precision_loss)]
+        let frac = i as f64 / n_hi as f64;
+        let u_fixed = clamp_u(last_b.x + hi_span * frac, u0, u1);
+        let Some(sample) = newton_seam(target, tool, u_fixed, seed, options) else {
+            return;
+        };
+        seed = sample;
+        push_sample(
+            target,
+            u_fixed,
+            sample,
+            &mut new_points,
+            &mut new_uv_a,
+            &mut new_uv_b,
+        );
+    }
+    // Low side: from the opposite boundary (inclusive) toward `first` (exclusive).
+    for i in 0..n_lo {
+        #[allow(clippy::cast_precision_loss)]
+        let frac = i as f64 / n_lo as f64;
+        let u_fixed = clamp_u(lo_bound + lo_span * frac, u0, u1);
+        let Some(sample) = newton_seam(target, tool, u_fixed, seed, options) else {
+            return;
+        };
+        seed = sample;
+        push_sample(
+            target,
+            u_fixed,
+            sample,
+            &mut new_points,
+            &mut new_uv_a,
+            &mut new_uv_b,
+        );
+    }
+
+    branch.points.extend(new_points);
+    branch.uv_a.extend(new_uv_a);
+    branch.uv_b.extend(new_uv_b);
+}
+
+/// Number of segments for a wedge sub-span at roughly the marching step, at least
+/// 2 so the seam boundary is always reached.
+fn sample_count(span: f64, step_u: f64) -> usize {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let n = (span.abs() / step_u).ceil() as usize;
+    n.max(2)
+}
+
+/// Clamps a tool u into the parameter domain (guards floating-point overshoot at
+/// the seam boundary).
+fn clamp_u(u: f64, u0: f64, u1: f64) -> f64 {
+    u.clamp(u0, u1)
+}
+
+/// Evaluates the 3D point at the solved target UV and records the synchronized
+/// sample. `S_target(u_a, v_a) == S_tool(u_fixed, v_b)` at convergence, so the
+/// target evaluation is authoritative for the shared ring geometry.
+fn push_sample(
+    target: &NurbsSurface,
+    u_fixed: f64,
+    sample: (f64, f64, f64),
+    points: &mut Vec<crate::math::Point3>,
+    uv_a: &mut Vec<Point2>,
+    uv_b: &mut Vec<Point2>,
+) {
+    let (ua, va, vb) = sample;
+    // `newton_seam` only returns a converged sample, so this evaluation succeeds;
+    // fall back to skipping the point defensively if it somehow fails.
+    if let Ok(p) = target.point_at(ua, va) {
+        points.push(p);
+        uv_a.push(Point2::new(ua, va));
+        uv_b.push(Point2::new(u_fixed, vb));
+    }
+}
+
+/// Median consecutive |Δu| of a tool-UV trace (the local marching step in u).
+fn median_step_u(uv_b: &[Point2]) -> f64 {
+    let mut diffs: Vec<f64> = uv_b.windows(2).map(|w| (w[1].x - w[0].x).abs()).collect();
+    if diffs.is_empty() {
+        return 0.0;
+    }
+    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    diffs[diffs.len() / 2]
+}
+
+/// 3×3 Newton for one seam sample with the tool `u` pinned.
+///
+/// Unknowns `(u_a, v_a, v_b)`; residual `r = S_target(u_a, v_a) - S_tool(u_fixed,
+/// v_b)` (3 components). Jacobian columns `[∂S_a/∂u_a, ∂S_a/∂v_a, -∂S_b/∂v_b]`.
+/// Solves `J·Δ = r`, updates `x -= Δ`, clamps to both domains (`u_fixed` stays
+/// pinned). Returns `None` if the residual stays above tolerance (non-convergence
+/// / singular Jacobian), so the caller can fall back cleanly.
+#[allow(clippy::similar_names)]
+fn newton_seam(
+    target: &NurbsSurface,
+    tool: &NurbsSurface,
+    u_fixed: f64,
+    seed: (f64, f64, f64),
+    options: &IntersectionOptions,
+) -> Option<(f64, f64, f64)> {
+    let ((au0, au1), (av0, av1)) = target.parameter_domain();
+    let (_, (bv0, bv1)) = tool.parameter_domain();
+    let (mut ua, mut va, mut vb) = seed;
+    let tol = options.tolerance.max(1e-12);
+
+    for _ in 0..options.max_iterations {
+        let (pa, sau, sav) = target.partials(ua, va).ok()?;
+        let (pb, _sbu, sbv) = tool.partials(u_fixed, vb).ok()?;
+        let r = pa - pb;
+        if r.norm() < tol {
+            return Some((ua, va, vb));
+        }
+        let j = Matrix3::from_columns(&[sau, sav, -sbv]);
+        let jinv = j.try_inverse()?;
+        let delta = jinv * r;
+        ua = (ua - delta[0]).clamp(au0, au1);
+        va = (va - delta[1]).clamp(av0, av1);
+        vb = (vb - delta[2]).clamp(bv0, bv1);
+        if delta.norm() < tol {
+            break;
+        }
+    }
+    let pa = target.point_at(ua, va).ok()?;
+    let pb = tool.point_at(u_fixed, vb).ok()?;
+    if (pa - pb).norm() < tol.max(1e-7) {
+        Some((ua, va, vb))
+    } else {
+        None
+    }
+}
+
 /// Mean of the `uv_b` v-coordinate over a branch (tool-axis position).
 fn mean_v_b(branch: &SurfaceIntersectionCurve) -> f64 {
     if branch.uv_b.is_empty() {
@@ -223,7 +443,7 @@ pub(crate) fn collect_nurbs_faces(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::math::Point3;
@@ -260,16 +480,118 @@ mod tests {
         // The tube has one NURBS side face; it must yield exactly 2 loops.
         assert_eq!(cuts.len(), 1, "one tool side face");
         let cut = &cuts[0];
-        // Both loops are accepted as closed (genuinely closed or seam-closed).
+        // Both loops were accepted (extraction succeeded) and — being seam-closed
+        // here — were seam-filled, so each `uv_b` trace now spans the full tool u
+        // domain (it reaches both the u0 and u1 boundaries across the seam).
         let tool_surf = &tool[0].1;
-        assert!(super::is_closed_loop(&cut.loops[0].branch, tool_surf));
-        assert!(super::is_closed_loop(&cut.loops[1].branch, tool_surf));
+        let ((u0, u1), _) = tool_surf.parameter_domain();
+        let u_span = u1 - u0;
+        for loop_ in &cut.loops {
+            let umin = loop_
+                .branch
+                .uv_b
+                .iter()
+                .map(|p| p.x)
+                .fold(f64::INFINITY, f64::min);
+            let umax = loop_
+                .branch
+                .uv_b
+                .iter()
+                .map(|p| p.x)
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                (umin - u0).abs() <= 1e-6 * u_span && (u1 - umax).abs() <= 1e-6 * u_span,
+                "seam-filled trace must reach both u boundaries: [{umin}, {umax}] \
+                 vs domain [{u0}, {u1}]"
+            );
+        }
         // Each loop lies on a target face; the two target faces differ
         // (front + back of the slab).
         assert_ne!(
             cut.loops[0].target_face, cut.loops[1].target_face,
             "entry and exit loops lie on different slab faces"
         );
+    }
+
+    #[test]
+    fn seam_fill_closes_gap_and_satisfies_both_surfaces() {
+        let (store, slab, tube) = slab_and_tube(Point3::new(3.0, 3.0, -1.5), 0.7);
+        let target = collect_nurbs_faces(&store, &solid_faces(&store, slab));
+        let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
+        let tool_surf = &tool[0].1;
+        let options = IntersectionOptions::default();
+
+        // Find a raw seam-closed branch across ALL target faces (unfilled).
+        let mut raw = None;
+        for (_, tsurf) in &target {
+            if !aabb_overlap(tsurf, tool_surf) {
+                continue;
+            }
+            for branch in intersect_surfaces(tsurf, tool_surf, &options).unwrap() {
+                if branch.points.len() >= 3 && !branch.closed && is_closed_loop(&branch, tool_surf)
+                {
+                    raw = Some((tsurf.clone(), branch));
+                    break;
+                }
+            }
+            if raw.is_some() {
+                break;
+            }
+        }
+        let (raw_target, raw_branch) = raw.expect("expected a seam-closed branch");
+        let n_before = raw_branch.points.len();
+
+        // Pre-fill maximum consecutive u-step along the open trace.
+        let pre_max_step = raw_branch
+            .uv_b
+            .windows(2)
+            .map(|w| (w[1].x - w[0].x).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(pre_max_step > 0.0, "degenerate raw trace");
+
+        // Fill the seam gap.
+        let mut filled = raw_branch;
+        fill_seam_gap(&mut filled, &raw_target, tool_surf, &options);
+        assert!(
+            filled.points.len() > n_before,
+            "fill_seam_gap appended no samples"
+        );
+
+        // (1) No one-big-gap: sorting uv_b by u, the largest consecutive u-gap is
+        // now below twice the pre-fill marching step (the seam wedge is filled).
+        let mut us: Vec<f64> = filled.uv_b.iter().map(|p| p.x).collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let post_max_gap = us.windows(2).map(|w| w[1] - w[0]).fold(0.0_f64, f64::max);
+        assert!(
+            post_max_gap < 2.0 * pre_max_step,
+            "post-fill max u-gap {post_max_gap} not below 2x pre-fill step \
+             {pre_max_step}"
+        );
+
+        // (2) Every filled sample satisfies BOTH surface equations: the stored 3D
+        // point equals S_target(uv_a) and S_tool(uv_b) within 1e-6.
+        for i in n_before..filled.points.len() {
+            let p = filled.points[i];
+            let a = filled.uv_a[i];
+            let b = filled.uv_b[i];
+            let pa = raw_target.point_at(a.x, a.y).unwrap();
+            let pb = tool_surf.point_at(b.x, b.y).unwrap();
+            assert!(
+                (pa - p).norm() < 1e-6,
+                "filled point off target surface: {}",
+                (pa - p).norm()
+            );
+            assert!(
+                (pb - p).norm() < 1e-6,
+                "filled point off tool surface: {}",
+                (pb - p).norm()
+            );
+            assert!(
+                (pa - pb).norm() < 1e-6,
+                "filled sample surfaces disagree: {}",
+                (pa - pb).norm()
+            );
+        }
     }
 
     #[test]
