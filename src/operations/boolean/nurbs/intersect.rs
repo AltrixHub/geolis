@@ -25,7 +25,7 @@
 //!
 //! [`subtract_through_cut`]: super::assemble::subtract_through_cut
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{OperationError, Result};
 use crate::topology::{FaceId, FaceSurface, FaceTrim, SolidId, TopologyStore, WireId};
@@ -67,10 +67,10 @@ pub(crate) fn intersect_through_cut(
 
     // Which target faces receive a loop (kept and trimmed to the inside). v1
     // intersect requires at most one loop per target face.
-    let mut faces_with_loops: HashMap<FaceId, ()> = HashMap::new();
+    let mut faces_with_loops: HashSet<FaceId> = HashSet::new();
     for cut in &cuts {
         for l in &cut.loops {
-            if faces_with_loops.insert(l.target_face, ()).is_some() {
+            if !faces_with_loops.insert(l.target_face) {
                 return Err(OperationError::Failed(
                     "keep-inside intersect requires at most one loop per target \
                      face (v1 topology)"
@@ -87,7 +87,7 @@ pub(crate) fn intersect_through_cut(
     let mut id_map: HashMap<FaceId, FaceId> = HashMap::new();
     let mut result_faces: Vec<FaceId> = Vec::new();
     for &fid in &target_faces {
-        if faces_with_loops.contains_key(&fid) {
+        if faces_with_loops.contains(&fid) {
             let copy = copy_face(store, fid)?;
             id_map.insert(fid, copy);
             result_faces.push(copy);
