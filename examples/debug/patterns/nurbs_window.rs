@@ -11,13 +11,11 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use geolis::error::Result;
-use geolis::geometry::nurbs::{NurbsCurve3D, NurbsSurface};
+use geolis::geometry::nurbs::NurbsCurve3D;
 use geolis::math::{Point3, Vector3};
 use geolis::operations::boolean::{Intersect, Subtract};
 use geolis::operations::creation::{MakeCurvedWall, MakeNurbsPrism};
-use geolis::tessellation::{
-    tessellate_nurbs_surface, SurfaceTessellationOptions, TessellateSolid, TessellationParams,
-};
+use geolis::tessellation::{TessellateSolid, TessellationParams};
 use geolis::topology::{SolidId, TopologyStore};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
@@ -69,21 +67,26 @@ fn window_prism(
     MakeNurbsPrism::new(profile, radial).execute(store)
 }
 
-/// Builds the curved glass pane: a mid-radius sub-arc (spanning the inner opening
-/// plus a small margin) extruded vertically, so its edges tuck behind the frame.
-fn glass_surface() -> Result<NurbsSurface> {
+/// Builds the curved glass pane: a thin curved solid at the mid radius spanning
+/// the inner opening plus a small margin, so its edges tuck behind the frame.
+///
+/// The pane is a real (thin) solid rather than a single open surface: revion's
+/// transparent pipeline culls back faces, so an open sheet would vanish when
+/// viewed from behind — a closed thin solid presents a front face to either
+/// side and blends exactly once per view direction.
+fn glass_pane(store: &mut TopologyStore) -> Result<SolidId> {
     // Tangential half-extent 1.2 at RADIUS → angular half-sweep.
     let half_sweep = 1.2 / RADIUS;
     let base_z = 2.1;
-    let arc = NurbsCurve3D::arc(
+    MakeCurvedWall::new(
         Point3::new(0.0, 0.0, base_z),
         RADIUS,
-        Vector3::z(),
-        Vector3::x(),
         FRAC_PI_2 - half_sweep,
         FRAC_PI_2 + half_sweep,
-    )?;
-    NurbsSurface::extrude(&arc, Vector3::new(0.0, 0.0, 1.8))
+        1.8,
+        0.02,
+    )
+    .execute(store)
 }
 
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
@@ -177,10 +180,9 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     }
 
     // Semi-transparent curved glass pane (alpha < 255 → transparent pipeline).
-    if let Some(glass) = ok_or_warn(glass_surface(), "glass surface") {
-        let options = SurfaceTessellationOptions::default();
+    if let Some(glass) = ok_or_warn(glass_pane(&mut store), "glass pane") {
         if let Some(mesh) = ok_or_warn(
-            tessellate_nurbs_surface(&glass, &options),
+            TessellateSolid::new(glass, TessellationParams::default()).execute(&store),
             "glass tessellation",
         ) {
             register_face(storage, bounds, mesh, GLASS_COLOR);
