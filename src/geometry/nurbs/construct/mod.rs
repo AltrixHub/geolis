@@ -18,4 +18,5 @@ mod interpolate;
 mod loft;
 mod polyline;
 mod revolve;
+mod rounded_rectangle;
 mod sweep;
