@@ -73,15 +73,7 @@ pub fn register(storage: &MeshStorage) {
     // Show input boxes as 3D solids
     let bx = -14.0;
     let by = 0.0;
-    register_label(
-        storage,
-        &mut bounds,
-        bx - 2.0,
-        by + 8.0,
-        "1",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
     {
         let mut store = TopologyStore::new();
         // Wall (gray solid)
@@ -120,15 +112,7 @@ pub fn register(storage: &MeshStorage) {
     // Box B: (bx+2..bx+6, by+2..by+6, 1..4)
     let bx = -4.0;
     let by = 0.0;
-    register_label(
-        storage,
-        &mut bounds,
-        bx - 2.0,
-        by + 8.0,
-        "2",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
     {
         let mut store = TopologyStore::new();
         if let Some(a) = make_box(&mut store, bx, by, 0.0, 4.0, 4.0, 3.0) {
@@ -145,15 +129,7 @@ pub fn register(storage: &MeshStorage) {
     // Expected: (bx+2..bx+4, by+2..by+4, 1..3)
     let bx = 8.0;
     let by = 0.0;
-    register_label(
-        storage,
-        &mut bounds,
-        bx - 2.0,
-        by + 8.0,
-        "3",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
     {
         let mut store = TopologyStore::new();
         // Input boxes as gray wireframe

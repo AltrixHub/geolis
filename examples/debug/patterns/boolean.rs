@@ -58,15 +58,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Window extends beyond wall in z to avoid coplanar faces
     let bx = -14.0;
     let by = 0.0;
-    register_label(
-        storage,
-        bounds,
-        bx - 2.0,
-        by + 8.0,
-        "1",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
     {
         let mut store = TopologyStore::new();
         let wall = make_box(&mut store, bx, by, 0.0, 6.0, 6.0, 4.0);
@@ -82,15 +74,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 2: Union — two overlapping boxes
     let bx = -4.0;
     let by = 0.0;
-    register_label(
-        storage,
-        bounds,
-        bx - 2.0,
-        by + 8.0,
-        "2",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
     {
         let mut store = TopologyStore::new();
         let a = make_box(&mut store, bx, by, 0.0, 4.0, 4.0, 3.0);
@@ -106,15 +90,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 3: Intersect — overlap region
     let bx = 8.0;
     let by = 0.0;
-    register_label(
-        storage,
-        bounds,
-        bx - 2.0,
-        by + 8.0,
-        "3",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
     {
         let mut store = TopologyStore::new();
         let a = make_box(&mut store, bx, by, 0.0, 4.0, 4.0, 3.0);

@@ -68,7 +68,7 @@ fn circular_hole() -> Option<TrimLoop> {
 }
 
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
-    register_label(storage, bounds, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+    register_label(storage, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
     let Some(surface) = wavy_patch() else {
         return;

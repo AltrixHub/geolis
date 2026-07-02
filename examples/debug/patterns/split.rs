@@ -37,15 +37,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = 0.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 2.0,
-            by + 8.0,
-            "1",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) = MakeBox::new(
@@ -67,15 +59,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = spacing;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 2.0,
-            by + 8.0,
-            "2",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) = MakeBox::new(
@@ -97,15 +81,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = spacing * 2.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 2.0,
-            by + 8.0,
-            "3",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) = MakeBox::new(

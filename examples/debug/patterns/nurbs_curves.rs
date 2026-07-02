@@ -48,15 +48,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = 0.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 1.5,
-            by + 6.0,
-            "1",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 1.5, by + 6.0, "1", LABEL_SIZE, LABEL_COLOR);
 
         let waypoints = [
             Point3::new(0.0, 0.0, 0.0),
@@ -74,15 +66,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = 0.0;
         let by = -10.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 1.5,
-            by + 4.0,
-            "2",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 1.5, by + 4.0, "2", LABEL_SIZE, LABEL_COLOR);
 
         if let Ok(curve) = NurbsCurve3D::circle(
             Point3::new(bx, by, 0.0),
@@ -100,15 +84,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = 8.0;
         let by = -10.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 1.5,
-            by + 4.0,
-            "3",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 1.5, by + 4.0, "3", LABEL_SIZE, LABEL_COLOR);
 
         if let Ok(curve) = NurbsCurve3D::arc(
             Point3::new(bx, by, 0.0),

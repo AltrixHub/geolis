@@ -28,7 +28,7 @@ const SLAB_COLOR: Color = Color::rgb(120, 190, 210);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
-    register_label(storage, bounds, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+    register_label(storage, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
     let mut store = TopologyStore::new();
 

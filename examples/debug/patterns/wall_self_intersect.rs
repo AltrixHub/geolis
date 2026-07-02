@@ -345,24 +345,8 @@ fn draw_case(
     }
 
     // Labels
-    register_label(
-        storage,
-        bounds,
-        bx - 1.0,
-        by - 2.5,
-        label,
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
-    register_label(
-        storage,
-        bounds,
-        rx - 1.0,
-        by - 2.5,
-        label,
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 1.0, by - 2.5, label, LABEL_SIZE, LABEL_COLOR);
+    register_label(storage, rx - 1.0, by - 2.5, label, LABEL_SIZE, LABEL_COLOR);
 }
 
 // ── Registration ────────────────────────────────────────────────────
@@ -373,8 +357,8 @@ fn draw_case(
 /// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Labels for columns
-    register_label(storage, bounds, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
-    register_label(storage, bounds, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
+    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
+    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
 
     let cases: Vec<(&str, Vec<(f64, f64)>, f64)> = vec![
         ("1", v_slight_overlap(), 0.15), // 3pt V, slight overlap, thin

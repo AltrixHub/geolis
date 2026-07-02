@@ -91,15 +91,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = 0.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 1.5,
-            by + 8.0,
-            "1",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 1.5, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
         if let Some(surface) = bump_patch() {
             register_surface(storage, bounds, &surface, bx, by, GREEN);
         }
@@ -109,15 +101,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = 10.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 1.5,
-            by + 8.0,
-            "2",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 1.5, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
         if let Some(surface) = quarter_cylinder() {
             register_surface(storage, bounds, &surface, bx, by, BLUE);
         }

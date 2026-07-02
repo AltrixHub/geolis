@@ -79,15 +79,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
 
 /// Case 1: Straight wall segment with a window opening.
 fn case_straight_wall(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, by: f64) {
-    register_label(
-        storage,
-        bounds,
-        bx - 1.5,
-        by + 8.0,
-        "1",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 1.5, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
     let mut store = TopologyStore::new();
 
@@ -136,15 +128,7 @@ fn case_straight_wall(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, 
 
 /// Case 2: L-shaped wall with a window on the longer segment.
 fn case_l_wall(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, by: f64) {
-    register_label(
-        storage,
-        bounds,
-        bx - 1.5,
-        by + 10.0,
-        "2",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 1.5, by + 10.0, "2", LABEL_SIZE, LABEL_COLOR);
 
     let mut store = TopologyStore::new();
 
@@ -197,15 +181,7 @@ fn case_l_wall(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, by: f64
 
 /// Case 3: Closed rectangular room with a window on one wall.
 fn case_room_with_window(storage: &MeshStorage, bounds: &mut SceneBounds, bx: f64, by: f64) {
-    register_label(
-        storage,
-        bounds,
-        bx - 1.5,
-        by + 12.0,
-        "3",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 1.5, by + 12.0, "3", LABEL_SIZE, LABEL_COLOR);
 
     let mut store = TopologyStore::new();
 

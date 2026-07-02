@@ -108,7 +108,6 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     for (i, &ly) in label_y.iter().enumerate() {
         register_label(
             storage,
-            bounds,
             -10.0,
             ly,
             &format!("{}", i + 1),

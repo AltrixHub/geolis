@@ -68,15 +68,7 @@ pub fn register(storage: &MeshStorage) {
     {
         let bx = spacing;
         let by = 0.0_f64;
-        register_label(
-            storage,
-            &mut bounds,
-            bx - 2.0,
-            by + 8.0,
-            "2",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
 
         let mut store = TopologyStore::new();
         let pieces: &[(Point3, Point3)] = &[
@@ -122,15 +114,7 @@ pub fn register(storage: &MeshStorage) {
     {
         let bx = spacing * 2.0;
         let by = 0.0_f64;
-        register_label(
-            storage,
-            &mut bounds,
-            bx - 2.0,
-            by + 8.0,
-            "3",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
 
         let mut store = TopologyStore::new();
         let pieces: &[(Point3, Point3)] = &[

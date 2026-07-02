@@ -93,15 +93,7 @@ fn register_case(
     mesh_color: Color,
 ) {
     // Label positioned above-left of the revolve in the 2D (XY) projection.
-    register_label(
-        storage,
-        bounds,
-        ax - 5.0,
-        ay + 6.0,
-        label,
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, ax - 5.0, ay + 6.0, label, LABEL_SIZE, LABEL_COLOR);
     render_revolve(
         storage,
         bounds,

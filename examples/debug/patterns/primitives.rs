@@ -37,15 +37,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = 0.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 2.0,
-            by + 8.0,
-            "1",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =
@@ -59,15 +51,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = spacing;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 2.0,
-            by + 8.0,
-            "2",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) = MakeSphere::new(Point3::new(bx, by, 0.0), 3.0).execute(&mut topo) {
@@ -79,15 +63,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = spacing * 2.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 2.0,
-            by + 8.0,
-            "3",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =
@@ -101,15 +77,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     {
         let bx = spacing * 3.0;
         let by = 0.0;
-        register_label(
-            storage,
-            bounds,
-            bx - 2.0,
-            by + 8.0,
-            "4",
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 2.0, by + 8.0, "4", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =

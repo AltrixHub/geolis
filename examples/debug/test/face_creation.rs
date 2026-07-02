@@ -64,15 +64,7 @@ pub fn register(storage: &MeshStorage) {
     // Case 1: Triangle
     let bx = -12.0;
     let by = 2.0;
-    register_label(
-        storage,
-        &mut bounds,
-        bx - 2.0,
-        by + 5.5,
-        "1",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 5.5, "1", LABEL_SIZE, LABEL_COLOR);
     let tri_pts = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
@@ -84,15 +76,7 @@ pub fn register(storage: &MeshStorage) {
     // Case 2: Square
     let bx = -4.0;
     let by = 2.0;
-    register_label(
-        storage,
-        &mut bounds,
-        bx - 2.0,
-        by + 5.5,
-        "2",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 5.5, "2", LABEL_SIZE, LABEL_COLOR);
     let sq_pts = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
@@ -105,15 +89,7 @@ pub fn register(storage: &MeshStorage) {
     // Case 3: L-shape (concave) — 4 triangles, 6 vertices
     let bx = 4.0;
     let by = 2.0;
-    register_label(
-        storage,
-        &mut bounds,
-        bx - 2.0,
-        by + 5.5,
-        "3",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 5.5, "3", LABEL_SIZE, LABEL_COLOR);
     let l_pts = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
@@ -148,15 +124,7 @@ pub fn register(storage: &MeshStorage) {
     // Case 4: Square with hole — outer 6x6, inner 3x3 centered
     let bx = 14.0;
     let by = 2.0;
-    register_label(
-        storage,
-        &mut bounds,
-        bx - 2.0,
-        by + 7.5,
-        "4",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 7.5, "4", LABEL_SIZE, LABEL_COLOR);
     let outer_pts = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 6.0, by, 0.0),

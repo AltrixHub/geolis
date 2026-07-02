@@ -59,15 +59,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 1: Triangle
     let bx = -12.0;
     let by = 2.0;
-    register_label(
-        storage,
-        bounds,
-        bx - 2.0,
-        by + 5.5,
-        "1",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 5.5, "1", LABEL_SIZE, LABEL_COLOR);
     let tri = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
@@ -78,15 +70,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 2: Square
     let bx = -4.0;
     let by = 2.0;
-    register_label(
-        storage,
-        bounds,
-        bx - 2.0,
-        by + 5.5,
-        "2",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 5.5, "2", LABEL_SIZE, LABEL_COLOR);
     let sq = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),
@@ -98,15 +82,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 3: L-shape (concave)
     let bx = 4.0;
     let by = 2.0;
-    register_label(
-        storage,
-        bounds,
-        bx - 2.0,
-        by + 5.5,
-        "3",
-        LABEL_SIZE,
-        LABEL_COLOR,
-    );
+    register_label(storage, bx - 2.0, by + 5.5, "3", LABEL_SIZE, LABEL_COLOR);
     let l_shape = [
         Point3::new(bx, by, 0.0),
         Point3::new(bx + 4.0, by, 0.0),

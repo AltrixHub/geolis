@@ -139,15 +139,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
         (30.0, 0.0, "4", PURPLE, swept_surface()),
     ];
     for (bx, by, label, color, surface) in cases {
-        register_label(
-            storage,
-            bounds,
-            bx - 1.5,
-            by + 8.0,
-            label,
-            LABEL_SIZE,
-            LABEL_COLOR,
-        );
+        register_label(storage, bx - 1.5, by + 8.0, label, LABEL_SIZE, LABEL_COLOR);
         if let Some(surface) = surface {
             register_surface(storage, bounds, &surface, bx, by, color);
         }

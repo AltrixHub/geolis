@@ -1263,7 +1263,6 @@ pub fn register(storage: &MeshStorage) {
     for (i, (cl, outer, holes, closed, bx, by, lx, ly)) in cases.iter().enumerate() {
         register_label(
             storage,
-            &mut bounds,
             *lx,
             *ly,
             &format!("{}", i + 1),

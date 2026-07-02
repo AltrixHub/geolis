@@ -389,7 +389,6 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     for (i, (pts, hw, closed, bx, by, lx, ly)) in cases.iter().enumerate() {
         register_label(
             storage,
-            bounds,
             *lx,
             *ly,
             &format!("{}", i + 1),

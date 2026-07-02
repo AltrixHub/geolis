@@ -434,15 +434,9 @@ fn tessellate_curve_edge(
 /// `text` may contain digits `0`–`9`; other characters are skipped.
 /// `size` controls the height of each digit character.
 #[allow(clippy::cast_possible_truncation, clippy::many_single_char_names)]
-pub fn register_label(
-    storage: &MeshStorage,
-    bounds: &mut SceneBounds,
-    x: f64,
-    y: f64,
-    text: &str,
-    size: f64,
-    color: Color,
-) {
+/// Labels are annotations: they are intentionally excluded from the scene
+/// bounds so they never affect the initial camera framing.
+pub fn register_label(storage: &MeshStorage, x: f64, y: f64, text: &str, size: f64, color: Color) {
     let digit_w = size * 0.6;
     let digit_h = size;
     let thickness = size * 0.12;
@@ -505,9 +499,6 @@ pub fn register_label(
     if !verts_2d.is_empty() {
         let mesh_2d = RawMesh2D::new(verts_2d, indices.clone(), color);
         storage.upsert_2d(RawMesh2DId::new(), Arc::new(mesh_2d));
-        for v in &verts_3d {
-            bounds.include_vertex_3d(v);
-        }
         let mesh_3d = RawMesh3D::new(verts_3d, indices, color);
         storage.upsert_3d(RawMesh3DId::new(), Arc::new(mesh_3d));
     }
