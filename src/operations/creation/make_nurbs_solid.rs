@@ -152,6 +152,171 @@ fn newell_normal(pts: &[Point3]) -> Vector3 {
     n
 }
 
+/// A curved (plan-arc) wall: a vertical prism whose plan footprint is a circular
+/// annular sector.
+///
+/// The wall bends along a circular arc in plan (about `arc_center`, mid-surface
+/// `radius`, from `start_angle` to `end_angle` measured from `+X` toward `+Y`),
+/// rises `height` along `+Z`, and is `thickness` thick radially. Its inner and
+/// outer faces are exact concentric-arc extrusions at `radius ∓ thickness / 2`
+/// (the concentric arcs are the exact radial offset — no approximation); the
+/// top/bottom are exact ruled sectors between the inner and outer arcs and the
+/// two ends are exact ruled radial-vertical rectangles. All six faces are NURBS
+/// and share their boundary curves exactly, so the solid tessellates
+/// boundary-conformally.
+pub struct MakeCurvedWall {
+    arc_center: Point3,
+    radius: f64,
+    start_angle: f64,
+    end_angle: f64,
+    height: f64,
+    thickness: f64,
+}
+
+impl MakeCurvedWall {
+    /// Creates a curved wall about `arc_center` (base plane at `arc_center.z`).
+    #[must_use]
+    pub fn new(
+        arc_center: Point3,
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+        height: f64,
+        thickness: f64,
+    ) -> Self {
+        Self {
+            arc_center,
+            radius,
+            start_angle,
+            end_angle,
+            height,
+            thickness,
+        }
+    }
+
+    /// Builds the curved wall solid in the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `height` or `thickness` is non-positive, the inner
+    /// radius `radius - thickness / 2` is non-positive, or any arc / surface /
+    /// face construction fails (including an out-of-range angular sweep).
+    pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
+        if self.height <= TOLERANCE || self.thickness <= TOLERANCE {
+            return Err(OperationError::InvalidInput(
+                "curved wall height and thickness must be positive".into(),
+            )
+            .into());
+        }
+        let half = 0.5 * self.thickness;
+        if self.radius - half <= TOLERANCE {
+            return Err(OperationError::InvalidInput(
+                "curved wall inner radius (radius - thickness/2) must be positive".into(),
+            )
+            .into());
+        }
+
+        let normal = Vector3::z();
+        let ref_dir = Vector3::x();
+        let base = self.arc_center;
+        let top = self.arc_center + Vector3::new(0.0, 0.0, self.height);
+        let up = Vector3::new(0.0, 0.0, self.height);
+
+        let arc = |c: Point3, r: f64| -> Result<NurbsCurve3D> {
+            NurbsCurve3D::arc(c, r, normal, ref_dir, self.start_angle, self.end_angle)
+        };
+        let inner_base = arc(base, self.radius - half)?;
+        let outer_base = arc(base, self.radius + half)?;
+        let inner_top = arc(top, self.radius - half)?;
+        let outer_top = arc(top, self.radius + half)?;
+
+        // Radial bottom edges at the two angular ends (inner -> outer).
+        let (ti0, ti1) = inner_base.parameter_domain();
+        let start_radial =
+            NurbsCurve3D::polyline(&[inner_base.point_at(ti0)?, outer_base.point_at(ti0)?])?;
+        let end_radial =
+            NurbsCurve3D::polyline(&[inner_base.point_at(ti1)?, outer_base.point_at(ti1)?])?;
+
+        // Six exact NURBS faces.
+        let inner_surf = NurbsSurface::extrude(&inner_base, up)?;
+        let outer_surf = NurbsSurface::extrude(&outer_base, up)?;
+        let bottom_surf = ruled_surface(&inner_base, &outer_base)?;
+        let top_surf = ruled_surface(&inner_top, &outer_top)?;
+        let start_surf = NurbsSurface::extrude(&start_radial, up)?;
+        let end_surf = NurbsSurface::extrude(&end_radial, up)?;
+
+        // Body centroid, used to orient every face normal outward.
+        let mid_angle = 0.5 * (self.start_angle + self.end_angle);
+        let radial = Vector3::new(mid_angle.cos(), mid_angle.sin(), 0.0);
+        let centroid =
+            self.arc_center + radial * self.radius + Vector3::new(0.0, 0.0, 0.5 * self.height);
+
+        let mut faces = Vec::with_capacity(6);
+        for surf in [
+            inner_surf,
+            outer_surf,
+            bottom_surf,
+            top_surf,
+            start_surf,
+            end_surf,
+        ] {
+            faces.push(make_outward_face(store, surf, &centroid)?);
+        }
+
+        Ok(finish_solid(store, faces))
+    }
+}
+
+/// Builds a NURBS face from `surface` and flips its sense when the natural
+/// midpoint normal points toward `centroid` (so the stored normal faces
+/// outward from the body).
+fn make_outward_face(
+    store: &mut TopologyStore,
+    surface: NurbsSurface,
+    centroid: &Point3,
+) -> Result<FaceId> {
+    let ((u0, u1), (v0, v1)) = surface.parameter_domain();
+    let u = 0.5 * (u0 + u1);
+    let v = 0.5 * (v0 + v1);
+    let mid = surface.point_at(u, v)?;
+    let normal = Surface::normal(&surface, u, v)?;
+    let face = MakeNurbsFace::new(surface).execute(store)?;
+    if normal.dot(&(mid - centroid)) < 0.0 {
+        store.face_mut(face)?.same_sense = false;
+    }
+    Ok(face)
+}
+
+/// Builds the exact ruled NURBS surface between two curves that share a degree,
+/// knot vector, and per-index weights (row `v = 0` is `a`, row `v = 1` is `b`).
+///
+/// With matching endpoint weights each `v`-isoline is a straight segment, so for
+/// two concentric coplanar arcs the ruled surface is the exact planar annular
+/// sector between them.
+fn ruled_surface(a: &NurbsCurve3D, b: &NurbsCurve3D) -> Result<NurbsSurface> {
+    use crate::geometry::nurbs::KnotVector;
+    let nu = a.control_points().len();
+    let mut control_points = Vec::with_capacity(nu * 2);
+    let mut weights = Vec::with_capacity(nu * 2);
+    for i in 0..nu {
+        control_points.push(a.control_points()[i]);
+        control_points.push(b.control_points()[i]);
+        weights.push(a.weights()[i]);
+        weights.push(b.weights()[i]);
+    }
+    let knots_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0])?;
+    NurbsSurface::new(
+        control_points,
+        weights,
+        nu,
+        2,
+        a.knots().clone(),
+        knots_v,
+        a.degree(),
+        1,
+    )
+}
+
 /// A curved slab: a NURBS sheet (`front`) thickened along `+Z` by `thickness`.
 ///
 /// The front face is a bicubic-ish NURBS patch with a gentle central rise; the
@@ -617,6 +782,98 @@ mod tests {
             .execute(&mut store)
             .unwrap();
         assert_manifold(&store, solid);
+    }
+
+    /// A representative curved wall matching the P8 pattern geometry.
+    fn sample_wall(store: &mut TopologyStore) -> SolidId {
+        use std::f64::consts::PI;
+        MakeCurvedWall::new(
+            Point3::origin(),
+            8.0,
+            55.0 * PI / 180.0,
+            125.0 * PI / 180.0,
+            6.0,
+            0.4,
+        )
+        .execute(store)
+        .unwrap()
+    }
+
+    #[test]
+    fn curved_wall_builds_six_nurbs_faces() {
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        let shell = store
+            .shell(store.solid(solid).unwrap().outer_shell)
+            .unwrap();
+        assert_eq!(shell.faces.len(), 6, "inner+outer+top+bottom+2 ends");
+        let nurbs = shell
+            .faces
+            .iter()
+            .filter(|&&f| matches!(store.face(f).unwrap().surface, FaceSurface::Nurbs(_)))
+            .count();
+        assert_eq!(nurbs, 6, "all curved-wall faces are NURBS");
+    }
+
+    #[test]
+    fn curved_wall_inner_face_sits_at_inner_radius() {
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        let shell = store
+            .shell(store.solid(solid).unwrap().outer_shell)
+            .unwrap();
+        // faces[0] is the inner face by construction order.
+        let inner = nurbs_of(&store, shell.faces[0]);
+        let inner_radius = 8.0 - 0.2; // radius - thickness/2
+        let ((u0, u1), (v0, v1)) = inner.parameter_domain();
+        for i in 0..=20 {
+            for j in 0..=4 {
+                let u = u0 + (u1 - u0) * f64::from(i) / 20.0;
+                let v = v0 + (v1 - v0) * f64::from(j) / 4.0;
+                let p = inner.point_at(u, v).unwrap();
+                let dxy = (p.x * p.x + p.y * p.y).sqrt();
+                assert!(
+                    (dxy - inner_radius).abs() < 1e-9,
+                    "inner sample off radius: {dxy} vs {inner_radius}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn curved_wall_tessellates_manifold() {
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        assert_manifold(&store, solid);
+    }
+
+    #[test]
+    fn curved_wall_boundaries_conform() {
+        use crate::tessellation::max_adjacent_boundary_deviation;
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        let dev = max_adjacent_boundary_deviation(&store, solid);
+        assert!(
+            dev < 1e-6,
+            "curved wall boundary deviation {dev} exceeds 1e-6"
+        );
+    }
+
+    #[test]
+    fn curved_wall_rejects_degenerate_inputs() {
+        let mut store = TopologyStore::new();
+        // thickness larger than 2*radius → inner radius non-positive.
+        assert!(
+            MakeCurvedWall::new(Point3::origin(), 0.1, 0.0, 1.0, 2.0, 1.0)
+                .execute(&mut store)
+                .is_err()
+        );
+        // zero height.
+        assert!(
+            MakeCurvedWall::new(Point3::origin(), 8.0, 0.0, 1.0, 0.0, 0.4)
+                .execute(&mut store)
+                .is_err()
+        );
     }
 
     #[test]
