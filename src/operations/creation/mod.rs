@@ -13,7 +13,7 @@ pub use make_cone::MakeCone;
 pub use make_cylinder::MakeCylinder;
 pub use make_face::MakeFace;
 pub use make_nurbs_face::MakeNurbsFace;
-pub use make_nurbs_solid::{MakeCurvedSlab, MakeNurbsTube, MakeRevolvedSolid};
+pub use make_nurbs_solid::{MakeCurvedSlab, MakeNurbsPrism, MakeNurbsTube, MakeRevolvedSolid};
 pub use make_solid::MakeSolid;
 pub use make_sphere::MakeSphere;
 pub use make_wire::MakeWire;
