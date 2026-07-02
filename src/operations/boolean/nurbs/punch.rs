@@ -43,7 +43,7 @@ pub(crate) fn punch_loop(store: &mut TopologyStore, cut: &CutLoop) -> Result<Wir
     let hole_loop = hole_loop_from_trace(&cut.branch.uv_a)?;
 
     // 2. Build the 3D inner wire from the SSI 3D points.
-    let inner_wire = build_inner_wire(store, &cut.branch.points)?;
+    let inner_wire = build_ring_wire(store, &cut.branch.points)?;
 
     // 3. Attach to the face: create a full-domain outer trim if absent, push the
     //    hole, and append the inner wire.
@@ -103,15 +103,24 @@ fn uv_segment(a: Point2, b: Point2) -> NurbsCurve2D {
 /// a small sub-step arc (it only degrades to a straight seam chord if the seam
 /// fill could not converge).
 fn hole_loop_from_trace(uv_a: &[Point2]) -> Result<TrimLoop> {
-    let mut pts = dedup_uv(uv_a);
+    ssi_trim_loop(uv_a, true)
+}
+
+/// Converts an SSI UV trace into a closed `TrimLoop` of degree-1 segments with
+/// the requested winding (`clockwise` for a subtract hole, counter-clockwise for
+/// an intersect keep-inside outer boundary). Shared by the subtract and intersect
+/// paths so the ring geometry is identical in both modes.
+pub(crate) fn ssi_trim_loop(uv: &[Point2], clockwise: bool) -> Result<TrimLoop> {
+    let mut pts = dedup_uv(uv);
     if pts.len() < 3 {
         return Err(OperationError::Failed(
-            "punched loop degenerated to fewer than 3 distinct UV points".into(),
+            "SSI loop degenerated to fewer than 3 distinct UV points".into(),
         )
         .into());
     }
-    // Hole loops must wind clockwise (negative signed area).
-    if signed_area(&pts) > 0.0 {
+    // Reverse only when the current winding disagrees with the requested one.
+    let is_clockwise = signed_area(&pts) < 0.0;
+    if is_clockwise != clockwise {
         pts.reverse();
     }
 
@@ -153,9 +162,10 @@ fn signed_area(pts: &[Point2]) -> f64 {
     0.5 * a2
 }
 
-/// Builds a closed 3D inner wire from the SSI 3D trace via a single degree-3
-/// interpolated NURBS edge (closing the seam gap).
-fn build_inner_wire(store: &mut TopologyStore, points: &[Point3]) -> Result<WireId> {
+/// Builds a closed 3D ring wire from the SSI 3D trace via a single degree-3
+/// interpolated NURBS edge (closing the seam gap). Shared by the subtract (hole
+/// inner wire) and intersect (kept-disc outer wire) paths.
+pub(crate) fn build_ring_wire(store: &mut TopologyStore, points: &[Point3]) -> Result<WireId> {
     let mut pts = dedup3d(points);
     if pts.len() < 4 {
         return Err(OperationError::Failed(

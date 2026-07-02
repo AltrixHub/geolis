@@ -80,6 +80,29 @@ pub(crate) fn build_band_face(
     cut: &ToolFaceCut,
     rings: BandRingWires,
 ) -> Result<FaceId> {
+    // Subtract: band normals point INTO the hole (`same_sense = false`).
+    build_band_face_oriented(store, cut, rings, false)
+}
+
+/// Builds the band (hole-wall / plug-wall) face for one tool side face with an
+/// explicit `same_sense`.
+///
+/// The band region (the tool side surface strip between the entry and exit
+/// loops) is identical for the subtract and intersect through-cuts; only the
+/// normal orientation differs. Subtract points the band normals into the hole
+/// (`same_sense = false`); intersect points them outward from the kept plug
+/// (`same_sense = true`).
+///
+/// # Errors
+///
+/// Returns an error if the tool face is not a NURBS face or the stitched band
+/// polygon degenerates (fewer than 3 distinct UV points).
+pub(crate) fn build_band_face_oriented(
+    store: &mut TopologyStore,
+    cut: &ToolFaceCut,
+    rings: BandRingWires,
+    same_sense: bool,
+) -> Result<FaceId> {
     let surface = match &store.face(cut.tool_face)?.surface {
         FaceSurface::Nurbs(s) => s.clone(),
         _ => {
@@ -96,15 +119,14 @@ pub(crate) fn build_band_face(
     let outer = stitch_band_loop(&entry, &exit)?;
     let trim = FaceTrim::new(outer, Vec::new());
 
-    // The band's real boundary is the two SSI hole rings (entry + exit). Share
-    // the exact wires the punch step attached to the target faces so the band
-    // face has correct BRep adjacency (no fabricated full-surface seam wire).
+    // The band's real boundary is the two SSI rings (entry + exit). Share the
+    // exact wires the punch step attached to the target faces so the band face
+    // has correct BRep adjacency (no fabricated full-surface seam wire).
     Ok(store.add_face(FaceData {
         surface: FaceSurface::Nurbs(surface),
         outer_wire: rings.entry,
         inner_wires: vec![rings.exit],
-        // Subtract: band normals point into the hole.
-        same_sense: false,
+        same_sense,
         trim: Some(trim),
     }))
 }

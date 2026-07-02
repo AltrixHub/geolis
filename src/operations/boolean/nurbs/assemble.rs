@@ -76,8 +76,9 @@ pub(crate) fn subtract_through_cut(
 ///
 /// Uses the existing planar/face intersection probe between every planar tool
 /// face and every target face; a non-empty intersection means a cap meets the
-/// target, which the through-cut path does not handle.
-fn assert_no_cap_intersection(
+/// target, which the through-cut path does not handle. Shared with the intersect
+/// path.
+pub(crate) fn assert_no_cap_intersection(
     store: &TopologyStore,
     target_faces: &[FaceId],
     tool_faces: &[FaceId],
@@ -134,7 +135,7 @@ fn punch_onto_copy(
 /// Deep-copies a face into a new `FaceData` entry, cloning the surface and trim
 /// and sharing the (read-only) wire ids. The copy is independent so punching can
 /// mutate it without touching the input.
-fn copy_face(store: &mut TopologyStore, face: FaceId) -> Result<FaceId> {
+pub(crate) fn copy_face(store: &mut TopologyStore, face: FaceId) -> Result<FaceId> {
     let src = store.face(face)?;
     let data = FaceData {
         surface: src.surface.clone(),
@@ -147,13 +148,13 @@ fn copy_face(store: &mut TopologyStore, face: FaceId) -> Result<FaceId> {
 }
 
 /// Collects a solid's outer-shell face ids.
-fn solid_faces(store: &TopologyStore, solid: SolidId) -> Result<Vec<FaceId>> {
+pub(crate) fn solid_faces(store: &TopologyStore, solid: SolidId) -> Result<Vec<FaceId>> {
     let shell = store.shell(store.solid(solid)?.outer_shell)?;
     Ok(shell.faces.clone())
 }
 
 /// Wraps a face list into a closed shell + solid.
-fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> SolidId {
+pub(crate) fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> SolidId {
     use crate::topology::{ShellData, SolidData};
     let shell = store.add_shell(ShellData {
         faces,

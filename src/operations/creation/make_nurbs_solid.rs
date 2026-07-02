@@ -12,13 +12,82 @@ use crate::topology::{FaceId, ShellData, SolidData, SolidId, TopologyStore};
 
 use super::{MakeFace, MakeNurbsFace, MakeWire};
 
-/// A vertical NURBS tube: a circular profile extruded along `+Z`, capped by two
-/// planar disks.
+/// A NURBS prism: a closed planar profile extruded along `direction`, capped by
+/// two planar polygonal faces sampled from the profile.
 ///
-/// The side is a single closed `NurbsSurface` (`NurbsSurface::extrude` of a
-/// rational circle) whose `u` parameter runs around the tube (closed) and whose
-/// `v` parameter runs along the axis — exactly the band UV topology the
-/// through-cut subtract requires.
+/// The side is a single `NurbsSurface` (`NurbsSurface::extrude` of the profile)
+/// whose `u` parameter runs around the profile (closed for a closed profile) and
+/// whose `v` parameter runs along `direction` — exactly the band UV topology the
+/// through-cut boolean expects. The bottom cap sits at the profile and the top
+/// cap at the profile translated by `direction`; each cap is oriented so its
+/// outward normal points away from the prism body.
+///
+/// The profile must be closed and planar; the caps are planar polygons sampled
+/// from it.
+pub struct MakeNurbsPrism {
+    profile: NurbsCurve3D,
+    direction: Vector3,
+}
+
+impl MakeNurbsPrism {
+    /// Number of profile samples per cap polygon.
+    const CAP_SEGMENTS: usize = 64;
+
+    /// Creates a prism extruding `profile` along `direction`.
+    #[must_use]
+    pub fn new(profile: NurbsCurve3D, direction: Vector3) -> Self {
+        Self { profile, direction }
+    }
+
+    /// Builds the prism solid in the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `direction` is zero-length, the profile is not closed,
+    /// or any underlying surface / face construction fails.
+    pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
+        if self.direction.norm() <= TOLERANCE {
+            return Err(
+                OperationError::InvalidInput("prism direction must be non-zero".into()).into(),
+            );
+        }
+        if !self.profile.is_endpoint_closed() {
+            return Err(OperationError::InvalidInput("prism profile must be closed".into()).into());
+        }
+
+        let side_surface = NurbsSurface::extrude(&self.profile, self.direction)?;
+        let side = MakeNurbsFace::new(side_surface).execute(store)?;
+
+        // Sample the profile once; the bottom cap uses these points, the top cap
+        // the same points translated by `direction`.
+        let base = self.sample_profile()?;
+        let newell = newell_normal(&base);
+        let along = newell.dot(&self.direction);
+
+        // Bottom cap: outward normal opposes `direction`. Top cap: along it.
+        let bottom = cap_face(store, &base, along > 0.0)?;
+        let top_pts: Vec<Point3> = base.iter().map(|p| p + self.direction).collect();
+        let top = cap_face(store, &top_pts, along < 0.0)?;
+
+        Ok(finish_solid(store, vec![side, bottom, top]))
+    }
+
+    /// Samples the profile into `CAP_SEGMENTS` distinct points (excludes the
+    /// closing duplicate at the domain end).
+    fn sample_profile(&self) -> Result<Vec<Point3>> {
+        let (t0, t1) = self.profile.parameter_domain();
+        let mut pts = Vec::with_capacity(Self::CAP_SEGMENTS);
+        for i in 0..Self::CAP_SEGMENTS {
+            #[allow(clippy::cast_precision_loss)]
+            let frac = i as f64 / Self::CAP_SEGMENTS as f64;
+            pts.push(self.profile.point_at(t0 + (t1 - t0) * frac)?);
+        }
+        Ok(pts)
+    }
+}
+
+/// A vertical NURBS tube: a circular profile extruded along `+Z`, capped by two
+/// planar disks. Delegates to [`MakeNurbsPrism`] with a rational-circle profile.
 pub struct MakeNurbsTube {
     center: Point3,
     radius: f64,
@@ -50,40 +119,202 @@ impl MakeNurbsTube {
             )
             .into());
         }
-
+        let profile = NurbsCurve3D::circle(self.center, self.radius, Vector3::z(), Vector3::x())?;
         let axis = Vector3::new(0.0, 0.0, self.height);
-        let bottom_circle =
-            NurbsCurve3D::circle(self.center, self.radius, Vector3::z(), Vector3::x())?;
-        let side_surface = NurbsSurface::extrude(&bottom_circle, axis)?;
-        let side = MakeNurbsFace::new(side_surface).execute(store)?;
-
-        let top_center = self.center + axis;
-        let bottom = self.cap_face(store, self.center, false)?;
-        let top = self.cap_face(store, top_center, true)?;
-
-        Ok(finish_solid(store, vec![side, bottom, top]))
+        MakeNurbsPrism::new(profile, axis).execute(store)
     }
+}
 
-    /// Builds a planar circular cap as a polygonal disk. `upward` orients the
-    /// cap so its outward normal points away from the tube body.
-    fn cap_face(&self, store: &mut TopologyStore, center: Point3, upward: bool) -> Result<FaceId> {
-        const CAP_SEGMENTS: usize = 48;
-        let mut pts = Vec::with_capacity(CAP_SEGMENTS);
-        for i in 0..CAP_SEGMENTS {
-            #[allow(clippy::cast_precision_loss)]
-            let angle = std::f64::consts::TAU * (i as f64) / (CAP_SEGMENTS as f64);
-            // Bottom cap winds clockwise (normal -Z), top cap counter-clockwise
-            // (normal +Z) when the wire is built in this order.
-            let a = if upward { angle } else { -angle };
-            pts.push(Point3::new(
-                center.x + self.radius * a.cos(),
-                center.y + self.radius * a.sin(),
-                center.z,
-            ));
+/// Builds a planar polygonal cap face from an ordered ring of coplanar points.
+/// When `reverse` is set the point order is flipped so the face's right-hand
+/// normal points away from the prism body.
+fn cap_face(store: &mut TopologyStore, points: &[Point3], reverse: bool) -> Result<FaceId> {
+    let mut pts = points.to_vec();
+    if reverse {
+        pts.reverse();
+    }
+    let wire = MakeWire::new(pts, true).execute(store)?;
+    MakeFace::new(wire, vec![]).execute(store)
+}
+
+/// Newell's method normal of a (possibly non-convex) planar polygon. The
+/// magnitude is twice the polygon area; only its direction is used.
+fn newell_normal(pts: &[Point3]) -> Vector3 {
+    let mut n = Vector3::zeros();
+    let m = pts.len();
+    for i in 0..m {
+        let a = pts[i];
+        let b = pts[(i + 1) % m];
+        n.x += (a.y - b.y) * (a.z + b.z);
+        n.y += (a.z - b.z) * (a.x + b.x);
+        n.z += (a.x - b.x) * (a.y + b.y);
+    }
+    n
+}
+
+/// A curved (plan-arc) wall: a vertical prism whose plan footprint is a circular
+/// annular sector.
+///
+/// The wall bends along a circular arc in plan (about `arc_center`, mid-surface
+/// `radius`, from `start_angle` to `end_angle` measured from `+X` toward `+Y`),
+/// rises `height` along `+Z`, and is `thickness` thick radially. Its inner and
+/// outer faces are exact concentric-arc extrusions at `radius ∓ thickness / 2`
+/// (the concentric arcs are the exact radial offset — no approximation); the
+/// top/bottom are exact ruled sectors between the inner and outer arcs and the
+/// two ends are exact ruled radial-vertical rectangles. All six faces are NURBS
+/// and share their boundary curves exactly, so the solid tessellates
+/// boundary-conformally.
+pub struct MakeCurvedWall {
+    arc_center: Point3,
+    radius: f64,
+    start_angle: f64,
+    end_angle: f64,
+    height: f64,
+    thickness: f64,
+}
+
+impl MakeCurvedWall {
+    /// Creates a curved wall about `arc_center` (base plane at `arc_center.z`).
+    #[must_use]
+    pub fn new(
+        arc_center: Point3,
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+        height: f64,
+        thickness: f64,
+    ) -> Self {
+        Self {
+            arc_center,
+            radius,
+            start_angle,
+            end_angle,
+            height,
+            thickness,
         }
-        let wire = MakeWire::new(pts, true).execute(store)?;
-        MakeFace::new(wire, vec![]).execute(store)
     }
+
+    /// Builds the curved wall solid in the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `height` or `thickness` is non-positive, the inner
+    /// radius `radius - thickness / 2` is non-positive, or any arc / surface /
+    /// face construction fails (including an out-of-range angular sweep).
+    pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
+        if self.height <= TOLERANCE || self.thickness <= TOLERANCE {
+            return Err(OperationError::InvalidInput(
+                "curved wall height and thickness must be positive".into(),
+            )
+            .into());
+        }
+        let half = 0.5 * self.thickness;
+        if self.radius - half <= TOLERANCE {
+            return Err(OperationError::InvalidInput(
+                "curved wall inner radius (radius - thickness/2) must be positive".into(),
+            )
+            .into());
+        }
+
+        let normal = Vector3::z();
+        let ref_dir = Vector3::x();
+        let base = self.arc_center;
+        let top = self.arc_center + Vector3::new(0.0, 0.0, self.height);
+        let up = Vector3::new(0.0, 0.0, self.height);
+
+        let arc = |c: Point3, r: f64| -> Result<NurbsCurve3D> {
+            NurbsCurve3D::arc(c, r, normal, ref_dir, self.start_angle, self.end_angle)
+        };
+        let inner_base = arc(base, self.radius - half)?;
+        let outer_base = arc(base, self.radius + half)?;
+        let inner_top = arc(top, self.radius - half)?;
+        let outer_top = arc(top, self.radius + half)?;
+
+        // Radial bottom edges at the two angular ends (inner -> outer).
+        let (ti0, ti1) = inner_base.parameter_domain();
+        let start_radial =
+            NurbsCurve3D::polyline(&[inner_base.point_at(ti0)?, outer_base.point_at(ti0)?])?;
+        let end_radial =
+            NurbsCurve3D::polyline(&[inner_base.point_at(ti1)?, outer_base.point_at(ti1)?])?;
+
+        // Six exact NURBS faces.
+        let inner_surf = NurbsSurface::extrude(&inner_base, up)?;
+        let outer_surf = NurbsSurface::extrude(&outer_base, up)?;
+        let bottom_surf = ruled_surface(&inner_base, &outer_base)?;
+        let top_surf = ruled_surface(&inner_top, &outer_top)?;
+        let start_surf = NurbsSurface::extrude(&start_radial, up)?;
+        let end_surf = NurbsSurface::extrude(&end_radial, up)?;
+
+        // Body centroid, used to orient every face normal outward.
+        let mid_angle = 0.5 * (self.start_angle + self.end_angle);
+        let radial = Vector3::new(mid_angle.cos(), mid_angle.sin(), 0.0);
+        let centroid =
+            self.arc_center + radial * self.radius + Vector3::new(0.0, 0.0, 0.5 * self.height);
+
+        let mut faces = Vec::with_capacity(6);
+        for surf in [
+            inner_surf,
+            outer_surf,
+            bottom_surf,
+            top_surf,
+            start_surf,
+            end_surf,
+        ] {
+            faces.push(make_outward_face(store, surf, &centroid)?);
+        }
+
+        Ok(finish_solid(store, faces))
+    }
+}
+
+/// Builds a NURBS face from `surface` and flips its sense when the natural
+/// midpoint normal points toward `centroid` (so the stored normal faces
+/// outward from the body).
+fn make_outward_face(
+    store: &mut TopologyStore,
+    surface: NurbsSurface,
+    centroid: &Point3,
+) -> Result<FaceId> {
+    let ((u0, u1), (v0, v1)) = surface.parameter_domain();
+    let u = 0.5 * (u0 + u1);
+    let v = 0.5 * (v0 + v1);
+    let mid = surface.point_at(u, v)?;
+    let normal = Surface::normal(&surface, u, v)?;
+    let face = MakeNurbsFace::new(surface).execute(store)?;
+    if normal.dot(&(mid - centroid)) < 0.0 {
+        store.face_mut(face)?.same_sense = false;
+    }
+    Ok(face)
+}
+
+/// Builds the exact ruled NURBS surface between two curves that share a degree,
+/// knot vector, and per-index weights (row `v = 0` is `a`, row `v = 1` is `b`).
+///
+/// With matching endpoint weights each `v`-isoline is a straight segment, so for
+/// two concentric coplanar arcs the ruled surface is the exact planar annular
+/// sector between them.
+fn ruled_surface(a: &NurbsCurve3D, b: &NurbsCurve3D) -> Result<NurbsSurface> {
+    use crate::geometry::nurbs::KnotVector;
+    let nu = a.control_points().len();
+    let mut control_points = Vec::with_capacity(nu * 2);
+    let mut weights = Vec::with_capacity(nu * 2);
+    for i in 0..nu {
+        control_points.push(a.control_points()[i]);
+        control_points.push(b.control_points()[i]);
+        weights.push(a.weights()[i]);
+        weights.push(b.weights()[i]);
+    }
+    let knots_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0])?;
+    NurbsSurface::new(
+        control_points,
+        weights,
+        nu,
+        2,
+        a.knots().clone(),
+        knots_v,
+        a.degree(),
+        1,
+    )
 }
 
 /// A curved slab: a NURBS sheet (`front`) thickened along `+Z` by `thickness`.
@@ -373,6 +604,92 @@ mod tests {
     }
 
     #[test]
+    fn prism_builds_side_and_two_caps() {
+        let mut store = TopologyStore::new();
+        let profile = NurbsCurve3D::rounded_rectangle(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::x(),
+            Vector3::y(),
+            2.6,
+            2.0,
+            0.35,
+        )
+        .unwrap();
+        let solid = MakeNurbsPrism::new(profile, Vector3::new(0.0, 0.0, 1.2))
+            .execute(&mut store)
+            .unwrap();
+        let shell = store
+            .shell(store.solid(solid).unwrap().outer_shell)
+            .unwrap();
+        assert_eq!(shell.faces.len(), 3, "prism = side + 2 caps");
+        assert!(matches!(
+            store.face(shell.faces[0]).unwrap().surface,
+            FaceSurface::Nurbs(_)
+        ));
+    }
+
+    #[test]
+    fn prism_tessellates_manifold() {
+        let mut store = TopologyStore::new();
+        let profile = NurbsCurve3D::rounded_rectangle(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::x(),
+            Vector3::y(),
+            2.6,
+            2.0,
+            0.35,
+        )
+        .unwrap();
+        let solid = MakeNurbsPrism::new(profile, Vector3::new(0.0, 0.0, 1.2))
+            .execute(&mut store)
+            .unwrap();
+        assert_manifold(&store, solid);
+    }
+
+    #[test]
+    fn prism_side_vertices_lie_on_extruded_surface() {
+        use crate::geometry::nurbs::InversionOptions;
+        let mut store = TopologyStore::new();
+        let profile =
+            NurbsCurve3D::circle(Point3::new(1.0, 1.0, 0.0), 0.8, Vector3::z(), Vector3::x())
+                .unwrap();
+        let direction = Vector3::new(0.3, 0.0, 2.0);
+        let expected = NurbsSurface::extrude(&profile, direction).unwrap();
+        let solid = MakeNurbsPrism::new(profile, direction)
+            .execute(&mut store)
+            .unwrap();
+        let shell = store
+            .shell(store.solid(solid).unwrap().outer_shell)
+            .unwrap();
+        let side = nurbs_of(&store, shell.faces[0]);
+        let opts = InversionOptions::default();
+        let ((u0, u1), (v0, v1)) = side.parameter_domain();
+        for i in 0..=8 {
+            for j in 0..=4 {
+                let u = u0 + (u1 - u0) * f64::from(i) / 8.0;
+                let v = v0 + (v1 - v0) * f64::from(j) / 4.0;
+                let p = side.point_at(u, v).unwrap();
+                let inv = expected.closest_point(&p, &opts).unwrap();
+                assert!(inv.distance < 1e-9, "side vertex off extruded surface");
+            }
+        }
+    }
+
+    #[test]
+    fn prism_rejects_open_profile() {
+        let mut store = TopologyStore::new();
+        let open = NurbsCurve3D::polyline(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        assert!(MakeNurbsPrism::new(open, Vector3::z())
+            .execute(&mut store)
+            .is_err());
+    }
+
+    #[test]
     fn slab_builds_six_nurbs_faces() {
         let mut store = TopologyStore::new();
         let solid = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
@@ -465,6 +782,98 @@ mod tests {
             .execute(&mut store)
             .unwrap();
         assert_manifold(&store, solid);
+    }
+
+    /// A representative curved wall matching the P8 pattern geometry.
+    fn sample_wall(store: &mut TopologyStore) -> SolidId {
+        use std::f64::consts::PI;
+        MakeCurvedWall::new(
+            Point3::origin(),
+            8.0,
+            55.0 * PI / 180.0,
+            125.0 * PI / 180.0,
+            6.0,
+            0.4,
+        )
+        .execute(store)
+        .unwrap()
+    }
+
+    #[test]
+    fn curved_wall_builds_six_nurbs_faces() {
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        let shell = store
+            .shell(store.solid(solid).unwrap().outer_shell)
+            .unwrap();
+        assert_eq!(shell.faces.len(), 6, "inner+outer+top+bottom+2 ends");
+        let nurbs = shell
+            .faces
+            .iter()
+            .filter(|&&f| matches!(store.face(f).unwrap().surface, FaceSurface::Nurbs(_)))
+            .count();
+        assert_eq!(nurbs, 6, "all curved-wall faces are NURBS");
+    }
+
+    #[test]
+    fn curved_wall_inner_face_sits_at_inner_radius() {
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        let shell = store
+            .shell(store.solid(solid).unwrap().outer_shell)
+            .unwrap();
+        // faces[0] is the inner face by construction order.
+        let inner = nurbs_of(&store, shell.faces[0]);
+        let inner_radius = 8.0 - 0.2; // radius - thickness/2
+        let ((u0, u1), (v0, v1)) = inner.parameter_domain();
+        for i in 0..=20 {
+            for j in 0..=4 {
+                let u = u0 + (u1 - u0) * f64::from(i) / 20.0;
+                let v = v0 + (v1 - v0) * f64::from(j) / 4.0;
+                let p = inner.point_at(u, v).unwrap();
+                let dxy = (p.x * p.x + p.y * p.y).sqrt();
+                assert!(
+                    (dxy - inner_radius).abs() < 1e-9,
+                    "inner sample off radius: {dxy} vs {inner_radius}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn curved_wall_tessellates_manifold() {
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        assert_manifold(&store, solid);
+    }
+
+    #[test]
+    fn curved_wall_boundaries_conform() {
+        use crate::tessellation::max_adjacent_boundary_deviation;
+        let mut store = TopologyStore::new();
+        let solid = sample_wall(&mut store);
+        let dev = max_adjacent_boundary_deviation(&store, solid);
+        assert!(
+            dev < 1e-6,
+            "curved wall boundary deviation {dev} exceeds 1e-6"
+        );
+    }
+
+    #[test]
+    fn curved_wall_rejects_degenerate_inputs() {
+        let mut store = TopologyStore::new();
+        // thickness larger than 2*radius → inner radius non-positive.
+        assert!(
+            MakeCurvedWall::new(Point3::origin(), 0.1, 0.0, 1.0, 2.0, 1.0)
+                .execute(&mut store)
+                .is_err()
+        );
+        // zero height.
+        assert!(
+            MakeCurvedWall::new(Point3::origin(), 8.0, 0.0, 1.0, 0.0, 0.4)
+                .execute(&mut store)
+                .is_err()
+        );
     }
 
     #[test]

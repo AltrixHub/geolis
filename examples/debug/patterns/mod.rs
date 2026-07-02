@@ -6,6 +6,7 @@ pub mod nurbs_constructed;
 pub mod nurbs_curves;
 pub mod nurbs_surface;
 pub mod nurbs_trimmed;
+pub mod nurbs_window;
 pub mod primitives;
 pub mod revolve;
 pub mod shell;
@@ -133,6 +134,7 @@ pub const PATTERNS: &[&str] = &[
     "nurbs_constructed",
     "nurbs_trimmed",
     "nurbs_boolean",
+    "nurbs_window",
 ];
 
 /// Register meshes for the named pattern.
@@ -206,6 +208,10 @@ pub fn register(storage: &MeshStorage, name: &str) -> Option<SceneBounds> {
         }
         "nurbs_boolean" => {
             nurbs_boolean::register(storage, &mut bounds);
+            true
+        }
+        "nurbs_window" => {
+            nurbs_window::register(storage, &mut bounds);
             true
         }
         _ => false,
