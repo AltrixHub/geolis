@@ -15,23 +15,19 @@
 //!
 //! - Each target face receives at most one SSI loop (the tool passes cleanly
 //!   through, so its single side surface cuts each spanned target face once).
-//! - Target faces with no loop are kept whole iff a representative interior
-//!   point classifies as [`PointClassification::Inside`] the tool; faces
-//!   entirely outside the tool are dropped. For the demo topologies (a blank
-//!   fully spanned by the tool in one direction) every no-loop face lies outside
-//!   and is dropped.
+//! - A target face with NO loop is dropped. In the through-cut topology the tool
+//!   passes fully through the target, so the cut faces (trimmed to their SSI
+//!   loops) already bound the kept plug; every un-cut target face lies outside
+//!   the tool and is discarded. (A point-in-solid classification against the
+//!   NURBS-faced tool is deliberately NOT attempted: a robust one is out of
+//!   scope for v1 and the topological invariant makes it unnecessary — the kept
+//!   plug is exactly the cut discs plus the tool band.)
 //!
 //! [`subtract_through_cut`]: super::assemble::subtract_through_cut
 
 use std::collections::HashMap;
 
-use nalgebra::Vector3;
-
 use crate::error::{OperationError, Result};
-use crate::geometry::nurbs::{
-    intersect_curve_surface, IntersectionOptions, NurbsCurve3D, NurbsSurface,
-};
-use crate::math::Point3;
 use crate::topology::{FaceId, FaceSurface, FaceTrim, SolidId, TopologyStore, WireId};
 
 use super::assemble::{assert_no_cap_intersection, copy_face, finish_solid, solid_faces};
@@ -57,7 +53,6 @@ pub(crate) fn intersect_through_cut(
 
     let target_nurbs = collect_nurbs_faces(store, &target_faces);
     let tool_nurbs = collect_nurbs_faces(store, &tool_faces);
-    let tool_surfaces: Vec<NurbsSurface> = tool_nurbs.iter().map(|(_, s)| s.clone()).collect();
 
     if target_nurbs.is_empty() {
         return Err(OperationError::Failed(
@@ -86,9 +81,9 @@ pub(crate) fn intersect_through_cut(
         }
     }
 
-    // Copy the faces we keep, recording original -> copy for loop remapping.
-    // Faces with a loop are always kept (trimmed to the inside); a no-loop face
-    // is kept whole only if it lies inside the tool.
+    // Copy the cut faces (each trimmed to the inside below), recording
+    // original -> copy for loop remapping. Un-cut target faces lie outside the
+    // through tool and are dropped (see the module-level topology invariant).
     let mut id_map: HashMap<FaceId, FaceId> = HashMap::new();
     let mut result_faces: Vec<FaceId> = Vec::new();
     for &fid in &target_faces {
@@ -96,10 +91,7 @@ pub(crate) fn intersect_through_cut(
             let copy = copy_face(store, fid)?;
             id_map.insert(fid, copy);
             result_faces.push(copy);
-        } else if face_is_inside_tool(store, fid, &tool_surfaces)? {
-            result_faces.push(copy_face(store, fid)?);
         }
-        // else: entirely outside the tool — dropped.
     }
 
     // Trim each loop's target-face copy to the inside, then build the band
@@ -150,63 +142,11 @@ fn punch_inside(store: &mut TopologyStore, face_id: FaceId, loop_: &CutLoop) -> 
     Ok(ring)
 }
 
-/// Whether a representative interior point of `face` lies inside the tool.
-///
-/// v1 classification (per the plan): cast a long in-plane ray from the face
-/// centroid and count crossings with the tool's NURBS side surface(s). An odd
-/// crossing count means the probe is enclosed by the tool wall (inside); an even
-/// count (0 or 2) means it is outside. This is exact for the through-cut tool
-/// topology (a closed extruded profile whose axis is transverse to the ray).
-///
-/// The ray direction is oblique in the XY plane (and flat in Z, so parity across
-/// the side wall is well defined) to avoid grazing the tool's parametric u-seam,
-/// which lies along the profile's reference direction. A caps-only or
-/// ray-parallel tool is out of scope for v1 and is rejected upstream by the loop
-/// preconditions.
-fn face_is_inside_tool(
-    store: &TopologyStore,
-    face: FaceId,
-    tool_surfaces: &[NurbsSurface],
-) -> Result<bool> {
-    let probe = face_centroid(store, face)?;
-    // Oblique XY direction (non-axis-aligned slope) so the ray never runs along
-    // an axis-aligned tool seam; flat in Z so it stays transverse to the wall.
-    let dir = Vector3::new(1.0, 0.436, 0.0);
-    let ray = NurbsCurve3D::polyline(&[probe, probe + dir * 1.0e4])?;
-    let options = IntersectionOptions::default();
-    let mut crossings = 0usize;
-    for surface in tool_surfaces {
-        crossings += intersect_curve_surface(&ray, surface, &options)?.len();
-    }
-    Ok(crossings % 2 == 1)
-}
-
-/// A representative interior point of a face: the average of its outer boundary
-/// wire's edge vertices. For the convex planar side faces of the demo blanks
-/// this is the face centroid.
-fn face_centroid(store: &TopologyStore, face: FaceId) -> Result<Point3> {
-    let outer = store.face(face)?.outer_wire;
-    let wire = store.wire(outer)?;
-    let mut sum: Vector3<f64> = Vector3::zeros();
-    let mut count = 0usize;
-    for oe in &wire.edges {
-        let edge = store.edge(oe.edge)?;
-        for v in [edge.start, edge.end] {
-            sum += store.vertex(v)?.point.coords;
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return Err(OperationError::Failed("face has an empty boundary wire".into()).into());
-    }
-    #[allow(clippy::cast_precision_loss)]
-    Ok(Point3::from(sum / count as f64))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::math::Point3;
     use crate::operations::creation::{MakeCurvedSlab, MakeNurbsTube};
     use crate::tessellation::{TessellateSolid, TessellationParams};
     use std::collections::HashMap as StdHashMap;
@@ -285,6 +225,98 @@ mod tests {
             zmax - zmin > 1.0,
             "plug z-extent {} too small (zmin={zmin}, zmax={zmax})",
             zmax - zmin
+        );
+    }
+
+    /// The chained frame boolean: `Subtract(Intersect(blank, outer_prism),
+    /// inner_prism)`. The second (subtract) cut punches a hole into a face whose
+    /// `trim.outer` is ALREADY the intersect's SSI window loop, so the frame ring
+    /// must come out manifold with two loop-outer discs each carrying one hole.
+    #[test]
+    fn chained_frame_ring_is_manifold_with_loop_outer_holes() {
+        use crate::geometry::nurbs::NurbsCurve3D;
+        use crate::math::Vector3;
+        use crate::operations::boolean::{Intersect, Subtract};
+        use crate::operations::creation::{MakeCurvedWall, MakeNurbsPrism};
+        use crate::topology::FaceSurface;
+        use std::f64::consts::PI;
+
+        let mut store = TopologyStore::new();
+        let deg = |d: f64| d * PI / 180.0;
+
+        // Frame blank: a slightly thicker curved wall spanning just past the
+        // window angular extent.
+        let blank = MakeCurvedWall::new(Point3::origin(), 8.0, deg(78.0), deg(102.0), 6.0, 0.52)
+            .execute(&mut store)
+            .unwrap();
+
+        // The window box: a radial rounded-rectangle prism through the wall.
+        let window_center = Point3::new(0.0, 7.4, 3.0);
+        let tangential = Vector3::x();
+        let vertical = Vector3::z();
+        let radial = Vector3::new(0.0, 1.2, 0.0);
+
+        let outer_profile =
+            NurbsCurve3D::rounded_rectangle(window_center, tangential, vertical, 2.6, 2.0, 0.35)
+                .unwrap();
+        let outer_prism = MakeNurbsPrism::new(outer_profile, radial)
+            .execute(&mut store)
+            .unwrap();
+
+        let plate = Intersect::new(blank, outer_prism)
+            .execute(&mut store)
+            .unwrap();
+
+        // Inner corner radius 0.3: the SSI marcher cannot follow the tighter
+        // 0.25 corner cleanly (it fragments the loop into open branches), so the
+        // inner opening uses the slightly rounder 0.3 the marcher handles.
+        let inner_profile =
+            NurbsCurve3D::rounded_rectangle(window_center, tangential, vertical, 2.1, 1.5, 0.3)
+                .unwrap();
+        let inner_prism = MakeNurbsPrism::new(inner_profile, radial)
+            .execute(&mut store)
+            .unwrap();
+
+        let frame = Subtract::new(plate, inner_prism)
+            .execute(&mut store)
+            .unwrap();
+
+        // Manifold.
+        let mesh = TessellateSolid::new(frame, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty(), "empty frame mesh");
+        let mut counts: StdHashMap<(u32, u32), usize> = StdHashMap::new();
+        for tri in &mesh.indices {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for (&(a, b), &c) in &counts {
+            assert!(c == 1 || c == 2, "frame edge ({a},{b}) used {c} times");
+        }
+
+        // Two disc faces whose trim.outer is a real SSI loop (many segments, not
+        // the 4-corner full-domain rectangle) AND carrying exactly one hole — the
+        // subtract cut correctly appended a hole to the intersect's loop-outer.
+        let shell = store
+            .shell(store.solid(frame).unwrap().outer_shell)
+            .unwrap();
+        let loop_outer_with_hole = shell
+            .faces
+            .iter()
+            .filter(|&&f| {
+                let face = store.face(f).unwrap();
+                let Some(trim) = &face.trim else { return false };
+                matches!(face.surface, FaceSurface::Nurbs(_))
+                    && trim.outer.curves.len() > 4
+                    && trim.holes.len() == 1
+            })
+            .count();
+        assert_eq!(
+            loop_outer_with_hole, 2,
+            "frame must have two loop-outer discs each with one hole"
         );
     }
 
