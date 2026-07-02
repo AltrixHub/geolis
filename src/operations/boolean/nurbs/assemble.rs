@@ -187,6 +187,23 @@ mod tests {
         (store, result)
     }
 
+    /// The slab − tube result's adjacent faces conform along every shared
+    /// boundary: the outer silhouette (punched top/bottom vs untrimmed side
+    /// walls) is now sampled at the boundary-curve-intrinsic parameters, and the
+    /// hole rings were already conformed by the polyline-trim fix. The max
+    /// adjacent-boundary deviation drops from the chord sagitta (~3e-1, driven by
+    /// the coarse 4-corner punched outer loop) to floating-point noise.
+    #[test]
+    fn boolean_result_boundaries_conform() {
+        use crate::tessellation::max_adjacent_boundary_deviation;
+        let (store, result) = slab_minus_tube(0.7);
+        let dev = max_adjacent_boundary_deviation(&store, result);
+        assert!(
+            dev < 1e-6,
+            "slab-tube adjacent-boundary deviation {dev} exceeds 1e-6"
+        );
+    }
+
     #[test]
     fn result_has_punched_faces_and_bands() {
         let (store, result) = slab_minus_tube(0.7);
