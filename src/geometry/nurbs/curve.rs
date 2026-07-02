@@ -617,6 +617,111 @@ impl<const D: usize> NurbsCurve<D> {
         let (points, weights) = dehomogenize(new_hp)?;
         Self::new(points, weights, KnotVector::new(new_knots)?, ph)
     }
+
+    /// C0-concatenates a chain of segments into a single NURBS curve.
+    ///
+    /// The segments must chain head-to-tail: the end point of segment `i`
+    /// coincides (within [`TOLERANCE`]) with the start point of segment `i + 1`,
+    /// and the joint weights must agree so every segment is reproduced exactly.
+    /// All segments are first degree-elevated to the maximum segment degree.
+    /// The combined domain is `[0, 1]`; segment `i` occupies the uniform span
+    /// `[i / S, (i + 1) / S]` (`S` = segment count). Each interior segment
+    /// join carries a full-multiplicity (degree `p`) knot, so the joins are
+    /// exactly C0; the shared joint control point is kept once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if fewer than 2 segments are given, any consecutive
+    /// pair fails to chain head-to-tail (position or joint weight), degree
+    /// elevation fails, or the assembled curve fails construction.
+    pub fn concatenate(segments: &[Self]) -> Result<Self> {
+        if segments.len() < 2 {
+            return Err(GeometryError::Degenerate(
+                "concatenate requires at least 2 segments".into(),
+            )
+            .into());
+        }
+
+        // Elevate every segment to the common maximum degree.
+        let degree = segments.iter().map(Self::degree).max().unwrap_or(1);
+        let elevated: Vec<Self> = segments
+            .iter()
+            .map(|s| s.elevate_degree(degree - s.degree))
+            .collect::<Result<_>>()?;
+
+        // Validate the head-to-tail chain (position + joint weight): the last
+        // control point of segment i must coincide with the first of i + 1 and
+        // carry the same weight, so keeping one joint control point reproduces
+        // both segments exactly (endpoint weights survive degree elevation).
+        for pair in elevated.windows(2) {
+            let a = &pair[0];
+            let b = &pair[1];
+            let a_end = a.control_points[a.control_points.len() - 1];
+            let b_start = b.control_points[0];
+            if (a_end - b_start).norm() > TOLERANCE {
+                return Err(GeometryError::Degenerate(
+                    "concatenate segments must chain head-to-tail".into(),
+                )
+                .into());
+            }
+            let a_w = a.weights[a.weights.len() - 1];
+            let b_w = b.weights[0];
+            if (a_w - b_w).abs() > TOLERANCE {
+                return Err(GeometryError::Degenerate(
+                    "concatenate joint weights must agree for exact reproduction".into(),
+                )
+                .into());
+            }
+        }
+
+        let seg_count = elevated.len();
+        #[allow(clippy::cast_precision_loss)]
+        let inv = 1.0 / seg_count as f64;
+
+        let mut control_points: Vec<Point<f64, D>> = Vec::new();
+        let mut weights: Vec<f64> = Vec::new();
+        let mut knots: Vec<f64> = Vec::new();
+
+        // Leading clamp.
+        knots.extend(std::iter::repeat_n(0.0, degree + 1));
+
+        for (i, seg) in elevated.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let a = i as f64 * inv;
+            #[allow(clippy::cast_precision_loss)]
+            let b = (i + 1) as f64 * inv;
+            let (s0, s1) = seg.parameter_domain();
+            let span = s1 - s0;
+            // Remap this segment's parameter into its combined subinterval.
+            let remap = |t: f64| a + (b - a) * (t - s0) / span;
+
+            // Control points / weights: keep the whole first segment; for the
+            // rest drop the leading control point (the shared C0 joint kept by
+            // the previous segment).
+            let start = usize::from(i != 0);
+            for k in start..seg.control_points.len() {
+                control_points.push(seg.control_points[k]);
+                weights.push(seg.weights[k]);
+            }
+
+            // Interior knots of this segment (excluding its own clamped ends),
+            // remapped into the subinterval.
+            let sk = seg.knots.as_slice();
+            for &k in &sk[degree + 1..sk.len() - (degree + 1)] {
+                knots.push(remap(k));
+            }
+
+            // Full-multiplicity C0 join to the next segment.
+            if i + 1 < seg_count {
+                knots.extend(std::iter::repeat_n(b, degree));
+            }
+        }
+
+        // Trailing clamp.
+        knots.extend(std::iter::repeat_n(1.0, degree + 1));
+
+        Self::new(control_points, weights, KnotVector::new(knots)?, degree)
+    }
 }
 
 /// Converts homogeneous (w*P, w) pairs back to points and weights.
@@ -962,5 +1067,98 @@ mod tests {
         assert_eq!(e.degree(), 4);
         assert!(e.weights().iter().all(|&w| w > 0.0));
         assert_same_shape(&c, &e, 1e-12);
+    }
+
+    #[test]
+    fn concatenate_requires_two_segments() {
+        let c = line_curve();
+        assert!(NurbsCurve3D::concatenate(std::slice::from_ref(&c)).is_err());
+    }
+
+    #[test]
+    fn concatenate_rejects_non_chaining_input() {
+        // Two disjoint lines whose ends do not meet.
+        let a = NurbsCurve3D::from_unweighted(
+            vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            1,
+        )
+        .unwrap();
+        let b = NurbsCurve3D::from_unweighted(
+            vec![Point3::new(5.0, 5.0, 0.0), Point3::new(6.0, 5.0, 0.0)],
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            1,
+        )
+        .unwrap();
+        assert!(NurbsCurve3D::concatenate(&[a, b]).is_err());
+    }
+
+    #[test]
+    fn concatenate_line_then_arc_reproduces_each_segment() {
+        // Line from (2,0,0) to (1,0,0), then a quarter arc from (1,0,0) to
+        // (0,1,0) (centered at origin, radius 1). They chain head-to-tail with
+        // unit joint weights, so each combined span must reproduce its segment.
+        let line = NurbsCurve3D::from_unweighted(
+            vec![Point3::new(2.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            1,
+        )
+        .unwrap();
+        let arc = quarter_circle();
+        let chain = NurbsCurve3D::concatenate(&[line.clone(), arc.clone()]).unwrap();
+        assert_eq!(chain.degree(), 2, "line elevated to the arc degree");
+        let (c0, c1) = chain.parameter_domain();
+        assert!((c0 - 0.0).abs() < TOLERANCE && (c1 - 1.0).abs() < TOLERANCE);
+
+        // First half [0, 0.5] reproduces the line.
+        for i in 0..=20 {
+            let f = f64::from(i) / 20.0;
+            let got = chain.point_at(0.5 * f).unwrap();
+            let want = line.point_at(f).unwrap();
+            assert!((got - want).norm() < 1e-9, "line span mismatch at f={f}");
+        }
+        // Second half [0.5, 1] reproduces the arc.
+        for i in 0..=20 {
+            let f = f64::from(i) / 20.0;
+            let got = chain.point_at(0.5 + 0.5 * f).unwrap();
+            let want = arc.point_at(f).unwrap();
+            assert!((got - want).norm() < 1e-9, "arc span mismatch at f={f}");
+        }
+    }
+
+    #[test]
+    fn concatenate_four_lines_closes() {
+        // A unit square walked as four degree-1 edges chains into a closed loop.
+        let corners = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        let mut segments = Vec::new();
+        for i in 0..4 {
+            let a = corners[i];
+            let b = corners[(i + 1) % 4];
+            segments.push(
+                NurbsCurve3D::from_unweighted(
+                    vec![a, b],
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+                    1,
+                )
+                .unwrap(),
+            );
+        }
+        let loop_ = NurbsCurve3D::concatenate(&segments).unwrap();
+        assert!(loop_.is_endpoint_closed(), "square loop must close");
+        // Each quarter-span reproduces its edge.
+        for (i, edge) in segments.iter().enumerate() {
+            let base = f64::from(u32::try_from(i).unwrap()) / 4.0;
+            for j in 0..=8 {
+                let f = f64::from(j) / 8.0;
+                let got = loop_.point_at(base + f / 4.0).unwrap();
+                let want = edge.point_at(f).unwrap();
+                assert!((got - want).norm() < 1e-9, "edge {i} mismatch at f={f}");
+            }
+        }
     }
 }
