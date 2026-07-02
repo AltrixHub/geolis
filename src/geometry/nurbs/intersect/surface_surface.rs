@@ -96,13 +96,21 @@ struct Seed {
     vb: f64,
 }
 
-/// Leaf-extent heuristic: 1/12 of the larger control-hull diagonal.
+/// Leaf-extent heuristic: 1/12 of the SMALLER control-hull diagonal.
+///
+/// The intersection curve lies on both surfaces, so its geometric extent (and
+/// the feature scale the marcher must resolve) is bounded by the smaller
+/// surface. Scaling by the larger diagonal made the marching step blow up when
+/// a small tool cuts a large target (e.g. a window prism through a long curved
+/// wall): the step became comparable to the tool's corner radii, the corrector
+/// jumped between loop lobes, and branches fragmented into overlapping open
+/// pieces.
 fn seed_leaf_extent(a: &NurbsSurface, b: &NurbsSurface) -> f64 {
     let (a_lo, a_hi) = a.bounding_box();
     let (b_lo, b_hi) = b.bounding_box();
     let da = (a_hi - a_lo).norm();
     let db = (b_hi - b_lo).norm();
-    (da.max(db) / 12.0).max(1e-6)
+    (da.min(db) / 12.0).max(1e-6)
 }
 
 /// Damped Gauss-Newton refinement of a box-pair center onto `S_a = S_b`.

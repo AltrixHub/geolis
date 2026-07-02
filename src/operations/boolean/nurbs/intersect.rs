@@ -267,11 +267,8 @@ mod tests {
             .execute(&mut store)
             .unwrap();
 
-        // Inner corner radius 0.3: the SSI marcher cannot follow the tighter
-        // 0.25 corner cleanly (it fragments the loop into open branches), so the
-        // inner opening uses the slightly rounder 0.3 the marcher handles.
         let inner_profile =
-            NurbsCurve3D::rounded_rectangle(window_center, tangential, vertical, 2.1, 1.5, 0.3)
+            NurbsCurve3D::rounded_rectangle(window_center, tangential, vertical, 2.1, 1.5, 0.25)
                 .unwrap();
         let inner_prism = MakeNurbsPrism::new(inner_profile, radial)
             .execute(&mut store)
@@ -318,6 +315,62 @@ mod tests {
             loop_outer_with_hole, 2,
             "frame must have two loop-outer discs each with one hole"
         );
+    }
+
+    /// The debug example's `nurbs_window` pattern chain with its EXACT numbers:
+    /// wall (r 8, 55°..125°, h 6, t 0.4) minus the outer window prism, then the
+    /// frame blank (78°..102°, t 0.52) intersected with the same prism and cut
+    /// by the inner prism (plan-specified corner r 0.25).
+    ///
+    /// Pins the SSI marching-scale fix: with the leaf/step derived from the
+    /// LARGER surface's bbox diagonal, the 70°-wall subtract marched with a step
+    /// comparable to the window corner radius, fragmented the loop into
+    /// overlapping open branches, and the pattern rendered nothing.
+    #[test]
+    fn pattern_window_chain_succeeds() {
+        use crate::geometry::nurbs::NurbsCurve3D;
+        use crate::math::Vector3;
+        use crate::operations::boolean::{Intersect, Subtract};
+        use crate::operations::creation::{MakeCurvedWall, MakeNurbsPrism};
+        use std::f64::consts::PI;
+
+        let deg = |d: f64| d * PI / 180.0;
+        let mut store = TopologyStore::new();
+
+        let window_prism = |store: &mut TopologyStore, w: f64, h: f64, r: f64| {
+            let center = Point3::new(0.0, 7.4, 3.0);
+            let profile =
+                NurbsCurve3D::rounded_rectangle(center, Vector3::x(), Vector3::z(), w, h, r)
+                    .unwrap();
+            MakeNurbsPrism::new(profile, Vector3::new(0.0, 1.2, 0.0))
+                .execute(store)
+                .unwrap()
+        };
+
+        let wall = MakeCurvedWall::new(Point3::origin(), 8.0, deg(55.0), deg(125.0), 6.0, 0.4)
+            .execute(&mut store)
+            .unwrap();
+        let outer_prism = window_prism(&mut store, 2.6, 2.0, 0.35);
+        let wall_open = Subtract::new(wall, outer_prism).execute(&mut store);
+        assert!(wall_open.is_ok(), "wall subtract failed: {wall_open:?}");
+
+        let blank = MakeCurvedWall::new(Point3::origin(), 8.0, deg(78.0), deg(102.0), 6.0, 0.52)
+            .execute(&mut store)
+            .unwrap();
+        let plate = Intersect::new(blank, outer_prism).execute(&mut store);
+        assert!(plate.is_ok(), "blank intersect failed: {plate:?}");
+
+        let inner_prism = window_prism(&mut store, 2.1, 1.5, 0.25);
+        let frame = Subtract::new(plate.unwrap(), inner_prism).execute(&mut store);
+        assert!(frame.is_ok(), "frame subtract failed: {frame:?}");
+
+        // Both visible solids tessellate non-trivially.
+        for solid in [wall_open.unwrap(), frame.unwrap()] {
+            let mesh = TessellateSolid::new(solid, TessellationParams::default())
+                .execute(&store)
+                .unwrap();
+            assert!(!mesh.indices.is_empty(), "pattern solid tessellated empty");
+        }
     }
 
     #[test]
