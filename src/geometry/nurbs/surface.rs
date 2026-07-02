@@ -410,8 +410,32 @@ impl NurbsSurface {
         ])
     }
 
+    /// Whether the surface is geometrically closed in the `u` direction: the
+    /// `u_min` and `u_max` boundary control rows coincide (points and weights),
+    /// so the two parametric boundaries map to the same 3D seam curve.
+    #[must_use]
+    pub fn is_closed_in_u(&self) -> bool {
+        (0..self.nv).all(|j| {
+            (self.control_point(0, j) - self.control_point(self.nu - 1, j)).norm() < TOLERANCE
+                && (self.weight(0, j) - self.weight(self.nu - 1, j)).abs() < TOLERANCE
+        })
+    }
+
+    /// Whether the surface is geometrically closed in the `v` direction: the
+    /// `v_min` and `v_max` boundary control rows coincide (points and weights).
+    #[must_use]
+    pub fn is_closed_in_v(&self) -> bool {
+        (0..self.nu).all(|i| {
+            (self.control_point(i, 0) - self.control_point(i, self.nv - 1)).norm() < TOLERANCE
+                && (self.weight(i, 0) - self.weight(i, self.nv - 1)).abs() < TOLERANCE
+        })
+    }
+
     /// Finds the closest point on the surface to `query` via a coarse seed
-    /// grid followed by a clamped Newton iteration (The NURBS Book, §6.1).
+    /// grid followed by a Newton iteration (The NURBS Book, §6.1). Open
+    /// parameter directions clamp the iterate to the domain; geometrically
+    /// closed directions (see [`Self::is_closed_in_u`]) wrap modulo the period
+    /// so a foot point just across the parametric seam is still reached.
     ///
     /// Non-convergence is not an error: the best parameters found are returned.
     ///
@@ -452,6 +476,30 @@ impl NurbsSurface {
             }
         }
 
+        // Seam awareness: on a geometrically closed direction the correct basin
+        // may lie across the parametric boundary (e.g. a query just below the
+        // zero-azimuth seam of an extruded circle). Clamping would pin the
+        // iterate at the boundary and report a false positive distance, so
+        // closed directions wrap modulo their period instead.
+        let u_closed = self.is_closed_in_u();
+        let v_closed = self.is_closed_in_v();
+        let wrap_or_clamp = |x: f64, lo: f64, hi: f64, closed: bool| -> f64 {
+            if closed {
+                lo + (x - lo).rem_euclid(hi - lo)
+            } else {
+                x.clamp(lo, hi)
+            }
+        };
+        // Parameter-step magnitude honoring the wrap (distance on the circle).
+        let step_len = |a: f64, b: f64, lo: f64, hi: f64, closed: bool| -> f64 {
+            let d = (a - b).abs();
+            if closed {
+                d.min((hi - lo) - d)
+            } else {
+                d
+            }
+        };
+
         let mut u = best_u;
         let mut v = best_v;
         for _ in 0..options.max_iterations {
@@ -484,9 +532,10 @@ impl NurbsSurface {
             }
             let du = (-f * j11 + g * j01) / det;
             let dv = (f * j01 - g * j00) / det;
-            let new_u = (u + du).clamp(u_min, u_max);
-            let new_v = (v + dv).clamp(v_min, v_max);
-            let step = (new_u - u).abs() + (new_v - v).abs();
+            let new_u = wrap_or_clamp(u + du, u_min, u_max, u_closed);
+            let new_v = wrap_or_clamp(v + dv, v_min, v_max, v_closed);
+            let step = step_len(new_u, u, u_min, u_max, u_closed)
+                + step_len(new_v, v, v_min, v_max, v_closed);
             u = new_u;
             v = new_v;
             if step < options.tolerance {
@@ -1157,6 +1206,32 @@ mod tests {
         assert!((result.distance - 5.0).abs() < 1e-9);
         assert!((result.u - 0.5).abs() < 1e-9);
         assert!((result.v - 0.5).abs() < 1e-9);
+    }
+
+    /// Inversion near the u-seam of a geometrically closed (extruded circle)
+    /// surface must converge to the true foot point even when the coarse seed
+    /// grid lands ON the seam: the correct basin lies across the parametric
+    /// boundary, so the Newton step must wrap around the seam instead of
+    /// clamping (the clamped iteration reported a false ~0.085 distance for an
+    /// on-surface query at azimuth -7 deg).
+    #[test]
+    fn inversion_wraps_across_u_seam_of_closed_surface() {
+        let circle =
+            NurbsCurve3D::circle(Point3::new(3.0, 3.0, -1.5), 0.7, Vector3::z(), Vector3::x())
+                .unwrap();
+        let s = NurbsSurface::extrude(&circle, Vector3::new(0.0, 0.0, 5.0)).unwrap();
+        let options = InversionOptions::default();
+        // On-surface points at small angles on either side of the seam (u = 0/1).
+        for angle_deg in [-10.0_f64, -7.0, -2.0, 2.0, 7.0] {
+            let a = angle_deg.to_radians();
+            let q = Point3::new(3.0 + 0.7 * a.cos(), 3.0 + 0.7 * a.sin(), -0.02);
+            let r = s.closest_point(&q, &options).unwrap();
+            assert!(
+                r.distance < 1e-9,
+                "seam-side query at {angle_deg} deg: distance {}",
+                r.distance
+            );
+        }
     }
 
     #[test]
