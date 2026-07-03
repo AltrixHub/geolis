@@ -188,6 +188,66 @@ mod tests {
         (store, result)
     }
 
+    /// The deferred F1 acceptance case: a revolved solid (closed wall, u/v seam
+    /// on the wall surface) cut by a HORIZONTAL tube. Both the entry and exit
+    /// holes land on the SAME closed wall face, and the tool's own periodic
+    /// direction wraps during SSI. The tube runs along +Y so its holes sit at
+    /// wall azimuths ±π/2, safely away from the wall's parametric seam at +X.
+    #[test]
+    fn revolved_solid_minus_horizontal_tube_is_manifold() {
+        use crate::geometry::nurbs::NurbsCurve3D;
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeNurbsPrism, MakeRevolvedSolid};
+
+        let mut store = TopologyStore::new();
+        // Vase-like profile: wall radius 2.0-2.6 over height 0-3.6.
+        let vase = MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.4, 1.2), (2.1, 2.4), (2.6, 3.6)])
+            .execute(&mut store)
+            .unwrap();
+        // Horizontal tube along +Y through both walls at mid-height.
+        let circle =
+            NurbsCurve3D::circle(Point3::new(0.0, -4.0, 1.8), 0.5, Vector3::y(), Vector3::x())
+                .unwrap();
+        let tube = MakeNurbsPrism::new(circle, Vector3::new(0.0, 8.0, 0.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let result = subtract_through_cut(&mut store, vase, tube).unwrap();
+
+        // Entry and exit holes both land on the single closed wall face: one
+        // result face carries exactly 2 hole inner wires (the band face carries
+        // 1 — its exit ring).
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        let two_hole_faces = shell
+            .faces
+            .iter()
+            .filter(|&&f| store.face(f).unwrap().inner_wires.len() == 2)
+            .count();
+        assert_eq!(
+            two_hole_faces, 1,
+            "exactly one face (the revolved wall) carries both holes"
+        );
+
+        // The whole result tessellates edge-manifold: every undirected edge is
+        // used by 1 or 2 triangles.
+        let mesh = TessellateSolid::new(result, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty(), "empty result mesh");
+        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &mesh.indices {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for (&(a, b), &c) in &counts {
+            assert!(c == 1 || c == 2, "edge ({a},{b}) used {c} times");
+        }
+    }
+
     /// The slab − tube result's adjacent faces conform along every shared
     /// boundary: the outer silhouette (punched top/bottom vs untrimmed side
     /// walls) is now sampled at the boundary-curve-intrinsic parameters, and the
