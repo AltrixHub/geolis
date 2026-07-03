@@ -2,8 +2,8 @@ use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::math::{Point2, Point3, TOLERANCE};
 use crate::topology::{
-    EdgeCurve, EdgeData, FaceData, FaceId, FaceSurface, FaceTrim, OrientedEdge, TopologyStore,
-    TrimLoop, VertexData, VertexId, WireData,
+    EdgeCurve, EdgeData, FaceData, FaceId, FacePcurve, FaceSurface, FaceTrim, OrientedEdge,
+    TopologyStore, TrimLoop, VertexData, VertexId, WireData, WireId,
 };
 
 /// Number of samples taken along each pcurve when approximating its 3D image.
@@ -14,9 +14,12 @@ const PCURVE_SAMPLES: usize = 24;
 /// An untrimmed face takes its boundary wire from the surface's four exact
 /// boundary isocurves. A trimmed face additionally stores UV-space trim loops
 /// and builds 3D hole edges by mapping each pcurve through the surface.
+/// A solid builder that owns shared boundary edges can instead hand the face a
+/// pre-built wire plus its per-edge pcurves via [`Self::with_boundary`].
 pub struct MakeNurbsFace {
     surface: NurbsSurface,
     trim: Option<FaceTrim>,
+    boundary: Option<(WireId, Vec<FacePcurve>)>,
 }
 
 impl MakeNurbsFace {
@@ -26,6 +29,7 @@ impl MakeNurbsFace {
         Self {
             surface,
             trim: None,
+            boundary: None,
         }
     }
 
@@ -33,6 +37,15 @@ impl MakeNurbsFace {
     #[must_use]
     pub fn with_trim(mut self, trim: FaceTrim) -> Self {
         self.trim = Some(trim);
+        self
+    }
+
+    /// Uses a pre-built outer wire (with edges shared across adjacent faces)
+    /// and this face's UV images of those edges instead of fabricating a
+    /// private four-isocurve boundary.
+    #[must_use]
+    pub fn with_boundary(mut self, wire: WireId, pcurves: Vec<FacePcurve>) -> Self {
+        self.boundary = Some((wire, pcurves));
         self
     }
 
@@ -45,7 +58,10 @@ impl MakeNurbsFace {
     /// fails validation (open loop, control point outside the parameter domain,
     /// or wrong winding).
     pub fn execute(&self, store: &mut TopologyStore) -> Result<FaceId> {
-        let outer_wire = self.build_boundary_wire(store)?;
+        let (outer_wire, pcurves) = match &self.boundary {
+            Some((wire, pcurves)) => (*wire, pcurves.clone()),
+            None => (self.build_boundary_wire(store)?, Vec::new()),
+        };
 
         if let Some(trim) = &self.trim {
             self.validate_trim(trim)?;
@@ -66,7 +82,7 @@ impl MakeNurbsFace {
             inner_wires,
             same_sense: true,
             trim: self.trim.clone(),
-            pcurves: Vec::new(),
+            pcurves,
         });
         Ok(face_id)
     }

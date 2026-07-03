@@ -5,34 +5,32 @@
 //! curved input to operate on. They are deliberately minimal.
 
 use crate::error::{OperationError, Result};
-use crate::geometry::nurbs::{NurbsCurve3D, NurbsSurface};
+use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::geometry::surface::Surface;
-use crate::math::{Point3, Vector3, TOLERANCE};
-use crate::topology::{FaceId, ShellData, SolidData, SolidId, TopologyStore};
+use crate::math::{Point2, Point3, Vector3, TOLERANCE};
+use crate::topology::{
+    EdgeCurve, EdgeData, EdgeId, FaceId, FacePcurve, FaceSurface, OrientedEdge, ShellData,
+    SolidData, SolidId, TopologyStore, VertexData, WireData,
+};
 
-use super::{MakeFace, MakeNurbsFace, MakeWire};
+use super::{MakeFace, MakeNurbsFace};
 
 /// A NURBS prism: a closed planar profile extruded along `direction`, capped by
-/// two planar polygonal faces sampled from the profile.
+/// two exact planar disks on the profile's boundary curves.
 ///
 /// The side is a single `NurbsSurface` (`NurbsSurface::extrude` of the profile)
 /// whose `u` parameter runs around the profile (closed for a closed profile) and
 /// whose `v` parameter runs along `direction` — exactly the band UV topology the
-/// through-cut boolean expects. The bottom cap sits at the profile and the top
-/// cap at the profile translated by `direction`; each cap is oriented so its
-/// outward normal points away from the prism body.
-///
-/// The profile must be closed and planar; the caps are planar polygons sampled
-/// from it.
+/// through-cut boolean expects. The bottom and top ring curves are **shared
+/// edges**: the side face's wire and each cap's wire reference the same
+/// [`EdgeId`], so the solid tessellates boundary-conformally by construction
+/// (both faces consume the same per-edge samples).
 pub struct MakeNurbsPrism {
     profile: NurbsCurve3D,
     direction: Vector3,
 }
 
 impl MakeNurbsPrism {
-    /// Number of profile samples per cap polygon.
-    const CAP_SEGMENTS: usize = 64;
-
     /// Creates a prism extruding `profile` along `direction`.
     #[must_use]
     pub fn new(profile: NurbsCurve3D, direction: Vector3) -> Self {
@@ -56,34 +54,87 @@ impl MakeNurbsPrism {
         }
 
         let side_surface = NurbsSurface::extrude(&self.profile, self.direction)?;
-        let side = MakeNurbsFace::new(side_surface).execute(store)?;
+        let ((u0, u1), (v0, v1)) = side_surface.parameter_domain();
 
-        // Sample the profile once; the bottom cap uses these points, the top cap
-        // the same points translated by `direction`.
-        let base = self.sample_profile()?;
-        let newell = newell_normal(&base);
-        let along = newell.dot(&self.direction);
+        // Shared ring edges: the side surface's exact v-boundary isocurves (the
+        // bottom one IS the profile, with identical knots), each a closed edge
+        // with a single shared vertex.
+        let bottom_edge = closed_ring_edge(store, side_surface.isocurve_v(v0)?)?;
+        let top_edge = closed_ring_edge(store, side_surface.isocurve_v(v1)?)?;
 
-        // Bottom cap: outward normal opposes `direction`. Top cap: along it.
-        let bottom = cap_face(store, &base, along > 0.0)?;
-        let top_pts: Vec<Point3> = base.iter().map(|p| p + self.direction).collect();
-        let top = cap_face(store, &top_pts, along < 0.0)?;
+        // Side face: one wire referencing both rings; the pcurves map the ring
+        // parameter straight onto the u axis at the fixed v (same-parameter by
+        // construction: extrude preserves the profile knots in u).
+        let side_wire = store.add_wire(WireData {
+            edges: vec![
+                OrientedEdge::new(bottom_edge, true),
+                OrientedEdge::new(top_edge, false),
+            ],
+            is_closed: true,
+        });
+        let pcurves = vec![
+            FacePcurve {
+                edge: bottom_edge,
+                curve: iso_pcurve_u(u0, u1, v0)?,
+            },
+            FacePcurve {
+                edge: top_edge,
+                curve: iso_pcurve_u(u0, u1, v1)?,
+            },
+        ];
+        let side = MakeNurbsFace::new(side_surface)
+            .with_boundary(side_wire, pcurves)
+            .execute(store)?;
+
+        // Caps: planar faces whose outer wire is the SAME ring edge. Bottom
+        // outward normal opposes `direction`; top points along it.
+        let bottom = cap_from_ring(store, bottom_edge, -self.direction)?;
+        let top = cap_from_ring(store, top_edge, self.direction)?;
 
         Ok(finish_solid(store, vec![side, bottom, top]))
     }
+}
 
-    /// Samples the profile into `CAP_SEGMENTS` distinct points (excludes the
-    /// closing duplicate at the domain end).
-    fn sample_profile(&self) -> Result<Vec<Point3>> {
-        let (t0, t1) = self.profile.parameter_domain();
-        let mut pts = Vec::with_capacity(Self::CAP_SEGMENTS);
-        for i in 0..Self::CAP_SEGMENTS {
-            #[allow(clippy::cast_precision_loss)]
-            let frac = i as f64 / Self::CAP_SEGMENTS as f64;
-            pts.push(self.profile.point_at(t0 + (t1 - t0) * frac)?);
-        }
-        Ok(pts)
+/// Adds a closed ring edge (start == end vertex) for `curve`.
+fn closed_ring_edge(store: &mut TopologyStore, curve: NurbsCurve3D) -> Result<EdgeId> {
+    let (t0, t1) = curve.parameter_domain();
+    let start = curve.point_at(t0)?;
+    let vertex = store.add_vertex(VertexData { point: start });
+    Ok(store.add_edge(EdgeData {
+        start: vertex,
+        end: vertex,
+        curve: EdgeCurve::Nurbs(curve),
+        t_start: t0,
+        t_end: t1,
+    }))
+}
+
+/// Degree-1 pcurve mapping a ring edge's parameter onto the `u` axis at a
+/// fixed `v` (`t → (t, v)` over `[u0, u1]`).
+fn iso_pcurve_u(u0: f64, u1: f64, v: f64) -> Result<NurbsCurve2D> {
+    Ok(NurbsCurve2D::from_unweighted(
+        vec![Point2::new(u0, v), Point2::new(u1, v)],
+        KnotVector::new(vec![u0, u0, u1, u1])?,
+        1,
+    )?)
+}
+
+/// Planar cap face on a shared ring edge, oriented so its stored normal points
+/// along `outward`.
+fn cap_from_ring(store: &mut TopologyStore, ring: EdgeId, outward: Vector3) -> Result<FaceId> {
+    let wire = store.add_wire(WireData {
+        edges: vec![OrientedEdge::new(ring, true)],
+        is_closed: true,
+    });
+    let face = MakeFace::new(wire, vec![]).execute(store)?;
+    let flip = match &store.face(face)?.surface {
+        FaceSurface::Plane(plane) => plane.plane_normal().dot(&outward) < 0.0,
+        _ => false,
+    };
+    if flip {
+        store.face_mut(face)?.same_sense = false;
     }
+    Ok(face)
 }
 
 /// A vertical NURBS tube: a circular profile extruded along `+Z`, capped by two
@@ -123,33 +174,6 @@ impl MakeNurbsTube {
         let axis = Vector3::new(0.0, 0.0, self.height);
         MakeNurbsPrism::new(profile, axis).execute(store)
     }
-}
-
-/// Builds a planar polygonal cap face from an ordered ring of coplanar points.
-/// When `reverse` is set the point order is flipped so the face's right-hand
-/// normal points away from the prism body.
-fn cap_face(store: &mut TopologyStore, points: &[Point3], reverse: bool) -> Result<FaceId> {
-    let mut pts = points.to_vec();
-    if reverse {
-        pts.reverse();
-    }
-    let wire = MakeWire::new(pts, true).execute(store)?;
-    MakeFace::new(wire, vec![]).execute(store)
-}
-
-/// Newell's method normal of a (possibly non-convex) planar polygon. The
-/// magnitude is twice the polygon area; only its direction is used.
-fn newell_normal(pts: &[Point3]) -> Vector3 {
-    let mut n = Vector3::zeros();
-    let m = pts.len();
-    for i in 0..m {
-        let a = pts[i];
-        let b = pts[(i + 1) % m];
-        n.x += (a.y - b.y) * (a.z + b.z);
-        n.y += (a.z - b.z) * (a.x + b.x);
-        n.z += (a.x - b.x) * (a.y + b.y);
-    }
-    n
 }
 
 /// A curved (plan-arc) wall: a vertical prism whose plan footprint is a circular
@@ -505,39 +529,51 @@ impl MakeRevolvedSolid {
             Vector3::z(),
             std::f64::consts::TAU,
         )?;
-        let wall = MakeNurbsFace::new(wall_surface).execute(store)?;
+        let ((u0, u1), (v0, v1)) = wall_surface.parameter_domain();
 
-        let (r0, z0) = self.profile[0];
-        let (r1, z1) = self.profile[self.profile.len() - 1];
-        let bottom = disk_face(store, Point3::new(0.0, 0.0, z0), r0, false)?;
-        let top = disk_face(store, Point3::new(0.0, 0.0, z1), r1, true)?;
+        // Shared ring edges: the wall's exact u-boundary isocurves (rational
+        // circles at the first / last profile heights; the revolve puts the
+        // profile in u and the azimuth in v).
+        let bottom_edge = closed_ring_edge(store, wall_surface.isocurve_u(u0)?)?;
+        let top_edge = closed_ring_edge(store, wall_surface.isocurve_u(u1)?)?;
+
+        let wall_wire = store.add_wire(WireData {
+            edges: vec![
+                OrientedEdge::new(bottom_edge, true),
+                OrientedEdge::new(top_edge, false),
+            ],
+            is_closed: true,
+        });
+        let pcurves = vec![
+            FacePcurve {
+                edge: bottom_edge,
+                curve: iso_pcurve_v(v0, v1, u0)?,
+            },
+            FacePcurve {
+                edge: top_edge,
+                curve: iso_pcurve_v(v0, v1, u1)?,
+            },
+        ];
+        let wall = MakeNurbsFace::new(wall_surface)
+            .with_boundary(wall_wire, pcurves)
+            .execute(store)?;
+
+        // Caps: exact disks on the SAME ring edges, normals away from the body.
+        let bottom = cap_from_ring(store, bottom_edge, -Vector3::z())?;
+        let top = cap_from_ring(store, top_edge, Vector3::z())?;
 
         Ok(finish_solid(store, vec![wall, bottom, top]))
     }
 }
 
-/// Builds a planar polygonal disk face centered at `center` with `radius`.
-/// `upward` orients the disk so its normal points away from the body.
-fn disk_face(
-    store: &mut TopologyStore,
-    center: Point3,
-    radius: f64,
-    upward: bool,
-) -> Result<FaceId> {
-    const SEGMENTS: usize = 48;
-    let mut pts = Vec::with_capacity(SEGMENTS);
-    for i in 0..SEGMENTS {
-        #[allow(clippy::cast_precision_loss)]
-        let angle = std::f64::consts::TAU * (i as f64) / (SEGMENTS as f64);
-        let a = if upward { angle } else { -angle };
-        pts.push(Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
-            center.z,
-        ));
-    }
-    let wire = MakeWire::new(pts, true).execute(store)?;
-    MakeFace::new(wire, vec![]).execute(store)
+/// Degree-1 pcurve mapping a ring edge's parameter onto the `v` axis at a
+/// fixed `u` (`t → (u, t)` over `[v0, v1]`).
+fn iso_pcurve_v(v0: f64, v1: f64, u: f64) -> Result<NurbsCurve2D> {
+    Ok(NurbsCurve2D::from_unweighted(
+        vec![Point2::new(u, v0), Point2::new(u, v1)],
+        KnotVector::new(vec![v0, v0, v1, v1])?,
+        1,
+    )?)
 }
 
 /// Wraps a face list into a closed shell + solid.

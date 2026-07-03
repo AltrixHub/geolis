@@ -57,46 +57,62 @@ fn point_segment_dist_sq(
     (p - (a + ab * t)).norm_squared()
 }
 
-/// Boundary edges of a single face mesh: undirected triangle edges used by
-/// exactly one triangle, returned as 3D endpoint pairs.
+/// A boundary edge of a face mesh: mesh vertex indices plus 3D endpoints.
 #[cfg(test)]
-fn face_boundary_edges(mesh: &TriangleMesh) -> Vec<(crate::math::Point3, crate::math::Point3)> {
+#[derive(Clone, Copy)]
+struct BoundarySeg {
+    a_idx: u32,
+    b_idx: u32,
+    a: crate::math::Point3,
+    b: crate::math::Point3,
+}
+
+/// Boundary edges of a single face mesh: undirected triangle edges used by
+/// exactly one triangle.
+#[cfg(test)]
+fn face_boundary_edges(mesh: &TriangleMesh) -> Vec<BoundarySeg> {
     use std::collections::HashMap;
-    let mut counts: HashMap<(u32, u32), (usize, crate::math::Point3, crate::math::Point3)> =
-        HashMap::new();
+    let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
     for tri in &mesh.indices {
         for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
             let key = if a < b { (a, b) } else { (b, a) };
-            let entry = counts.entry(key).or_insert((
-                0,
-                mesh.vertices[a as usize],
-                mesh.vertices[b as usize],
-            ));
-            entry.0 += 1;
+            *counts.entry(key).or_insert(0) += 1;
         }
     }
     counts
-        .values()
-        .filter(|(c, _, _)| *c == 1)
-        .map(|(_, a, b)| (*a, *b))
+        .iter()
+        .filter(|(_, &c)| c == 1)
+        .map(|(&(a, b), _)| BoundarySeg {
+            a_idx: a,
+            b_idx: b,
+            a: mesh.vertices[a as usize],
+            b: mesh.vertices[b as usize],
+        })
         .collect()
 }
 
-/// Maximum 3D deviation between adjacent faces' boundary polylines: for every
-/// boundary vertex of every face, the distance to the nearest boundary segment
-/// on any OTHER face. On a conforming closed solid this is ~0; where adjacent
+/// Maximum 3D deviation between boundary polylines: for every boundary vertex
+/// of every face, the distance to the nearest boundary segment on any OTHER
+/// face — or on the SAME face when the segment is not incident to the vertex
+/// (by mesh index). On a conforming closed solid this is ~0; where adjacent
 /// faces tessellate a shared boundary curve with disagreeing chords it equals
-/// the chord sagitta — the visible silhouette sliver this fix eliminates.
+/// the chord sagitta — the visible silhouette sliver.
 ///
-/// Used as the regression metric for the boundary-conforming tessellation, here
-/// and in the NURBS boolean tests.
+/// Same-face non-incident segments are legitimate conforming targets because
+/// of parametric seams: a face on a geometrically closed surface has two
+/// boundary columns (`u0` / `u1`) that coincide in 3D — an internal seam, not
+/// a crack. Only index-incident segments are excluded so a vertex never
+/// trivially conforms to its own edges.
+///
+/// Used as the regression metric for the boundary-conforming tessellation,
+/// here and in the NURBS boolean tests.
 #[cfg(test)]
 pub(crate) fn max_adjacent_boundary_deviation(store: &TopologyStore, solid: SolidId) -> f64 {
     #[allow(clippy::unwrap_used)]
     let shell = store
         .shell(store.solid(solid).unwrap().outer_shell)
         .unwrap();
-    let per_face: Vec<Vec<(crate::math::Point3, crate::math::Point3)>> = shell
+    let per_face: Vec<Vec<BoundarySeg>> = shell
         .faces
         .iter()
         .map(|&f| {
@@ -110,15 +126,16 @@ pub(crate) fn max_adjacent_boundary_deviation(store: &TopologyStore, solid: Soli
 
     let mut max_dev = 0.0_f64;
     for (i, edges_i) in per_face.iter().enumerate() {
-        for &(va, vb) in edges_i {
-            for v in [va, vb] {
+        for seg in edges_i {
+            for (v_idx, v) in [(seg.a_idx, seg.a), (seg.b_idx, seg.b)] {
                 let mut best = f64::INFINITY;
                 for (j, edges_j) in per_face.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
-                    for &(a, b) in edges_j {
-                        best = best.min(point_segment_dist_sq(v, a, b));
+                    for other in edges_j {
+                        // Same face: skip segments incident to the vertex.
+                        if i == j && (other.a_idx == v_idx || other.b_idx == v_idx) {
+                            continue;
+                        }
+                        best = best.min(point_segment_dist_sq(v, other.a, other.b));
                     }
                 }
                 if best.is_finite() {
@@ -155,9 +172,8 @@ mod tests {
 
     /// F2 target: the tube's planar caps and NURBS side wall share true ring
     /// edges sampled once per edge, so the cap rim and the side boundary emit
-    /// identical vertices. Red until the prism builds shared ring edges.
+    /// identical vertices.
     #[test]
-    #[ignore = "F2: shared ring edges land in the prism creation task"]
     fn tube_boundaries_conform() {
         use crate::operations::creation::MakeNurbsTube;
         let mut store = TopologyStore::new();
@@ -169,10 +185,8 @@ mod tests {
     }
 
     /// F2 target: the revolved solid's disk caps reference the wall's true
-    /// boundary circles instead of independent 48-gons. Red until the revolved
-    /// creation task shares those edges.
+    /// boundary circles instead of independent 48-gons.
     #[test]
-    #[ignore = "F2: shared ring edges land in the revolved creation task"]
     fn revolved_solid_boundaries_conform() {
         use crate::operations::creation::MakeRevolvedSolid;
         let mut store = TopologyStore::new();

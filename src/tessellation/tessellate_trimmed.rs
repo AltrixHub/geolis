@@ -284,11 +284,16 @@ fn tessellate_cdt(
         insert_constraint_loop(&mut cdt, hole)?;
     }
 
-    // Steiner points: grid samples strictly inside the trim region.
+    // Steiner points: grid samples strictly inside the trim region. Points on
+    // (or within noise of) a constraint segment are skipped: inserting a point
+    // that lies exactly on a constraint makes spade SPLIT the constraint,
+    // adding a boundary vertex the adjacent face does not have — a conformance
+    // crack of one chord sagitta. Domain-boundary grid rows/columns land
+    // exactly on a full-domain outer loop, so this guard is load-bearing.
     for &u in &u_params {
         for &v in &v_params {
             let p = Point2::new(u, v);
-            if point_in_region(&p, outer, holes) {
+            if point_in_region(&p, outer, holes) && !near_any_segment(&p, outer, holes) {
                 // Ignore individual insertion failures (e.g. a point landing on
                 // an existing constraint vertex); the constraint loops already
                 // pin the boundary.
@@ -481,6 +486,32 @@ fn insert_constraint_loop(
         }
     }
     Ok(())
+}
+
+/// UV distance below which a Steiner candidate counts as lying ON a
+/// constraint segment (and is skipped — see the Steiner insertion loop).
+const SEGMENT_SKIP_EPS: f64 = 1e-9;
+
+/// Whether `p` lies within [`SEGMENT_SKIP_EPS`] of any constraint segment of
+/// the outer loop or a hole loop.
+fn near_any_segment(p: &Point2, outer: &[Point2], holes: &[Vec<Point2>]) -> bool {
+    let near_loop = |poly: &[Point2]| -> bool {
+        let n = poly.len();
+        (0..n).any(|i| {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            let ab = b - a;
+            let len_sq = ab.norm_squared();
+            let d_sq = if len_sq < 1e-30 {
+                (*p - a).norm_squared()
+            } else {
+                let t = ((*p - a).dot(&ab) / len_sq).clamp(0.0, 1.0);
+                (*p - (a + ab * t)).norm_squared()
+            };
+            d_sq < SEGMENT_SKIP_EPS * SEGMENT_SKIP_EPS
+        })
+    };
+    near_loop(outer) || holes.iter().any(|h| near_loop(h))
 }
 
 /// Tests whether `p` is inside the trim region: inside the outer loop and
