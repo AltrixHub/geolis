@@ -355,14 +355,14 @@ mod tests {
     /// - plain curved slab (no hole): 384 boundary edges (all perimeter)
     /// - slab − tube, BEFORE the shared-sampling fix: 1788 boundary edges (384
     ///   perimeter + 1404 along the hole rings — the dense punch-vs-band mismatch).
-    /// - slab − tube, before the SEAM-FILL fix: 264 boundary edges, 4 of them in
+    /// - slab − tube, before seam conformance: 264 boundary edges, 4 of them in
     ///   the hole-ring region at the SSI seam azimuth (the punch chord vs. band
     ///   vertical-stitch disagreement at the tool's u-seam).
-    /// - slab − tube, AFTER the seam-fill fix: 0 hole-ring boundary edges. The
-    ///   seam wedge is filled with true intersection samples shared by both the
-    ///   punch ring (`uv_a`) and the band ribbon (`uv_b`, see
-    ///   `super::super::loops::fill_seam_gap`), so the two sides conform across
-    ///   the seam and the band ribbon spans the full tool u domain.
+    /// - slab − tube, WITH seam conformance: 0 hole-ring boundary edges. The
+    ///   SSI marcher wraps the tool's periodic u direction and emits exact seam
+    ///   samples shared by both the punch ring (`uv_a`) and the band ribbon
+    ///   (`uv_b`), so the two sides conform across the seam and the band ribbon
+    ///   spans the full tool u domain.
     ///
     /// Two assertions pin the result:
     /// 1. The cut result's total boundary-edge count is no worse than the plain
@@ -370,8 +370,8 @@ mod tests {
     ///    ~1404 hole-ring boundary edges are gone.
     /// 2. Direct hole-ring conformance: NO boundary-edge midpoint lies in the
     ///    tube-wall ring region (distance to the tube axis within [0.7·r, 1.3·r]
-    ///    while z is inside the slab). The seam gap is now filled, so even the
-    ///    former seam-azimuth residual is gone.
+    ///    while z is inside the slab). The marcher's exact seam samples close
+    ///    the seam, so even the former seam-azimuth residual is gone.
     #[test]
     fn hole_rings_tessellate_conformally() {
         #[allow(clippy::cast_possible_truncation)]
@@ -447,9 +447,9 @@ mod tests {
         // (2) Direct hole-ring conformance: NO boundary-edge midpoint lies in
         // the tube-wall ring region. The tube axis runs along (3,3,z); a ring
         // boundary edge would sit at radius ~RADIUS from that axis, inside the
-        // slab body in z. The seam wedge is now filled with shared intersection
-        // samples (see `fill_seam_gap`), so even the former seam-azimuth residual
-        // (up to 4 edges) is gone.
+        // slab body in z. The marcher's exact seam samples are shared by punch
+        // and band, so even the former seam-azimuth residual (up to 4 edges)
+        // is gone.
         let axis = Point3::new(3.0, 3.0, 0.0);
         let mut ring_edges = 0usize;
         for (p, q) in &cut_edges {
@@ -463,7 +463,7 @@ mod tests {
         }
         assert_eq!(
             ring_edges, 0,
-            "expected 0 hole-ring boundary edges after the seam-fill fix, \
+            "expected 0 hole-ring boundary edges with marcher seam conformance, \
              found {ring_edges}; the punch/band rings are not conforming along \
              the tube wall"
         );

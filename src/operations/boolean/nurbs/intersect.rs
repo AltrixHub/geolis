@@ -8,8 +8,8 @@
 //! plug's side wall (`same_sense = true`, normals pointing outward from the
 //! plug rather than into a hole).
 //!
-//! The loops / seam-fill / band machinery is shared verbatim with subtract —
-//! only the trim polarity and the band orientation differ.
+//! The loops / band machinery is shared verbatim with subtract — only the trim
+//! polarity and the band orientation differ.
 //!
 //! ## v1 topology assumptions
 //!
