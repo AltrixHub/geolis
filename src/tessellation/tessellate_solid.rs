@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::topology::{SolidId, TopologyStore};
 
+use super::edge_samples::EdgeSampleCache;
 use super::{TessellateFace, TessellationParams, TriangleMesh};
 
 /// Tessellates all faces of a solid into a combined triangle mesh.
@@ -25,9 +26,14 @@ impl TessellateSolid {
         let solid = store.solid(self.solid)?;
         let shell = store.shell(solid.outer_shell)?;
 
+        // One edge-sample cache for the whole shell: faces sharing an edge
+        // consume the identical boundary polyline (structural conformance).
+        let mut cache = EdgeSampleCache::new(self.params);
+
         let mut combined = TriangleMesh::default();
         for &face_id in &shell.faces {
-            let face_mesh = TessellateFace::new(face_id, self.params).execute(store)?;
+            let face_mesh =
+                TessellateFace::new(face_id, self.params).execute_with_cache(store, &mut cache)?;
             combined.merge(&face_mesh);
         }
 

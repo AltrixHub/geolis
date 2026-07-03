@@ -11,6 +11,7 @@ use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
 use crate::topology::{EdgeCurve, FaceId, FaceSurface, TopologyStore, WireId};
 
+use super::edge_samples::EdgeSampleCache;
 use super::{SurfaceTessellationOptions, TessellationMode, TessellationParams, TriangleMesh};
 
 /// Tessellates a face into a triangle mesh.
@@ -31,8 +32,23 @@ impl TessellateFace {
     /// # Errors
     ///
     /// Returns an error if the face cannot be tessellated.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn execute(&self, store: &TopologyStore) -> Result<TriangleMesh> {
+        let mut cache = EdgeSampleCache::new(self.params);
+        self.execute_with_cache(store, &mut cache)
+    }
+
+    /// Executes the tessellation against a shared per-solid edge-sample cache,
+    /// so faces sharing boundary edges emit identical boundary vertices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the face cannot be tessellated.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn execute_with_cache(
+        &self,
+        store: &TopologyStore,
+        cache: &mut EdgeSampleCache,
+    ) -> Result<TriangleMesh> {
         let face = store.face(self.face)?;
         let same_sense = face.same_sense;
         let outer_wire_id = face.outer_wire;
@@ -48,7 +64,14 @@ impl TessellateFace {
                     tessellate_annular_disc(&plane, &center, r_min, r_max, same_sense, &self.params)
                 } else {
                     let inner_wire_ids = face.inner_wires.clone();
-                    tessellate_plane(store, &plane, same_sense, outer_wire_id, &inner_wire_ids)
+                    tessellate_plane(
+                        store,
+                        cache,
+                        &plane,
+                        same_sense,
+                        outer_wire_id,
+                        &inner_wire_ids,
+                    )
                 }
             }
             FaceSurface::Cylinder(cyl) => {
@@ -149,13 +172,18 @@ impl TessellateFace {
                     &self.params,
                 )
             }
-            FaceSurface::Nurbs(n) => tessellate_nurbs_face(n, face.trim.as_ref(), same_sense),
+            FaceSurface::Nurbs(n) => {
+                let n = n.clone();
+                tessellate_nurbs_face(store, cache, face, &n, same_sense)
+            }
         }
     }
 }
 
-/// Tessellates a NURBS face: trimmed faces go through the constrained-Delaunay
-/// path, untrimmed faces through the full-domain adaptive tessellator.
+/// Tessellates a NURBS face: faces carrying pcurves take the edge-driven
+/// boundary path (shared-edge conformance); trimmed faces go through the
+/// constrained-Delaunay path; untrimmed legacy faces through the geometric
+/// conforming / tensor-grid paths.
 ///
 /// The underlying NURBS tessellators always emit raw surface normals and a fixed
 /// triangle winding (`same_sense = true`). When the face is oriented against the
@@ -164,21 +192,33 @@ impl TessellateFace {
 /// the normal and reverse the winding — so a NURBS back face faces outward like
 /// its analytic counterparts.
 fn tessellate_nurbs_face(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    face: &crate::topology::FaceData,
     nurbs: &crate::geometry::nurbs::NurbsSurface,
-    trim: Option<&crate::topology::FaceTrim>,
     same_sense: bool,
 ) -> Result<TriangleMesh> {
     let options = SurfaceTessellationOptions::default();
-    let mut mesh = match trim {
+
+    // Edge-driven boundary: every outer wire edge has a pcurve, so the outer
+    // UV loop is assembled from the shared per-edge samples (structural
+    // conformance with every adjacent face). Falls back to the geometric
+    // paths when the face predates shared-edge topology.
+    let edge_driven = super::edge_driven_outer_uv(store, cache, face, nurbs, &options)?;
+
+    let mut mesh = match (&face.trim, edge_driven) {
+        (trim, Some(outer)) => {
+            super::tessellate_with_outer_uv(nurbs, &outer, trim.as_ref(), &options)?
+        }
         // Untrimmed faces with a non-degenerate rectangular boundary go through
         // the boundary-conforming CDT path so adjacent faces sharing a boundary
         // curve meet without a silhouette sliver. Closed/seam surfaces (whose
         // opposite boundary edges coincide) keep the tensor-grid tessellator.
-        None if super::nurbs_surface_is_open(nurbs) => {
+        (None, None) if super::nurbs_surface_is_open(nurbs) => {
             super::tessellate_untrimmed_conforming(nurbs, &options)?
         }
-        None => super::tessellate_nurbs_surface(nurbs, &options)?,
-        Some(trim) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options)?,
+        (None, None) => super::tessellate_nurbs_surface(nurbs, &options)?,
+        (Some(trim), None) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options)?,
     };
     if !same_sense {
         for n in &mut mesh.normals {
@@ -192,19 +232,23 @@ fn tessellate_nurbs_face(
 }
 
 /// Tessellates a planar face using CDT.
+///
+/// Boundary polylines come from the shared per-edge sample cache, so a planar
+/// cap referencing the same ring edge as an adjacent NURBS side wall emits the
+/// identical boundary vertices (shared-edge conformance).
 #[allow(clippy::cast_possible_truncation)]
 fn tessellate_plane(
     store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
     plane: &crate::geometry::surface::Plane,
     same_sense: bool,
     outer_wire_id: crate::topology::WireId,
     inner_wire_ids: &[crate::topology::WireId],
 ) -> Result<TriangleMesh> {
-    let params = TessellationParams::default();
-    let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &params)?;
+    let outer_3d = wire_points_from_cache(store, cache, outer_wire_id)?;
     let mut inner_3d_list = Vec::new();
     for &wire_id in inner_wire_ids {
-        inner_3d_list.push(collect_wire_points_tessellated(store, wire_id, &params)?);
+        inner_3d_list.push(wire_points_from_cache(store, cache, wire_id)?);
     }
 
     let origin = plane.origin();
@@ -762,6 +806,31 @@ fn adaptive_angular_segments(radius: f64, sweep: f64, params: &TessellationParam
 fn adaptive_linear_segments(extent: f64, params: &TessellationParams) -> usize {
     let computed = (extent / params.tolerance).ceil() as usize;
     computed.clamp(params.min_segments, params.max_segments)
+}
+
+/// Collects 3D points from a wire out of the shared per-edge sample cache, in
+/// traversal order (each oriented edge's directed polyline, dropping the tail
+/// point duplicated by the next edge's head or the loop closure).
+fn wire_points_from_cache(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    wire_id: crate::topology::WireId,
+) -> Result<Vec<crate::math::Point3>> {
+    let edges = store.wire(wire_id)?.edges.clone();
+    let mut points = Vec::new();
+    for oe in &edges {
+        let samples = cache.get(store, oe.edge)?;
+        let n = samples.points.len();
+        if n == 0 {
+            continue;
+        }
+        if oe.forward {
+            points.extend_from_slice(&samples.points[..n - 1]);
+        } else {
+            points.extend(samples.points.iter().rev().take(n - 1).copied());
+        }
+    }
+    Ok(points)
 }
 
 /// Collects 3D points from a wire, tessellating curved edges into polylines.

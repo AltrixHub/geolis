@@ -45,8 +45,9 @@ use crate::error::{Result, TessellationError};
 use crate::geometry::nurbs::{NurbsCurve2D, NurbsSurface};
 use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
-use crate::topology::{FaceTrim, TrimLoop};
+use crate::topology::{FaceData, FaceTrim, TopologyStore, TrimLoop};
 
+use super::edge_samples::EdgeSampleCache;
 use super::tessellate_nurbs::{
     adaptive_grid_parameters, conforming_boundary_uv, BOUNDARY_CHORD_TOLERANCE,
 };
@@ -113,6 +114,136 @@ fn outer_loop_uv(surface: &NurbsSurface, outer: &TrimLoop) -> Result<Vec<Point2>
         conforming_boundary_uv(surface, BOUNDARY_CHORD_TOLERANCE)
     } else {
         sample_loop(outer)
+    }
+}
+
+/// Tessellates a NURBS face whose outer UV loop was assembled by the caller
+/// (edge-driven path), with hole loops sampled from the trim as usual.
+///
+/// # Errors
+///
+/// Propagates option-validation, loop-sampling, and CDT construction errors.
+pub(crate) fn tessellate_with_outer_uv(
+    surface: &NurbsSurface,
+    outer: &[Point2],
+    trim: Option<&FaceTrim>,
+    options: &SurfaceTessellationOptions,
+) -> Result<TriangleMesh> {
+    validate_options(options)?;
+    let holes: Vec<Vec<Point2>> = match trim {
+        Some(t) => t.holes.iter().map(sample_loop).collect::<Result<_>>()?,
+        None => Vec::new(),
+    };
+    tessellate_cdt(surface, outer, &holes, options)
+}
+
+/// Builds the outer UV polyline of a face from its outer wire's shared edge
+/// samples mapped through the face's pcurves — the edge-driven boundary path
+/// of shared-edge topology. Every face referencing an edge consumes the same
+/// cached samples, so adjacent faces emit identical 3D boundary vertices by
+/// construction.
+///
+/// Consecutive wire edges whose UV images do not meet (a geometrically closed
+/// direction whose seam is not a topological edge) are joined by an
+/// axis-aligned seam connector subdivided at the adaptive grid parameters, so
+/// the CDT boundary follows the surface curvature along the seam.
+///
+/// Returns `None` when the face records no pcurve for some outer wire edge
+/// (legacy face) — the caller falls back to the geometric paths.
+///
+/// # Errors
+///
+/// Propagates store lookups, pcurve evaluation, and grid-parameter errors.
+pub(crate) fn edge_driven_outer_uv(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    face: &FaceData,
+    surface: &NurbsSurface,
+    options: &SurfaceTessellationOptions,
+) -> Result<Option<Vec<Point2>>> {
+    let Ok(wire) = store.wire(face.outer_wire) else {
+        return Ok(None);
+    };
+    if wire.edges.is_empty() {
+        return Ok(None);
+    }
+    let oriented: Vec<crate::topology::OrientedEdge> = wire.edges.clone();
+
+    // One UV chain per wire edge, in traversal order.
+    let mut chains: Vec<Vec<Point2>> = Vec::with_capacity(oriented.len());
+    for oe in &oriented {
+        let Some(pcurve) = face.pcurve_for(oe.edge) else {
+            return Ok(None);
+        };
+        let samples = cache.get(store, oe.edge)?;
+        let mut uv = Vec::with_capacity(samples.params.len());
+        for &t in &samples.params {
+            uv.push(pcurve.point_at(t)?);
+        }
+        if !oe.forward {
+            uv.reverse();
+        }
+        chains.push(uv);
+    }
+
+    // Assemble the loop, inserting seam connectors where consecutive chains do
+    // not meet in UV.
+    let (u_grid, v_grid) = adaptive_grid_parameters(surface, options);
+    let mut pts: Vec<Point2> = Vec::new();
+    let n = chains.len();
+    for i in 0..n {
+        pts.extend_from_slice(&chains[i]);
+        let Some(&end) = chains[i].last() else {
+            return Ok(None);
+        };
+        let start = chains[(i + 1) % n][0];
+        if (end - start).norm() > MERGE_EPS {
+            append_seam_connector(&mut pts, end, start, &u_grid, &v_grid);
+        }
+    }
+    dedup_closed(&mut pts);
+    if pts.len() < 3 {
+        return Ok(None);
+    }
+    Ok(Some(pts))
+}
+
+/// Appends the interior points of a straight axis-aligned UV connector from
+/// `from` to `to` (exclusive on both ends), subdivided at the adaptive grid
+/// parameters of the varying direction. A non-axis-aligned connector (not
+/// expected from rectangular-domain faces) gets no interior points — a plain
+/// chord.
+fn append_seam_connector(
+    pts: &mut Vec<Point2>,
+    from: Point2,
+    to: Point2,
+    u_grid: &[f64],
+    v_grid: &[f64],
+) {
+    let vertical = (from.x - to.x).abs() < MERGE_EPS;
+    let horizontal = (from.y - to.y).abs() < MERGE_EPS;
+    if vertical {
+        let (lo, hi) = (from.y.min(to.y), from.y.max(to.y));
+        let mut inner: Vec<f64> = v_grid
+            .iter()
+            .copied()
+            .filter(|&v| v > lo + MERGE_EPS && v < hi - MERGE_EPS)
+            .collect();
+        if from.y > to.y {
+            inner.reverse();
+        }
+        pts.extend(inner.into_iter().map(|v| Point2::new(from.x, v)));
+    } else if horizontal {
+        let (lo, hi) = (from.x.min(to.x), from.x.max(to.x));
+        let mut inner: Vec<f64> = u_grid
+            .iter()
+            .copied()
+            .filter(|&u| u > lo + MERGE_EPS && u < hi - MERGE_EPS)
+            .collect();
+        if from.x > to.x {
+            inner.reverse();
+        }
+        pts.extend(inner.into_iter().map(|u| Point2::new(u, from.y)));
     }
 }
 

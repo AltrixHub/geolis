@@ -19,7 +19,9 @@ pub use tessellate_nurbs::{
 pub use tessellate_solid::TessellateSolid;
 pub use tessellate_stroke::TessellateStroke;
 pub use tessellate_trimmed::tessellate_trimmed_nurbs_face;
-pub(crate) use tessellate_trimmed::tessellate_untrimmed_conforming;
+pub(crate) use tessellate_trimmed::{
+    edge_driven_outer_uv, tessellate_untrimmed_conforming, tessellate_with_outer_uv,
+};
 
 #[cfg(test)]
 pub(crate) use tessellate_solid::max_adjacent_boundary_deviation;
