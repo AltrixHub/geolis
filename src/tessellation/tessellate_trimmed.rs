@@ -8,32 +8,31 @@
 //! hole) are discarded, and the surviving vertices are mapped through the
 //! surface to 3D.
 //!
-//! ## Boundary conformance (design decision)
+//! ## Boundary conformance (two shipped layers)
 //!
-//! Adjacent faces of a solid own independent per-face wires (no shared `BRep`
-//! edge topology), so each face used to tessellate a shared boundary curve with
-//! its own chord subdivision. Where the chords disagreed, one face's mesh poked
-//! past its neighbour at the silhouette (a visible sliver).
+//! **Design (b) — shared-edge `BRep` adjacency (shipped for prism / tube /
+//! revolved solids):** adjacent faces reference the same [`EdgeId`] for their
+//! common boundary curve; the edge is sampled once per
+//! [`super::edge_samples::EdgeSampleCache`] and every face consumes the same
+//! polyline. NURBS faces carrying per-edge pcurves take the edge-driven outer
+//! loop ([`edge_driven_outer_uv`]); planar caps consume the cached 3D samples
+//! directly. Conformance is structural: both faces emit bit-identical
+//! boundary vertices by construction, and closed side surfaces (whose seam is
+//! not a topological edge) close their UV rectangle with seam connectors.
 //!
-//! The fix is **design (a): solid-agnostic boundary-conforming sampling**. Any
-//! face whose outer boundary is the full parameter rectangle — an untrimmed face
+//! **Design (a) — solid-agnostic boundary-conforming sampling (fallback for
+//! faces without pcurves, e.g. the curved slab / wall builders):** any face
+//! whose outer boundary is the full parameter rectangle — an untrimmed face
 //! (via [`tessellate_untrimmed_conforming`]) or a punched target face whose
-//! outer loop is the domain rectangle (detected by [`loop_is_domain_rectangle`])
-//! — samples that boundary at the *curve-intrinsic* parameters of each boundary
-//! isocurve ([`super::tessellate_nurbs::conforming_boundary_uv`]). Because that
-//! sampling is a function of the boundary curve's geometry alone, two faces that
-//! share a curve (e.g. a curved top face and the ruled side wall extruded from
-//! its boundary) independently arrive at the *identical* parameter set and emit
-//! coincident 3D vertices — the deviation collapses to floating-point noise with
-//! no densification. The CDT decouples the boundary from the interior grid, so
-//! this needs no cross-face communication and no shared-edge topology.
-//!
-//! Path toward **design (b)** (true shared-edge `BRep` adjacency with per-`EdgeId`
-//! cached boundary polylines): once creation ops and the boolean share edges
-//! between adjacent faces, the boundary polyline could be sampled once per edge
-//! and looked up by both faces, making conformance structural rather than
-//! geometric. That is a larger refactor of the topology layer and the boolean's
-//! face copying; the geometry-only approach here is the proportionate step.
+//! outer loop is the domain rectangle (detected by
+//! [`loop_is_domain_rectangle`]) — samples that boundary at the
+//! *curve-intrinsic* parameters of each boundary isocurve
+//! ([`super::tessellate_nurbs::conforming_boundary_uv`]). Because that
+//! sampling is a function of the boundary curve's geometry alone, two faces
+//! sharing a curve independently arrive at the identical parameter set; the
+//! deviation collapses to floating-point noise. The per-edge cache uses the
+//! same chord-adaptive algorithm, so the two layers agree exactly where they
+//! meet.
 
 use std::collections::HashMap;
 
@@ -45,8 +44,9 @@ use crate::error::{Result, TessellationError};
 use crate::geometry::nurbs::{NurbsCurve2D, NurbsSurface};
 use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
-use crate::topology::{FaceTrim, TrimLoop};
+use crate::topology::{FaceData, FaceTrim, TopologyStore, TrimLoop};
 
+use super::edge_samples::EdgeSampleCache;
 use super::tessellate_nurbs::{
     adaptive_grid_parameters, conforming_boundary_uv, BOUNDARY_CHORD_TOLERANCE,
 };
@@ -116,6 +116,136 @@ fn outer_loop_uv(surface: &NurbsSurface, outer: &TrimLoop) -> Result<Vec<Point2>
     }
 }
 
+/// Tessellates a NURBS face whose outer UV loop was assembled by the caller
+/// (edge-driven path), with hole loops sampled from the trim as usual.
+///
+/// # Errors
+///
+/// Propagates option-validation, loop-sampling, and CDT construction errors.
+pub(crate) fn tessellate_with_outer_uv(
+    surface: &NurbsSurface,
+    outer: &[Point2],
+    trim: Option<&FaceTrim>,
+    options: &SurfaceTessellationOptions,
+) -> Result<TriangleMesh> {
+    validate_options(options)?;
+    let holes: Vec<Vec<Point2>> = match trim {
+        Some(t) => t.holes.iter().map(sample_loop).collect::<Result<_>>()?,
+        None => Vec::new(),
+    };
+    tessellate_cdt(surface, outer, &holes, options)
+}
+
+/// Builds the outer UV polyline of a face from its outer wire's shared edge
+/// samples mapped through the face's pcurves — the edge-driven boundary path
+/// of shared-edge topology. Every face referencing an edge consumes the same
+/// cached samples, so adjacent faces emit identical 3D boundary vertices by
+/// construction.
+///
+/// Consecutive wire edges whose UV images do not meet (a geometrically closed
+/// direction whose seam is not a topological edge) are joined by an
+/// axis-aligned seam connector subdivided at the adaptive grid parameters, so
+/// the CDT boundary follows the surface curvature along the seam.
+///
+/// Returns `None` when the face records no pcurve for some outer wire edge
+/// (legacy face) — the caller falls back to the geometric paths.
+///
+/// # Errors
+///
+/// Propagates store lookups, pcurve evaluation, and grid-parameter errors.
+pub(crate) fn edge_driven_outer_uv(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    face: &FaceData,
+    surface: &NurbsSurface,
+    options: &SurfaceTessellationOptions,
+) -> Result<Option<Vec<Point2>>> {
+    let Ok(wire) = store.wire(face.outer_wire) else {
+        return Ok(None);
+    };
+    if wire.edges.is_empty() {
+        return Ok(None);
+    }
+    let oriented: Vec<crate::topology::OrientedEdge> = wire.edges.clone();
+
+    // One UV chain per wire edge, in traversal order.
+    let mut chains: Vec<Vec<Point2>> = Vec::with_capacity(oriented.len());
+    for oe in &oriented {
+        let Some(pcurve) = face.pcurve_for(oe.edge) else {
+            return Ok(None);
+        };
+        let samples = cache.get(store, oe.edge)?;
+        let mut uv = Vec::with_capacity(samples.params.len());
+        for &t in &samples.params {
+            uv.push(pcurve.point_at(t)?);
+        }
+        if !oe.forward {
+            uv.reverse();
+        }
+        chains.push(uv);
+    }
+
+    // Assemble the loop, inserting seam connectors where consecutive chains do
+    // not meet in UV.
+    let (u_grid, v_grid) = adaptive_grid_parameters(surface, options);
+    let mut pts: Vec<Point2> = Vec::new();
+    let n = chains.len();
+    for i in 0..n {
+        pts.extend_from_slice(&chains[i]);
+        let Some(&end) = chains[i].last() else {
+            return Ok(None);
+        };
+        let start = chains[(i + 1) % n][0];
+        if (end - start).norm() > MERGE_EPS {
+            append_seam_connector(&mut pts, end, start, &u_grid, &v_grid);
+        }
+    }
+    dedup_closed(&mut pts);
+    if pts.len() < 3 {
+        return Ok(None);
+    }
+    Ok(Some(pts))
+}
+
+/// Appends the interior points of a straight axis-aligned UV connector from
+/// `from` to `to` (exclusive on both ends), subdivided at the adaptive grid
+/// parameters of the varying direction. A non-axis-aligned connector (not
+/// expected from rectangular-domain faces) gets no interior points — a plain
+/// chord.
+fn append_seam_connector(
+    pts: &mut Vec<Point2>,
+    from: Point2,
+    to: Point2,
+    u_grid: &[f64],
+    v_grid: &[f64],
+) {
+    let vertical = (from.x - to.x).abs() < MERGE_EPS;
+    let horizontal = (from.y - to.y).abs() < MERGE_EPS;
+    if vertical {
+        let (lo, hi) = (from.y.min(to.y), from.y.max(to.y));
+        let mut inner: Vec<f64> = v_grid
+            .iter()
+            .copied()
+            .filter(|&v| v > lo + MERGE_EPS && v < hi - MERGE_EPS)
+            .collect();
+        if from.y > to.y {
+            inner.reverse();
+        }
+        pts.extend(inner.into_iter().map(|v| Point2::new(from.x, v)));
+    } else if horizontal {
+        let (lo, hi) = (from.x.min(to.x), from.x.max(to.x));
+        let mut inner: Vec<f64> = u_grid
+            .iter()
+            .copied()
+            .filter(|&u| u > lo + MERGE_EPS && u < hi - MERGE_EPS)
+            .collect();
+        if from.x > to.x {
+            inner.reverse();
+        }
+        pts.extend(inner.into_iter().map(|u| Point2::new(u, from.y)));
+    }
+}
+
 /// Reports whether every control point of `loop_` lies on the surface's
 /// parameter-domain boundary — i.e. the loop is the full-domain rectangle (as
 /// built by the punch pipeline), not an interior SSI trim ring.
@@ -153,11 +283,16 @@ fn tessellate_cdt(
         insert_constraint_loop(&mut cdt, hole)?;
     }
 
-    // Steiner points: grid samples strictly inside the trim region.
+    // Steiner points: grid samples strictly inside the trim region. Points on
+    // (or within noise of) a constraint segment are skipped: inserting a point
+    // that lies exactly on a constraint makes spade SPLIT the constraint,
+    // adding a boundary vertex the adjacent face does not have — a conformance
+    // crack of one chord sagitta. Domain-boundary grid rows/columns land
+    // exactly on a full-domain outer loop, so this guard is load-bearing.
     for &u in &u_params {
         for &v in &v_params {
             let p = Point2::new(u, v);
-            if point_in_region(&p, outer, holes) {
+            if point_in_region(&p, outer, holes) && !near_any_segment(&p, outer, holes) {
                 // Ignore individual insertion failures (e.g. a point landing on
                 // an existing constraint vertex); the constraint loops already
                 // pin the boundary.
@@ -350,6 +485,32 @@ fn insert_constraint_loop(
         }
     }
     Ok(())
+}
+
+/// UV distance below which a Steiner candidate counts as lying ON a
+/// constraint segment (and is skipped — see the Steiner insertion loop).
+const SEGMENT_SKIP_EPS: f64 = 1e-9;
+
+/// Whether `p` lies within [`SEGMENT_SKIP_EPS`] of any constraint segment of
+/// the outer loop or a hole loop.
+fn near_any_segment(p: &Point2, outer: &[Point2], holes: &[Vec<Point2>]) -> bool {
+    let near_loop = |poly: &[Point2]| -> bool {
+        let count = poly.len();
+        (0..count).any(|i| {
+            let seg_a = poly[i];
+            let seg_b = poly[(i + 1) % count];
+            let dir = seg_b - seg_a;
+            let len_sq = dir.norm_squared();
+            let dist_sq = if len_sq < 1e-30 {
+                (*p - seg_a).norm_squared()
+            } else {
+                let frac = ((*p - seg_a).dot(&dir) / len_sq).clamp(0.0, 1.0);
+                (*p - (seg_a + dir * frac)).norm_squared()
+            };
+            dist_sq < SEGMENT_SKIP_EPS * SEGMENT_SKIP_EPS
+        })
+    };
+    near_loop(outer) || holes.iter().any(|h| near_loop(h))
 }
 
 /// Tests whether `p` is inside the trim region: inside the outer loop and

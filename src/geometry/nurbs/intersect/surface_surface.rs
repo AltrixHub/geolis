@@ -14,9 +14,12 @@
 //!    corrector is a 4×4 Newton solving `S_a = S_b` plus the marching-plane
 //!    constraint `(S_a - anchor)·d = 0` that pins the point's position along the
 //!    curve.
-//! 3. **Terminate.** Domain boundary of either surface (clamp + emit), closure
-//!    (return within tolerance of the start after >3 points), or the
-//!    `max_points` runaway guard.
+//! 3. **Terminate.** Open-direction domain boundary of either surface (clamp +
+//!    emit), closure (return within tolerance of the start after >3 points), or
+//!    the `max_points` runaway guard. Geometrically closed directions (e.g. the
+//!    u-seam of an extruded full circle) are periodic: iterates wrap modulo the
+//!    period instead of clamping, the seam does not terminate the branch, and
+//!    loops on closed surfaces come out genuinely `closed`.
 //! 4. **Dedupe branches.** A seed already lying on an existing branch is skipped,
 //!    so the two surface families do not yield duplicate traces.
 //!
@@ -29,7 +32,7 @@
 //! Newton convergence. Tangencies (`|d| → 0`) are out of scope beyond clean
 //! termination.
 
-use nalgebra::{Matrix4, Vector4};
+use nalgebra::{Matrix3, Matrix4, Vector4};
 
 use crate::error::Result;
 use crate::geometry::nurbs::NurbsSurface;
@@ -58,6 +61,12 @@ pub fn intersect_surfaces(
     let leaf = seed_leaf_extent(a, b);
     let pad = 1e-7;
     let box_pairs = seed_surface_surface(a, b, leaf, pad, 40)?;
+    let pair = SurfacePair {
+        a,
+        b,
+        dom_a: SurfaceDomain::of(a),
+        dom_b: SurfaceDomain::of(b),
+    };
 
     // Refine each candidate box-pair center to a point on the intersection.
     let mut seeds: Vec<Seed> = Vec::new();
@@ -68,7 +77,7 @@ pub fn intersect_surfaces(
             ub: 0.5 * (bb.u0 + bb.u1),
             vb: 0.5 * (bb.v0 + bb.v1),
         };
-        if let Some(s) = refine_seed(a, b, guess, options)? {
+        if let Some(s) = refine_seed(&pair, guess, options)? {
             push_unique_seed(&mut seeds, a, s, leaf);
         }
     }
@@ -80,7 +89,7 @@ pub fn intersect_surfaces(
         if seed_covered(&branches, a, seed, step)? {
             continue;
         }
-        if let Some(branch) = march_branch(a, b, seed, step, options)? {
+        if let Some(branch) = march_branch(&pair, seed, step, options)? {
             branches.push(branch);
         }
     }
@@ -94,6 +103,70 @@ struct Seed {
     va: f64,
     ub: f64,
     vb: f64,
+}
+
+/// The two surfaces under intersection plus their periodic-domain descriptors,
+/// threaded through the seeding / marching helpers as one unit.
+struct SurfacePair<'s> {
+    a: &'s NurbsSurface,
+    b: &'s NurbsSurface,
+    dom_a: SurfaceDomain,
+    dom_b: SurfaceDomain,
+}
+
+/// Parameter domain of one surface plus which directions are geometrically
+/// closed (the parametric boundaries map to the same 3D seam curve).
+///
+/// Closed directions are periodic for the marcher: iterates wrap modulo the
+/// period (the same convention as [`NurbsSurface::closest_point`]) and the
+/// parametric seam does not terminate a branch. Open directions clamp and
+/// terminate as before.
+#[derive(Debug, Clone, Copy)]
+struct SurfaceDomain {
+    u0: f64,
+    u1: f64,
+    v0: f64,
+    v1: f64,
+    u_closed: bool,
+    v_closed: bool,
+}
+
+impl SurfaceDomain {
+    fn of(s: &NurbsSurface) -> Self {
+        let ((u0, u1), (v0, v1)) = s.parameter_domain();
+        Self {
+            u0,
+            u1,
+            v0,
+            v1,
+            u_closed: s.is_closed_in_u(),
+            v_closed: s.is_closed_in_v(),
+        }
+    }
+
+    /// Wraps closed directions modulo their period; clamps open ones.
+    fn apply(&self, u: f64, v: f64) -> (f64, f64) {
+        let wu = if self.u_closed {
+            self.u0 + (u - self.u0).rem_euclid(self.u1 - self.u0)
+        } else {
+            u.clamp(self.u0, self.u1)
+        };
+        let wv = if self.v_closed {
+            self.v0 + (v - self.v0).rem_euclid(self.v1 - self.v0)
+        } else {
+            v.clamp(self.v0, self.v1)
+        };
+        (wu, wv)
+    }
+
+    /// Boundary proximity that terminates marching: OPEN directions only. A
+    /// closed direction's parametric seam is not a geometric boundary.
+    fn at_open_boundary(&self, u: f64, v: f64) -> bool {
+        (!self.u_closed
+            && ((u - self.u0).abs() < BOUNDARY_EPS || (self.u1 - u).abs() < BOUNDARY_EPS))
+            || (!self.v_closed
+                && ((v - self.v0).abs() < BOUNDARY_EPS || (self.v1 - v).abs() < BOUNDARY_EPS))
+    }
 }
 
 /// Leaf-extent heuristic: 1/12 of the SMALLER control-hull diagonal.
@@ -122,19 +195,16 @@ fn seed_leaf_extent(a: &NurbsSurface, b: &NurbsSurface) -> f64 {
 /// tangent). Returns `None` if the residual stays above tolerance.
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn refine_seed(
-    a: &NurbsSurface,
-    b: &NurbsSurface,
+    pair: &SurfacePair,
     guess: Seed,
     options: &IntersectionOptions,
 ) -> Result<Option<Seed>> {
-    let ((au0, au1), (av0, av1)) = a.parameter_domain();
-    let ((bu0, bu1), (bv0, bv1)) = b.parameter_domain();
     let mut s = guess;
     let tol = options.tolerance.max(1e-12);
 
     for _ in 0..options.max_iterations {
-        let (pa, sau, sav) = a.partials(s.ua, s.va)?;
-        let (pb, sbu, sbv) = b.partials(s.ub, s.vb)?;
+        let (pa, sau, sav) = pair.a.partials(s.ua, s.va)?;
+        let (pb, sbu, sbv) = pair.b.partials(s.ub, s.vb)?;
         let r = pa - pb;
         if r.norm() < tol {
             return Ok(Some(s));
@@ -161,16 +231,14 @@ fn refine_seed(
             break;
         };
         let delta = minv * rhs;
-        s.ua = (s.ua + delta[0]).clamp(au0, au1);
-        s.va = (s.va + delta[1]).clamp(av0, av1);
-        s.ub = (s.ub + delta[2]).clamp(bu0, bu1);
-        s.vb = (s.vb + delta[3]).clamp(bv0, bv1);
+        (s.ua, s.va) = pair.dom_a.apply(s.ua + delta[0], s.va + delta[1]);
+        (s.ub, s.vb) = pair.dom_b.apply(s.ub + delta[2], s.vb + delta[3]);
         if delta.norm() < tol {
             break;
         }
     }
-    let pa = a.point_at(s.ua, s.va)?;
-    let pb = b.point_at(s.ub, s.vb)?;
+    let pa = pair.a.point_at(s.ua, s.va)?;
+    let pb = pair.b.point_at(s.ub, s.vb)?;
     if (pa - pb).norm() < tol.max(1e-7) {
         Ok(Some(s))
     } else {
@@ -217,27 +285,26 @@ fn seed_covered(
 
 /// Marches a full branch from `seed`: forward, then (if open) backward, joined.
 fn march_branch(
-    a: &NurbsSurface,
-    b: &NurbsSurface,
+    pair: &SurfacePair,
     seed: Seed,
     step: f64,
     options: &IntersectionOptions,
 ) -> Result<Option<SurfaceIntersectionCurve>> {
     let half = options.max_points / 2;
-    let (fwd, closed) = march_direction(a, b, seed, step, 1.0, half, options)?;
+    let (fwd, closed) = march_direction(pair, seed, step, 1.0, half, options)?;
     if closed {
-        let mut branch = assemble(a, &fwd)?;
+        let mut branch = assemble(pair.a, &fwd)?;
         branch.closed = true;
         return Ok(Some(branch));
     }
-    let (mut bwd, _) = march_direction(a, b, seed, step, -1.0, half, options)?;
+    let (mut bwd, _) = march_direction(pair, seed, step, -1.0, half, options)?;
     bwd.reverse();
     let mut trace = bwd;
     trace.extend_from_slice(&fwd[1.min(fwd.len())..]);
     if trace.len() < 2 {
         return Ok(None);
     }
-    Ok(Some(assemble(a, &trace)?))
+    Ok(Some(assemble(pair.a, &trace)?))
 }
 
 /// Marches in one direction collecting intersection points. Returns the trace
@@ -246,8 +313,7 @@ fn march_branch(
 /// `sign = +1` walks forward along `d = n_a × n_b`; `-1` walks backward.
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn march_direction(
-    a: &NurbsSurface,
-    b: &NurbsSurface,
+    pair: &SurfacePair,
     seed: Seed,
     step: f64,
     sign: f64,
@@ -257,11 +323,11 @@ fn march_direction(
     let mut pts = vec![seed];
     let mut cur = seed;
     let mut prev_dir: Option<Vector3> = None;
-    let seed_point = a.point_at(seed.ua, seed.va)?;
+    let seed_point = pair.a.point_at(seed.ua, seed.va)?;
 
     for _ in 0..max_points {
         // Marching direction d = n_a × n_b at the current point.
-        let Some((p, d)) = march_dir(a, b, cur)? else {
+        let Some((p, d)) = march_dir(pair, cur)? else {
             // |d| ~ 0: tangential contact — stop, keeping what exists.
             break;
         };
@@ -274,23 +340,31 @@ fn march_direction(
         let anchor = p + dir * step;
 
         // Corrector: 4x4 Newton onto S_a = S_b plus the marching-plane constraint.
-        let Some(next) = correct(a, b, cur, anchor, dir, options)? else {
+        let Some(next) = correct(pair, cur, anchor, dir, options)? else {
             break;
         };
 
-        let np = a.point_at(next.ua, next.va)?;
+        let np = pair.a.point_at(next.ua, next.va)?;
 
-        // Boundary termination: either surface's parameters landed on a domain
-        // edge (the predictor walked out and the clamp pinned it there).
-        //
-        // Limitation: surfaces that are geometrically closed but parametrically
-        // non-periodic (e.g. an extruded full circle with a UV seam) terminate
-        // here at the seam instead of wrapping across it, so `closed` stays
-        // false even though the branch geometrically returns to its start.
-        // Consumers needing seam-aware closure must reclassify the open branch
-        // (see `operations::boolean::nurbs::loops`). Future work: periodic-domain
-        // wrapping in the marcher.
-        let on_boundary = at_boundary(a, next.ua, next.va) || at_boundary(b, next.ub, next.vb);
+        // Boundary termination: an OPEN direction's parameters landed on a
+        // domain edge (the predictor walked out and the clamp pinned it there).
+        // Geometrically closed directions wrap across their parametric seam
+        // instead (see `SurfaceDomain::apply`), so the march continues until
+        // 3D closure.
+        let on_boundary = pair.dom_a.at_open_boundary(next.ua, next.va)
+            || pair.dom_b.at_open_boundary(next.ub, next.vb);
+
+        // The corrector wrapped a closed direction across its seam: insert the
+        // exact seam point in BOTH parametric representations (same 3D point at
+        // the low and high boundary) so downstream consumers sorting by the
+        // wrapped parameter span the full domain with no wedge gap. Inserted
+        // before the closure check so a crossing on the closing step is kept.
+        if let Some(crossing) = seam_crossing(pair, cur, next) {
+            if let Some((near, far)) = seam_samples(pair, crossing, cur, options)? {
+                pts.push(near);
+                pts.push(far);
+            }
+        }
 
         // Closure.
         if pts.len() > 3 && (np - seed_point).norm() < step * 0.75 {
@@ -308,11 +382,147 @@ fn march_direction(
     Ok((pts, false))
 }
 
+/// Which of the four marching parameters crossed a closed direction's seam.
+///
+/// The value is the parameter's index in the `(ua, va, ub, vb)` layout shared
+/// with the corrector Jacobian columns.
+#[derive(Debug, Clone, Copy)]
+struct SeamCrossing {
+    /// Parameter index: 0 = `ua`, 1 = `va`, 2 = `ub`, 3 = `vb`.
+    param: usize,
+    /// Domain low / high bounds of the crossed direction.
+    lo: f64,
+    hi: f64,
+}
+
+/// Seed parameters as an indexable `(ua, va, ub, vb)` array.
+fn seed_params(s: Seed) -> [f64; 4] {
+    [s.ua, s.va, s.ub, s.vb]
+}
+
+/// Rebuilds a `Seed` from the indexable parameter layout.
+fn seed_from_params(p: [f64; 4]) -> Seed {
+    Seed {
+        ua: p[0],
+        va: p[1],
+        ub: p[2],
+        vb: p[3],
+    }
+}
+
+/// Detects a seam crossing between two consecutive marched points: a closed
+/// direction whose wrapped step is longer than half its period. Returns the
+/// first crossing found (a simultaneous crossing of two directions in one
+/// step is a corner-degenerate rarity; its second direction simply keeps a
+/// sub-step gap).
+fn seam_crossing(pair: &SurfacePair, prev: Seed, next: Seed) -> Option<SeamCrossing> {
+    let (dom_a, dom_b) = (&pair.dom_a, &pair.dom_b);
+    let closed = [
+        (dom_a.u_closed, dom_a.u0, dom_a.u1),
+        (dom_a.v_closed, dom_a.v0, dom_a.v1),
+        (dom_b.u_closed, dom_b.u0, dom_b.u1),
+        (dom_b.v_closed, dom_b.v0, dom_b.v1),
+    ];
+    let p = seed_params(prev);
+    let n = seed_params(next);
+    for (param, &(is_closed, lo, hi)) in closed.iter().enumerate() {
+        if is_closed && (n[param] - p[param]).abs() > 0.5 * (hi - lo) {
+            return Some(SeamCrossing { param, lo, hi });
+        }
+    }
+    None
+}
+
+/// Solves the exact seam point for a crossing and returns it in both
+/// parametric representations: `(near, far)` where `near` pins the crossed
+/// parameter at the boundary closer to `prev` (trace order) and `far` is the
+/// identical 3D point re-expressed at the opposite boundary.
+///
+/// One pinned 3×3 Newton solves `S_a = S_b` over the three non-pinned
+/// parameters; because the direction is geometrically closed, the solution at
+/// one boundary IS the solution at the other, so no second solve is needed.
+/// Returns `None` on non-convergence — the caller inserts nothing and the
+/// trace keeps an honest sub-step gap at the seam.
+fn seam_samples(
+    pair: &SurfacePair,
+    crossing: SeamCrossing,
+    prev: Seed,
+    options: &IntersectionOptions,
+) -> Result<Option<(Seed, Seed)>> {
+    let prev_p = seed_params(prev);
+    let mid = 0.5 * (crossing.lo + crossing.hi);
+    let (near_bound, far_bound) = if prev_p[crossing.param] >= mid {
+        (crossing.hi, crossing.lo)
+    } else {
+        (crossing.lo, crossing.hi)
+    };
+    let Some(pinned) = pinned_correct(pair, crossing.param, near_bound, prev, options)? else {
+        return Ok(None);
+    };
+    let mut far = seed_params(pinned);
+    far[crossing.param] = far_bound;
+    Ok(Some((pinned, seed_from_params(far))))
+}
+
+/// Pinned 3×3 Newton: solve `S_a(u_a, v_a) = S_b(u_b, v_b)` with the parameter
+/// at `pin_param` held at `pin_value` and the remaining three free.
+///
+/// Residual `r = S_a - S_b` (3 components); Jacobian columns are the three
+/// non-pinned columns of `[S_a_u, S_a_v, -S_b_u, -S_b_v]`. Free iterates wrap /
+/// clamp via the domain descriptors; the pinned parameter is re-asserted after
+/// every domain application (a closed direction's `apply` would wrap the high
+/// boundary back to the low one). Returns `None` if the residual stays above
+/// tolerance.
+#[allow(clippy::similar_names)]
+fn pinned_correct(
+    pair: &SurfacePair,
+    pin_param: usize,
+    pin_value: f64,
+    start: Seed,
+    options: &IntersectionOptions,
+) -> Result<Option<Seed>> {
+    let tol = options.tolerance.max(1e-12);
+    let mut p = seed_params(start);
+    p[pin_param] = pin_value;
+    let free: Vec<usize> = (0..4).filter(|&i| i != pin_param).collect();
+
+    for _ in 0..options.max_iterations {
+        let (pa, sau, sav) = pair.a.partials(p[0], p[1])?;
+        let (pb, sbu, sbv) = pair.b.partials(p[2], p[3])?;
+        let r = pa - pb;
+        if r.norm() < tol {
+            return Ok(Some(seed_from_params(p)));
+        }
+        let cols = [sau, sav, -sbu, -sbv];
+        let j = Matrix3::from_columns(&[cols[free[0]], cols[free[1]], cols[free[2]]]);
+        let Some(jinv) = j.try_inverse() else {
+            break;
+        };
+        let delta = jinv * r;
+        for (t, &i) in free.iter().enumerate() {
+            p[i] -= delta[t];
+        }
+        (p[0], p[1]) = pair.dom_a.apply(p[0], p[1]);
+        (p[2], p[3]) = pair.dom_b.apply(p[2], p[3]);
+        p[pin_param] = pin_value;
+        if delta.norm() < tol {
+            break;
+        }
+    }
+    let pa = pair.a.point_at(p[0], p[1])?;
+    let pb = pair.b.point_at(p[2], p[3])?;
+    if (pa - pb).norm() < tol.max(1e-7) {
+        Ok(Some(seed_from_params(p)))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Current point on `a` and the unit marching direction `d = n_a × n_b`.
 /// Returns `None` when the surfaces are tangent (`|d|` below tolerance).
-fn march_dir(a: &NurbsSurface, b: &NurbsSurface, s: Seed) -> Result<Option<(Point3, Vector3)>> {
-    let (pa, sau, sav) = a.partials(s.ua, s.va)?;
-    let (_pb, sbu, sbv) = b.partials(s.ub, s.vb)?;
+fn march_dir(pair: &SurfacePair, s: Seed) -> Result<Option<(Point3, Vector3)>> {
+    let (pa, sau, sav) = pair.a.partials(s.ua, s.va)?;
+    let (_pb, sbu, sbv) = pair.b.partials(s.ub, s.vb)?;
     let na = sau.cross(&sav);
     let nb = sbu.cross(&sbv);
     let d = na.cross(&nb);
@@ -327,24 +537,22 @@ fn march_dir(a: &NurbsSurface, b: &NurbsSurface, s: Seed) -> Result<Option<(Poin
 ///
 /// Unknowns `(ua, va, ub, vb)`; residual rows 1-3 = `S_a - S_b`, row 4 =
 /// `(S_a - anchor)·dir`. Jacobian rows 1-3 = `[S_a_u, S_a_v, -S_b_u, -S_b_v]`,
-/// row 4 = `[dir·S_a_u, dir·S_a_v, 0, 0]`. Clamped to both domains.
+/// row 4 = `[dir·S_a_u, dir·S_a_v, 0, 0]`. Iterates wrap on closed directions
+/// and clamp on open ones (see [`SurfaceDomain::apply`]).
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn correct(
-    a: &NurbsSurface,
-    b: &NurbsSurface,
+    pair: &SurfacePair,
     start: Seed,
     anchor: Point3,
     dir: Vector3,
     options: &IntersectionOptions,
 ) -> Result<Option<Seed>> {
-    let ((au0, au1), (av0, av1)) = a.parameter_domain();
-    let ((bu0, bu1), (bv0, bv1)) = b.parameter_domain();
     let mut s = start;
     let tol = options.tolerance.max(1e-12);
 
     for _ in 0..options.max_iterations {
-        let (pa, sau, sav) = a.partials(s.ua, s.va)?;
-        let (pb, sbu, sbv) = b.partials(s.ub, s.vb)?;
+        let (pa, sau, sav) = pair.a.partials(s.ua, s.va)?;
+        let (pb, sbu, sbv) = pair.b.partials(s.ub, s.vb)?;
         let r3 = pa - pb;
         let r4 = (pa - anchor).dot(&dir);
         if r3.norm() < tol && r4.abs() < tol {
@@ -374,16 +582,14 @@ fn correct(
             break;
         };
         let delta = jinv * f;
-        s.ua = (s.ua - delta[0]).clamp(au0, au1);
-        s.va = (s.va - delta[1]).clamp(av0, av1);
-        s.ub = (s.ub - delta[2]).clamp(bu0, bu1);
-        s.vb = (s.vb - delta[3]).clamp(bv0, bv1);
+        (s.ua, s.va) = pair.dom_a.apply(s.ua - delta[0], s.va - delta[1]);
+        (s.ub, s.vb) = pair.dom_b.apply(s.ub - delta[2], s.vb - delta[3]);
         if delta.norm() < tol {
             break;
         }
     }
-    let pa = a.point_at(s.ua, s.va)?;
-    let pb = b.point_at(s.ub, s.vb)?;
+    let pa = pair.a.point_at(s.ua, s.va)?;
+    let pb = pair.b.point_at(s.ub, s.vb)?;
     if (pa - pb).norm() < tol.max(1e-7) {
         Ok(Some(s))
     } else {
@@ -393,15 +599,6 @@ fn correct(
 
 /// Boundary-proximity tolerance in parameter space.
 const BOUNDARY_EPS: f64 = 1e-7;
-
-/// Whether `(u, v)` sits on a parameter-domain boundary of `surface`.
-fn at_boundary(surface: &NurbsSurface, u: f64, v: f64) -> bool {
-    let ((u0, u1), (v0, v1)) = surface.parameter_domain();
-    (u - u0).abs() < BOUNDARY_EPS
-        || (u1 - u).abs() < BOUNDARY_EPS
-        || (v - v0).abs() < BOUNDARY_EPS
-        || (v1 - v).abs() < BOUNDARY_EPS
-}
 
 /// Assembles an (open) branch from a parameter trace. A closed branch is built
 /// by the caller setting `closed = true` on the returned value.
@@ -426,17 +623,17 @@ fn assemble(a: &NurbsSurface, trace: &[Seed]) -> Result<SurfaceIntersectionCurve
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::geometry::nurbs::{KnotVector, NurbsSurface};
+    use crate::geometry::nurbs::{KnotVector, NurbsCurve3D, NurbsSurface};
     use crate::math::Point3;
 
-    /// 2x2 bilinear patch in the z = 0 plane, spanning `[x_lo,x_hi]x[y_lo,y_hi]`.
-    fn z0_patch(x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64) -> NurbsSurface {
+    /// 2x2 bilinear patch in the z = `z` plane, spanning `[x_lo,x_hi]x[y_lo,y_hi]`.
+    fn z_patch(x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64, z: f64) -> NurbsSurface {
         NurbsSurface::from_unweighted(
             vec![
-                Point3::new(x_lo, y_lo, 0.0),
-                Point3::new(x_lo, y_hi, 0.0),
-                Point3::new(x_hi, y_lo, 0.0),
-                Point3::new(x_hi, y_hi, 0.0),
+                Point3::new(x_lo, y_lo, z),
+                Point3::new(x_lo, y_hi, z),
+                Point3::new(x_hi, y_lo, z),
+                Point3::new(x_hi, y_hi, z),
             ],
             2,
             2,
@@ -446,6 +643,20 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    /// 2x2 bilinear patch in the z = 0 plane, spanning `[x_lo,x_hi]x[y_lo,y_hi]`.
+    fn z0_patch(x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64) -> NurbsSurface {
+        z_patch(x_lo, x_hi, y_lo, y_hi, 0.0)
+    }
+
+    /// Full closed cylinder shell: the unit circle in the XY plane extruded `h`
+    /// along +Z. Geometrically closed in u (`is_closed_in_u()` is true) with a
+    /// parametric seam at the +X azimuth.
+    fn full_cylinder(h: f64) -> NurbsSurface {
+        let circle =
+            NurbsCurve3D::circle(Point3::origin(), 1.0, Vector3::z(), Vector3::x()).unwrap();
+        NurbsSurface::extrude(&circle, Vector3::new(0.0, 0.0, h)).unwrap()
     }
 
     /// A vertical bilinear patch in the plane `x = x0`, spanning y in
@@ -585,6 +796,110 @@ mod tests {
             }
         }
         assert!(count >= 2, "too few points on the crossing: {count}");
+    }
+
+    #[test]
+    fn closed_cylinder_crossed_by_plane_patch_yields_one_closed_branch() {
+        // Cylinder x²+y²=1, z∈[0,2] crossed by the z=1 plane patch over [-2,2]².
+        // The marcher must wrap the cylinder's parametric u-seam and close the
+        // branch instead of terminating there with an open trace.
+        let cyl = full_cylinder(2.0);
+        let plane = z_patch(-2.0, 2.0, -2.0, 2.0, 1.0);
+        let branches = intersect_surfaces(&cyl, &plane, &IntersectionOptions::default()).unwrap();
+        assert_eq!(
+            branches.len(),
+            1,
+            "expected one branch, got {}",
+            branches.len()
+        );
+        let br = &branches[0];
+        assert!(br.closed, "wrap must close the branch across the seam");
+        assert!(br.points.len() > 8, "too few points: {}", br.points.len());
+        let ((u0, u1), _) = cyl.parameter_domain();
+        for (p, uv) in br.points.iter().zip(&br.uv_a) {
+            assert!(
+                ((p.x * p.x + p.y * p.y).sqrt() - 1.0).abs() < 1e-6,
+                "off unit circle: {p:?}"
+            );
+            assert!((p.z - 1.0).abs() < 1e-6, "off z=1: {p:?}");
+            assert!(
+                uv.x >= u0 - 1e-9 && uv.x <= u1 + 1e-9,
+                "uv_a u out of domain: {}",
+                uv.x
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_branch_contains_exact_seam_samples() {
+        // Downstream trim/band construction sorts closed-direction traces by the
+        // wrapped parameter and needs samples at EXACTLY both parametric
+        // boundaries (same 3D point, two representations) to span the full
+        // domain without a wedge gap at the seam.
+        let cyl = full_cylinder(2.0);
+        let plane = z_patch(-2.0, 2.0, -2.0, 2.0, 1.0);
+        let branches = intersect_surfaces(&cyl, &plane, &IntersectionOptions::default()).unwrap();
+        assert_eq!(branches.len(), 1);
+        let br = &branches[0];
+        assert!(br.closed);
+        let ((u0, u1), _) = cyl.parameter_domain();
+        let at_lo: Vec<usize> = (0..br.uv_a.len())
+            .filter(|&i| (br.uv_a[i].x - u0).abs() < 1e-9)
+            .collect();
+        let at_hi: Vec<usize> = (0..br.uv_a.len())
+            .filter(|&i| (u1 - br.uv_a[i].x).abs() < 1e-9)
+            .collect();
+        assert!(
+            !at_lo.is_empty() && !at_hi.is_empty(),
+            "trace must touch both u boundaries exactly (lo hits: {}, hi hits: {})",
+            at_lo.len(),
+            at_hi.len()
+        );
+        // The two representations of one crossing share their 3D point.
+        assert!(
+            (br.points[at_lo[0]] - br.points[at_hi[0]]).norm() < 1e-9,
+            "seam sample pair must coincide in 3D"
+        );
+    }
+
+    #[test]
+    fn seam_samples_satisfy_both_surface_equations() {
+        // Every point of the closed branch (seam samples included) lies on BOTH
+        // surfaces within 1e-6.
+        let cyl = full_cylinder(2.0);
+        let plane = z_patch(-2.0, 2.0, -2.0, 2.0, 1.0);
+        let branches = intersect_surfaces(&cyl, &plane, &IntersectionOptions::default()).unwrap();
+        let br = &branches[0];
+        for (i, p) in br.points.iter().enumerate() {
+            let pa = cyl.point_at(br.uv_a[i].x, br.uv_a[i].y).unwrap();
+            let pb = plane.point_at(br.uv_b[i].x, br.uv_b[i].y).unwrap();
+            assert!(
+                (pa - p).norm() < 1e-6,
+                "point {i} off surface a: {}",
+                (pa - p).norm()
+            );
+            assert!(
+                (pb - p).norm() < 1e-6,
+                "point {i} off surface b: {}",
+                (pb - p).norm()
+            );
+        }
+    }
+
+    #[test]
+    fn closed_cylinder_as_surface_b_also_closes() {
+        // Same crossing with the argument order swapped: the closed surface sits
+        // in the tool position (`b`), so the wrap acts on the uv_b trace.
+        let cyl = full_cylinder(2.0);
+        let plane = z_patch(-2.0, 2.0, -2.0, 2.0, 1.0);
+        let branches = intersect_surfaces(&plane, &cyl, &IntersectionOptions::default()).unwrap();
+        assert_eq!(
+            branches.len(),
+            1,
+            "expected one branch, got {}",
+            branches.len()
+        );
+        assert!(branches[0].closed, "closed tool branch must close");
     }
 
     #[test]

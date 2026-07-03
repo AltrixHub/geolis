@@ -26,6 +26,7 @@ pub(crate) fn subtract_through_cut(
     store: &mut TopologyStore,
     target: SolidId,
     tool: SolidId,
+    op_id: Option<&crate::topology::OpId>,
 ) -> Result<SolidId> {
     let target_faces = solid_faces(store, target)?;
     let tool_faces = solid_faces(store, tool)?;
@@ -54,19 +55,65 @@ pub(crate) fn subtract_through_cut(
     let mut result_faces: Vec<FaceId> = Vec::with_capacity(target_faces.len());
     for &fid in &target_faces {
         let copy = copy_face(store, fid)?;
+        // Persistent names carry over UNCHANGED to the result copies (the
+        // newest result owns the name; the input face drops out of the
+        // registry). Independent of the boolean's own op id.
+        store.names_mut().transfer_face(fid, copy);
         id_map.insert(fid, copy);
         result_faces.push(copy);
     }
 
     // Punch each loop onto the COPIED target face, then build the band face that
-    // shares those exact hole-ring wires. `cut.loops` is ordered [entry, exit]
-    // (loops.rs sorts by mean v), so the two punch results map directly to the
-    // band's entry/exit rings.
+    // shares those exact hole-ring wires. Through loops are ordered
+    // [entry, exit] (loops.rs sorts by mean v), so the two punch results map
+    // directly to the band's entry/exit rings.
     for cut in &cuts {
-        let entry = punch_onto_copy(store, &cut.loops[0], &id_map)?;
-        let exit = punch_onto_copy(store, &cut.loops[1], &id_map)?;
-        let band = build_band_face(store, cut, BandRingWires { entry, exit })?;
-        result_faces.push(band);
+        match cut {
+            super::loops::ToolFaceCut::Through { tool_face, loops } => {
+                let entry = punch_onto_copy(store, &loops[0], &id_map)?;
+                let exit = punch_onto_copy(store, &loops[1], &id_map)?;
+                let band =
+                    build_band_face(store, *tool_face, loops, BandRingWires { entry, exit })?;
+                result_faces.push(band);
+                if let Some(op) = op_id {
+                    name_band(store, op, *tool_face, band);
+                    name_rim(store, op, &id_map, &loops[0], entry, 0);
+                    name_rim(store, op, &id_map, &loops[1], exit, 1);
+                }
+            }
+            super::loops::ToolFaceCut::Pocket { tool_face, entry } => {
+                // Punch the entry hole, band down to the buried ring, and keep
+                // the buried tool cap (sense-flipped) as the pocket floor.
+                let buried = super::pocket::resolve_buried_end(store, entry, &tool_faces)?;
+                let entry_ring = punch_onto_copy(store, entry, &id_map)?;
+                let buried_uv =
+                    super::pocket::buried_ring_uv(store, buried.ring_wire, buried.v_boundary)?;
+                let band = super::band::build_pocket_band_face(
+                    store,
+                    *tool_face,
+                    entry,
+                    &buried_uv,
+                    entry_ring,
+                    buried.ring_wire,
+                )?;
+                result_faces.push(band);
+                let floor = super::pocket::pocket_floor(store, buried.cap_face)?;
+                result_faces.push(floor);
+                if let Some(op) = op_id {
+                    name_band(store, op, *tool_face, band);
+                    name_rim(store, op, &id_map, entry, entry_ring, 0);
+                    if let Some(cap_name) = store.names().name_of_face(buried.cap_face).cloned() {
+                        store.names_mut().bind_face(
+                            floor,
+                            crate::topology::FaceName::Floor {
+                                op: op.clone(),
+                                cap: Box::new(cap_name),
+                            },
+                        );
+                    }
+                }
+            }
+        }
     }
 
     Ok(finish_solid(store, result_faces))
@@ -132,6 +179,58 @@ fn punch_onto_copy(
     punch_loop(store, &remapped)
 }
 
+/// Names the band face `Band { op, tool_face name, 0 }` when the tool side
+/// face is itself named (unnamed tools propagate unnamed bands).
+fn name_band(
+    store: &mut TopologyStore,
+    op: &crate::topology::OpId,
+    tool_face: FaceId,
+    band: FaceId,
+) {
+    if let Some(tool_name) = store.names().name_of_face(tool_face).cloned() {
+        store.names_mut().bind_face(
+            band,
+            crate::topology::FaceName::Band {
+                op: op.clone(),
+                tool_face: Box::new(tool_name),
+                loop_index: 0,
+            },
+        );
+    }
+}
+
+/// Names a punched hole-rim ring edge `CutRim { op, punched face name, loop }`
+/// when the punched target face is named.
+fn name_rim(
+    store: &mut TopologyStore,
+    op: &crate::topology::OpId,
+    id_map: &HashMap<FaceId, FaceId>,
+    loop_: &super::loops::CutLoop,
+    ring_wire: crate::topology::WireId,
+    loop_index: u32,
+) {
+    let Some(&copy) = id_map.get(&loop_.target_face) else {
+        return;
+    };
+    let Some(target_name) = store.names().name_of_face(copy).cloned() else {
+        return;
+    };
+    let Ok(wire) = store.wire(ring_wire) else {
+        return;
+    };
+    let Some(rim_edge) = wire.edges.first().map(|oe| oe.edge) else {
+        return;
+    };
+    store.names_mut().bind_edge(
+        rim_edge,
+        crate::topology::EdgeName::CutRim {
+            op: op.clone(),
+            target: Box::new(target_name),
+            loop_index,
+        },
+    );
+}
+
 /// Deep-copies a face into a new `FaceData` entry, cloning the surface and trim
 /// and sharing the (read-only) wire ids. The copy is independent so punching can
 /// mutate it without touching the input.
@@ -143,6 +242,9 @@ pub(crate) fn copy_face(store: &mut TopologyStore, face: FaceId) -> Result<FaceI
         inner_wires: src.inner_wires.clone(),
         same_sense: src.same_sense,
         trim: src.trim.clone(),
+        // The copy references the same shared boundary edges, so the per-edge
+        // UV images remain valid on the copy.
+        pcurves: src.pcurves.clone(),
     };
     Ok(store.add_face(data))
 }
@@ -184,8 +286,338 @@ mod tests {
         let tube = MakeNurbsTube::new(Point3::new(3.0, 3.0, -1.5), radius, 5.0)
             .execute(&mut store)
             .unwrap();
-        let result = subtract_through_cut(&mut store, slab, tube).unwrap();
+        let result = subtract_through_cut(&mut store, slab, tube, None).unwrap();
         (store, result)
+    }
+
+    /// F4 acceptance 1 (stability): rebuilding the same named model into a
+    /// fresh store resolves every persistent name to geometrically identical
+    /// entities.
+    #[test]
+    fn boolean_names_are_rebuild_stable() {
+        use crate::topology::{EdgeName, FaceName, FaceRole, OpId};
+
+        let build = |center_x: f64| {
+            let mut store = TopologyStore::new();
+            let slab = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+                .with_op_id(OpId::new("slab1"))
+                .execute(&mut store)
+                .unwrap();
+            let tube = MakeNurbsTube::new(Point3::new(center_x, 3.0, -1.5), 0.7, 5.0)
+                .with_op_id(OpId::new("win1"))
+                .execute(&mut store)
+                .unwrap();
+            let result =
+                subtract_through_cut(&mut store, slab, tube, Some(&OpId::new("cut1"))).unwrap();
+            (store, result)
+        };
+
+        let slab_top = FaceName::Created {
+            op: OpId::new("slab1"),
+            role: FaceRole::Top,
+        };
+        let tool_side = FaceName::Created {
+            op: OpId::new("win1"),
+            role: FaceRole::Side(0),
+        };
+        let band = FaceName::Band {
+            op: OpId::new("cut1"),
+            tool_face: Box::new(tool_side.clone()),
+            loop_index: 0,
+        };
+        let rim_entry = EdgeName::CutRim {
+            op: OpId::new("cut1"),
+            target: Box::new(FaceName::Created {
+                op: OpId::new("slab1"),
+                role: FaceRole::Bottom,
+            }),
+            loop_index: 0,
+        };
+        let rim_exit = EdgeName::CutRim {
+            op: OpId::new("cut1"),
+            target: Box::new(slab_top.clone()),
+            loop_index: 1,
+        };
+
+        let (store_a, result_a) = build(3.0);
+        let (store_b, _) = build(3.0);
+
+        for name in [&slab_top, &band] {
+            let fa = store_a.names().face(name).expect("A resolves");
+            let fb = store_b.names().face(name).expect("B resolves");
+            let sample = |store: &TopologyStore, f| match &store.face(f).unwrap().surface {
+                FaceSurface::Nurbs(s) => s.point_at(0.31, 0.62).unwrap(),
+                FaceSurface::Plane(p) => *p.origin(),
+                _ => panic!("unexpected surface"),
+            };
+            assert!(
+                (sample(&store_a, fa) - sample(&store_b, fb)).norm() < 1e-9,
+                "{name:?} moved across rebuilds"
+            );
+        }
+        assert!(
+            store_a.names().edge(&rim_entry).is_some(),
+            "entry rim named"
+        );
+        assert!(store_a.names().edge(&rim_exit).is_some(), "exit rim named");
+
+        // The resolved slab top face belongs to the RESULT solid (name moved
+        // off the input): it carries the punched hole.
+        let top_face = store_a.names().face(&slab_top).unwrap();
+        let shell = store_a
+            .shell(store_a.solid(result_a).unwrap().outer_shell)
+            .unwrap();
+        assert!(shell.faces.contains(&top_face), "name resolves into result");
+        assert!(
+            !store_a.face(top_face).unwrap().inner_wires.is_empty(),
+            "punched top face carries the hole"
+        );
+    }
+
+    /// F4 acceptance 2 (parameter change): moving the window keeps the same
+    /// names resolving to the same ROLES (the punched top face still resolves,
+    /// with its hole at the new location).
+    #[test]
+    fn boolean_names_survive_parameter_changes() {
+        use crate::topology::{FaceName, FaceRole, OpId};
+
+        let build = |center_x: f64| {
+            let mut store = TopologyStore::new();
+            let slab = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+                .with_op_id(OpId::new("slab1"))
+                .execute(&mut store)
+                .unwrap();
+            let tube = MakeNurbsTube::new(Point3::new(center_x, 3.0, -1.5), 0.7, 5.0)
+                .with_op_id(OpId::new("win1"))
+                .execute(&mut store)
+                .unwrap();
+            subtract_through_cut(&mut store, slab, tube, Some(&OpId::new("cut1"))).unwrap();
+            store
+        };
+
+        let slab_top = FaceName::Created {
+            op: OpId::new("slab1"),
+            role: FaceRole::Top,
+        };
+        let band = FaceName::Band {
+            op: OpId::new("cut1"),
+            tool_face: Box::new(FaceName::Created {
+                op: OpId::new("win1"),
+                role: FaceRole::Side(0),
+            }),
+            loop_index: 0,
+        };
+
+        let moved = build(3.5);
+        let top = moved.names().face(&slab_top).expect("top still resolves");
+        assert!(
+            !moved.face(top).unwrap().inner_wires.is_empty(),
+            "moved window still punches the top face"
+        );
+        let band_face = moved.names().face(&band).expect("band still resolves");
+        // The band lies on the moved tool: its surface contains the new axis.
+        let FaceSurface::Nurbs(surf) = &moved.face(band_face).unwrap().surface else {
+            panic!("band must be NURBS");
+        };
+        let p = surf.point_at(0.0, 0.5).unwrap();
+        let r = ((p.x - 3.5).powi(2) + (p.y - 3.0).powi(2)).sqrt();
+        assert!((r - 0.7).abs() < 1e-6, "band follows the moved tool");
+    }
+
+    /// F4 acceptance 3 (topology change): shortening the tool turns the
+    /// through cut into a pocket — the band keeps resolving, the exit rim
+    /// stops resolving, and the floor appears.
+    #[test]
+    fn boolean_names_survive_through_to_pocket_transition() {
+        use crate::topology::{EdgeName, FaceName, FaceRole, OpId};
+
+        let mut store = TopologyStore::new();
+        let slab = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+            .with_op_id(OpId::new("slab1"))
+            .execute(&mut store)
+            .unwrap();
+        // Short tube: ends inside the slab (pocket).
+        let tube = MakeNurbsTube::new(Point3::new(3.0, 3.0, -3.0), 0.7, 3.5)
+            .with_op_id(OpId::new("win1"))
+            .execute(&mut store)
+            .unwrap();
+        subtract_through_cut(&mut store, slab, tube, Some(&OpId::new("cut1"))).unwrap();
+
+        let tool_side = FaceName::Created {
+            op: OpId::new("win1"),
+            role: FaceRole::Side(0),
+        };
+        let band = FaceName::Band {
+            op: OpId::new("cut1"),
+            tool_face: Box::new(tool_side),
+            loop_index: 0,
+        };
+        assert!(store.names().face(&band).is_some(), "pocket band resolves");
+
+        let floor = FaceName::Floor {
+            op: OpId::new("cut1"),
+            cap: Box::new(FaceName::Created {
+                op: OpId::new("win1"),
+                role: FaceRole::CapEnd,
+            }),
+        };
+        assert!(
+            store.names().face(&floor).is_some(),
+            "pocket floor resolves"
+        );
+
+        let rim_exit = EdgeName::CutRim {
+            op: OpId::new("cut1"),
+            target: Box::new(FaceName::Created {
+                op: OpId::new("slab1"),
+                role: FaceRole::Top,
+            }),
+            loop_index: 1,
+        };
+        assert!(
+            store.names().edge(&rim_exit).is_none(),
+            "the exit rim genuinely no longer exists"
+        );
+    }
+
+    /// F3a pocket subtract: a tube entering the slab from below and ending
+    /// INSIDE it cuts a blind pocket — entry hole on the back face, a band
+    /// down the tube wall, and the buried tool cap (sense-flipped) as the
+    /// pocket floor.
+    #[test]
+    fn half_buried_tube_cuts_a_pocket() {
+        use crate::topology::FaceSurface;
+
+        let mut store = TopologyStore::new();
+        // Slab: front z in [0, 1.5] (peak at center), back = front - 1.0.
+        let slab = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+            .execute(&mut store)
+            .unwrap();
+        // Tube from z = -3 up to z = 0.5: crosses the back face (z ≈ 0 at the
+        // tube footprint) once and ends inside the slab (front ≈ 0.98 there).
+        let tube = MakeNurbsTube::new(Point3::new(3.0, 3.0, -3.0), 0.7, 3.5)
+            .execute(&mut store)
+            .unwrap();
+
+        let result = subtract_through_cut(&mut store, slab, tube, None).unwrap();
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+
+        // Exactly one punched face (the entry face carries the hole).
+        let punched = shell
+            .faces
+            .iter()
+            .filter(|&&f| !store.face(f).unwrap().inner_wires.is_empty())
+            .count();
+        assert!(punched >= 2, "entry face + band expected, got {punched}");
+
+        // The pocket floor exists: a planar face at z ≈ 0.5 whose effective
+        // outward normal points DOWN into the cavity (sense-flipped tool cap).
+        let mut floor_found = false;
+        for &f in &shell.faces {
+            let face = store.face(f).unwrap();
+            if let FaceSurface::Plane(plane) = &face.surface {
+                let origin_z = plane.origin().z;
+                if (origin_z - 0.5).abs() < 1e-6 {
+                    let n = plane.plane_normal();
+                    let effective_z = if face.same_sense { n.z } else { -n.z };
+                    assert!(
+                        effective_z < 0.0,
+                        "pocket floor must face down into the cavity"
+                    );
+                    floor_found = true;
+                }
+            }
+        }
+        assert!(floor_found, "expected a planar pocket floor at z = 0.5");
+
+        // The result tessellates edge-manifold and stays inside the slab's
+        // z-range (the tube below the slab is discarded).
+        let mesh = TessellateSolid::new(result, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty());
+        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &mesh.indices {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for (&(a, b), &c) in &counts {
+            assert!(c == 1 || c == 2, "edge ({a},{b}) used {c} times");
+        }
+        let zmin = mesh
+            .vertices
+            .iter()
+            .map(|p| p.z)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            zmin > -1.0 - 1e-6,
+            "mesh reaches below the slab (zmin = {zmin}); the tube stub \
+             outside the target must be discarded"
+        );
+    }
+
+    /// The deferred F1 acceptance case: a revolved solid (closed wall, u/v seam
+    /// on the wall surface) cut by a HORIZONTAL tube. Both the entry and exit
+    /// holes land on the SAME closed wall face, and the tool's own periodic
+    /// direction wraps during SSI. The tube runs along +Y so its holes sit at
+    /// wall azimuths ±π/2, safely away from the wall's parametric seam at +X.
+    #[test]
+    fn revolved_solid_minus_horizontal_tube_is_manifold() {
+        use crate::geometry::nurbs::NurbsCurve3D;
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeNurbsPrism, MakeRevolvedSolid};
+
+        let mut store = TopologyStore::new();
+        // Vase-like profile: wall radius 2.0-2.6 over height 0-3.6.
+        let vase = MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.4, 1.2), (2.1, 2.4), (2.6, 3.6)])
+            .execute(&mut store)
+            .unwrap();
+        // Horizontal tube along +Y through both walls at mid-height.
+        let circle =
+            NurbsCurve3D::circle(Point3::new(0.0, -4.0, 1.8), 0.5, Vector3::y(), Vector3::x())
+                .unwrap();
+        let tube = MakeNurbsPrism::new(circle, Vector3::new(0.0, 8.0, 0.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let result = subtract_through_cut(&mut store, vase, tube, None).unwrap();
+
+        // Entry and exit holes both land on the single closed wall face: one
+        // result face carries exactly 2 hole inner wires (the band face carries
+        // 1 — its exit ring).
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        let two_hole_faces = shell
+            .faces
+            .iter()
+            .filter(|&&f| store.face(f).unwrap().inner_wires.len() == 2)
+            .count();
+        assert_eq!(
+            two_hole_faces, 1,
+            "exactly one face (the revolved wall) carries both holes"
+        );
+
+        // The whole result tessellates edge-manifold: every undirected edge is
+        // used by 1 or 2 triangles.
+        let mesh = TessellateSolid::new(result, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty(), "empty result mesh");
+        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &mesh.indices {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for (&(a, b), &c) in &counts {
+            assert!(c == 1 || c == 2, "edge ({a},{b}) used {c} times");
+        }
     }
 
     /// The slab − tube result's adjacent faces conform along every shared
@@ -355,14 +787,14 @@ mod tests {
     /// - plain curved slab (no hole): 384 boundary edges (all perimeter)
     /// - slab − tube, BEFORE the shared-sampling fix: 1788 boundary edges (384
     ///   perimeter + 1404 along the hole rings — the dense punch-vs-band mismatch).
-    /// - slab − tube, before the SEAM-FILL fix: 264 boundary edges, 4 of them in
+    /// - slab − tube, before seam conformance: 264 boundary edges, 4 of them in
     ///   the hole-ring region at the SSI seam azimuth (the punch chord vs. band
     ///   vertical-stitch disagreement at the tool's u-seam).
-    /// - slab − tube, AFTER the seam-fill fix: 0 hole-ring boundary edges. The
-    ///   seam wedge is filled with true intersection samples shared by both the
-    ///   punch ring (`uv_a`) and the band ribbon (`uv_b`, see
-    ///   `super::super::loops::fill_seam_gap`), so the two sides conform across
-    ///   the seam and the band ribbon spans the full tool u domain.
+    /// - slab − tube, WITH seam conformance: 0 hole-ring boundary edges. The
+    ///   SSI marcher wraps the tool's periodic u direction and emits exact seam
+    ///   samples shared by both the punch ring (`uv_a`) and the band ribbon
+    ///   (`uv_b`), so the two sides conform across the seam and the band ribbon
+    ///   spans the full tool u domain.
     ///
     /// Two assertions pin the result:
     /// 1. The cut result's total boundary-edge count is no worse than the plain
@@ -370,10 +802,13 @@ mod tests {
     ///    ~1404 hole-ring boundary edges are gone.
     /// 2. Direct hole-ring conformance: NO boundary-edge midpoint lies in the
     ///    tube-wall ring region (distance to the tube axis within [0.7·r, 1.3·r]
-    ///    while z is inside the slab). The seam gap is now filled, so even the
-    ///    former seam-azimuth residual is gone.
+    ///    while z is inside the slab). The marcher's exact seam samples close
+    ///    the seam, so even the former seam-azimuth residual is gone.
     #[test]
     fn hole_rings_tessellate_conformally() {
+        const RADIUS: f64 = 0.7;
+        const MARGIN: usize = 16;
+
         #[allow(clippy::cast_possible_truncation)]
         fn canon_id(canon: &mut HashMap<(i64, i64, i64), u32>, p: &Point3) -> u32 {
             const Q: f64 = 1e6;
@@ -415,47 +850,46 @@ mod tests {
                 .collect()
         }
 
-        // Plain slab already exhibits per-face perimeter boundary edges with no
-        // boolean applied — the generic independent-per-face limitation.
+        // Since shared-edge topology (F2), the plain slab position-welds fully
+        // watertight: per-face perimeters conform exactly, so position-dedup
+        // leaves ZERO boundary edges.
         let mut plain_store = TopologyStore::new();
         let plain = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
             .execute(&mut plain_store)
             .unwrap();
         let plain_boundary = boundary_edges(&plain_store, plain).len();
-        assert!(
-            plain_boundary > 0,
-            "expected the plain slab to already exhibit per-face perimeter \
-             boundary edges (the pre-existing tessellation limitation)"
+        assert_eq!(
+            plain_boundary, 0,
+            "plain slab must position-weld watertight (found {plain_boundary} \
+             boundary edges)"
         );
 
-        const RADIUS: f64 = 0.7;
         let (store, result) = slab_minus_tube(RADIUS);
         let cut_edges = boundary_edges(&store, result);
         let cut_boundary = cut_edges.len();
 
-        // (1) The cut result carries no MORE boundary edges than the plain
-        // slab's own perimeter nonconformance (plus a small margin). The prior
-        // ~1404 hole-ring T-junctions are eliminated.
-        const MARGIN: usize = 16;
+        // (1) The cut result carries no more boundary edges than a small
+        // margin above the (now zero) plain-slab baseline. The prior ~1404
+        // hole-ring T-junctions are eliminated.
         assert!(
             cut_boundary <= plain_boundary + MARGIN,
             "cut result has {cut_boundary} boundary edges, expected \
-             <= {plain_boundary} (plain perimeter) + {MARGIN}; hole-ring \
+             <= {plain_boundary} (plain baseline) + {MARGIN}; hole-ring \
              T-junctions appear to have returned"
         );
 
         // (2) Direct hole-ring conformance: NO boundary-edge midpoint lies in
         // the tube-wall ring region. The tube axis runs along (3,3,z); a ring
         // boundary edge would sit at radius ~RADIUS from that axis, inside the
-        // slab body in z. The seam wedge is now filled with shared intersection
-        // samples (see `fill_seam_gap`), so even the former seam-azimuth residual
-        // (up to 4 edges) is gone.
+        // slab body in z. The marcher's exact seam samples are shared by punch
+        // and band, so even the former seam-azimuth residual (up to 4 edges)
+        // is gone.
         let axis = Point3::new(3.0, 3.0, 0.0);
         let mut ring_edges = 0usize;
         for (p, q) in &cut_edges {
             let m = Point3::new((p.x + q.x) * 0.5, (p.y + q.y) * 0.5, (p.z + q.z) * 0.5);
             let dxy = ((m.x - axis.x).powi(2) + (m.y - axis.y).powi(2)).sqrt();
-            let in_ring_radius = dxy >= 0.7 * RADIUS && dxy <= 1.3 * RADIUS;
+            let in_ring_radius = (0.7 * RADIUS..=1.3 * RADIUS).contains(&dxy);
             let in_slab_z = m.z > -1.2 && m.z < 1.7;
             if in_ring_radius && in_slab_z {
                 ring_edges += 1;
@@ -463,7 +897,7 @@ mod tests {
         }
         assert_eq!(
             ring_edges, 0,
-            "expected 0 hole-ring boundary edges after the seam-fill fix, \
+            "expected 0 hole-ring boundary edges with marcher seam conformance, \
              found {ring_edges}; the punch/band rings are not conforming along \
              the tube wall"
         );
@@ -555,7 +989,7 @@ mod tests {
         let slab_shell = store.shell(store.solid(slab).unwrap().outer_shell).unwrap();
         let original_faces: Vec<_> = slab_shell.faces.clone();
 
-        let _ = subtract_through_cut(&mut store, slab, tube).unwrap();
+        let _ = subtract_through_cut(&mut store, slab, tube, None).unwrap();
 
         for f in original_faces {
             assert!(

@@ -5,38 +5,50 @@
 //! curved input to operate on. They are deliberately minimal.
 
 use crate::error::{OperationError, Result};
-use crate::geometry::nurbs::{NurbsCurve3D, NurbsSurface};
+use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::geometry::surface::Surface;
-use crate::math::{Point3, Vector3, TOLERANCE};
-use crate::topology::{FaceId, ShellData, SolidData, SolidId, TopologyStore};
+use crate::math::{Point2, Point3, Vector3, TOLERANCE};
+use crate::topology::{
+    EdgeCurve, EdgeData, EdgeId, EdgeName, EdgeRole, FaceId, FaceName, FacePcurve, FaceRole,
+    FaceSurface, OpId, OrientedEdge, ShellData, SolidData, SolidId, TopologyStore, VertexData,
+    WireData,
+};
 
-use super::{MakeFace, MakeNurbsFace, MakeWire};
+use super::{MakeFace, MakeNurbsFace};
 
 /// A NURBS prism: a closed planar profile extruded along `direction`, capped by
-/// two planar polygonal faces sampled from the profile.
+/// two exact planar disks on the profile's boundary curves.
 ///
 /// The side is a single `NurbsSurface` (`NurbsSurface::extrude` of the profile)
 /// whose `u` parameter runs around the profile (closed for a closed profile) and
 /// whose `v` parameter runs along `direction` — exactly the band UV topology the
-/// through-cut boolean expects. The bottom cap sits at the profile and the top
-/// cap at the profile translated by `direction`; each cap is oriented so its
-/// outward normal points away from the prism body.
-///
-/// The profile must be closed and planar; the caps are planar polygons sampled
-/// from it.
+/// through-cut boolean expects. The bottom and top ring curves are **shared
+/// edges**: the side face's wire and each cap's wire reference the same
+/// [`EdgeId`], so the solid tessellates boundary-conformally by construction
+/// (both faces consume the same per-edge samples).
 pub struct MakeNurbsPrism {
     profile: NurbsCurve3D,
     direction: Vector3,
+    op_id: Option<OpId>,
 }
 
 impl MakeNurbsPrism {
-    /// Number of profile samples per cap polygon.
-    const CAP_SEGMENTS: usize = 64;
-
     /// Creates a prism extruding `profile` along `direction`.
     #[must_use]
     pub fn new(profile: NurbsCurve3D, direction: Vector3) -> Self {
-        Self { profile, direction }
+        Self {
+            profile,
+            direction,
+            op_id: None,
+        }
+    }
+
+    /// Registers persistent names for the prism's faces and ring edges under
+    /// the caller-supplied operation identity.
+    #[must_use]
+    pub fn with_op_id(mut self, op: OpId) -> Self {
+        self.op_id = Some(op);
+        self
     }
 
     /// Builds the prism solid in the store.
@@ -56,34 +68,117 @@ impl MakeNurbsPrism {
         }
 
         let side_surface = NurbsSurface::extrude(&self.profile, self.direction)?;
-        let side = MakeNurbsFace::new(side_surface).execute(store)?;
+        let ((u0, u1), (v0, v1)) = side_surface.parameter_domain();
 
-        // Sample the profile once; the bottom cap uses these points, the top cap
-        // the same points translated by `direction`.
-        let base = self.sample_profile()?;
-        let newell = newell_normal(&base);
-        let along = newell.dot(&self.direction);
+        // Shared ring edges: the side surface's exact v-boundary isocurves (the
+        // bottom one IS the profile, with identical knots), each a closed edge
+        // with a single shared vertex.
+        let bottom_edge = closed_ring_edge(store, side_surface.isocurve_v(v0)?)?;
+        let top_edge = closed_ring_edge(store, side_surface.isocurve_v(v1)?)?;
 
-        // Bottom cap: outward normal opposes `direction`. Top cap: along it.
-        let bottom = cap_face(store, &base, along > 0.0)?;
-        let top_pts: Vec<Point3> = base.iter().map(|p| p + self.direction).collect();
-        let top = cap_face(store, &top_pts, along < 0.0)?;
+        // Side face: one wire referencing both rings; the pcurves map the ring
+        // parameter straight onto the u axis at the fixed v (same-parameter by
+        // construction: extrude preserves the profile knots in u).
+        let side_wire = store.add_wire(WireData {
+            edges: vec![
+                OrientedEdge::new(bottom_edge, true),
+                OrientedEdge::new(top_edge, false),
+            ],
+            is_closed: true,
+        });
+        let pcurves = vec![
+            FacePcurve {
+                edge: bottom_edge,
+                curve: iso_pcurve_u(u0, u1, v0)?,
+            },
+            FacePcurve {
+                edge: top_edge,
+                curve: iso_pcurve_u(u0, u1, v1)?,
+            },
+        ];
+        let side = MakeNurbsFace::new(side_surface)
+            .with_boundary(side_wire, pcurves)
+            .execute(store)?;
+
+        // Caps: planar faces whose outer wire is the SAME ring edge. Bottom
+        // outward normal opposes `direction`; top points along it.
+        let bottom = cap_from_ring(store, bottom_edge, -self.direction)?;
+        let top = cap_from_ring(store, top_edge, self.direction)?;
+
+        if let Some(op) = &self.op_id {
+            bind_created_face(store, side, op, FaceRole::Side(0));
+            bind_created_face(store, bottom, op, FaceRole::CapStart);
+            bind_created_face(store, top, op, FaceRole::CapEnd);
+            bind_created_edge(store, bottom_edge, op, EdgeRole::RingStart);
+            bind_created_edge(store, top_edge, op, EdgeRole::RingEnd);
+        }
 
         Ok(finish_solid(store, vec![side, bottom, top]))
     }
+}
 
-    /// Samples the profile into `CAP_SEGMENTS` distinct points (excludes the
-    /// closing duplicate at the domain end).
-    fn sample_profile(&self) -> Result<Vec<Point3>> {
-        let (t0, t1) = self.profile.parameter_domain();
-        let mut pts = Vec::with_capacity(Self::CAP_SEGMENTS);
-        for i in 0..Self::CAP_SEGMENTS {
-            #[allow(clippy::cast_precision_loss)]
-            let frac = i as f64 / Self::CAP_SEGMENTS as f64;
-            pts.push(self.profile.point_at(t0 + (t1 - t0) * frac)?);
-        }
-        Ok(pts)
+/// Registers a creation-op face name.
+fn bind_created_face(store: &mut TopologyStore, face: FaceId, op: &OpId, role: FaceRole) {
+    store.names_mut().bind_face(
+        face,
+        FaceName::Created {
+            op: op.clone(),
+            role,
+        },
+    );
+}
+
+/// Registers a creation-op edge name.
+fn bind_created_edge(store: &mut TopologyStore, edge: EdgeId, op: &OpId, role: EdgeRole) {
+    store.names_mut().bind_edge(
+        edge,
+        EdgeName::Created {
+            op: op.clone(),
+            role,
+        },
+    );
+}
+
+/// Adds a closed ring edge (start == end vertex) for `curve`.
+fn closed_ring_edge(store: &mut TopologyStore, curve: NurbsCurve3D) -> Result<EdgeId> {
+    let (t0, t1) = curve.parameter_domain();
+    let start = curve.point_at(t0)?;
+    let vertex = store.add_vertex(VertexData { point: start });
+    Ok(store.add_edge(EdgeData {
+        start: vertex,
+        end: vertex,
+        curve: EdgeCurve::Nurbs(curve),
+        t_start: t0,
+        t_end: t1,
+    }))
+}
+
+/// Degree-1 pcurve mapping a ring edge's parameter onto the `u` axis at a
+/// fixed `v` (`t → (t, v)` over `[u0, u1]`).
+fn iso_pcurve_u(u0: f64, u1: f64, v: f64) -> Result<NurbsCurve2D> {
+    NurbsCurve2D::from_unweighted(
+        vec![Point2::new(u0, v), Point2::new(u1, v)],
+        KnotVector::new(vec![u0, u0, u1, u1])?,
+        1,
+    )
+}
+
+/// Planar cap face on a shared ring edge, oriented so its stored normal points
+/// along `outward`.
+fn cap_from_ring(store: &mut TopologyStore, ring: EdgeId, outward: Vector3) -> Result<FaceId> {
+    let wire = store.add_wire(WireData {
+        edges: vec![OrientedEdge::new(ring, true)],
+        is_closed: true,
+    });
+    let face = MakeFace::new(wire, vec![]).execute(store)?;
+    let flip = match &store.face(face)?.surface {
+        FaceSurface::Plane(plane) => plane.plane_normal().dot(&outward) < 0.0,
+        _ => false,
+    };
+    if flip {
+        store.face_mut(face)?.same_sense = false;
     }
+    Ok(face)
 }
 
 /// A vertical NURBS tube: a circular profile extruded along `+Z`, capped by two
@@ -92,6 +187,7 @@ pub struct MakeNurbsTube {
     center: Point3,
     radius: f64,
     height: f64,
+    op_id: Option<OpId>,
 }
 
 impl MakeNurbsTube {
@@ -103,7 +199,16 @@ impl MakeNurbsTube {
             center,
             radius,
             height,
+            op_id: None,
         }
+    }
+
+    /// Registers persistent names under the caller-supplied operation
+    /// identity (delegated to the underlying prism).
+    #[must_use]
+    pub fn with_op_id(mut self, op: OpId) -> Self {
+        self.op_id = Some(op);
+        self
     }
 
     /// Builds the tube solid in the store.
@@ -121,35 +226,12 @@ impl MakeNurbsTube {
         }
         let profile = NurbsCurve3D::circle(self.center, self.radius, Vector3::z(), Vector3::x())?;
         let axis = Vector3::new(0.0, 0.0, self.height);
-        MakeNurbsPrism::new(profile, axis).execute(store)
+        let mut prism = MakeNurbsPrism::new(profile, axis);
+        if let Some(op) = &self.op_id {
+            prism = prism.with_op_id(op.clone());
+        }
+        prism.execute(store)
     }
-}
-
-/// Builds a planar polygonal cap face from an ordered ring of coplanar points.
-/// When `reverse` is set the point order is flipped so the face's right-hand
-/// normal points away from the prism body.
-fn cap_face(store: &mut TopologyStore, points: &[Point3], reverse: bool) -> Result<FaceId> {
-    let mut pts = points.to_vec();
-    if reverse {
-        pts.reverse();
-    }
-    let wire = MakeWire::new(pts, true).execute(store)?;
-    MakeFace::new(wire, vec![]).execute(store)
-}
-
-/// Newell's method normal of a (possibly non-convex) planar polygon. The
-/// magnitude is twice the polygon area; only its direction is used.
-fn newell_normal(pts: &[Point3]) -> Vector3 {
-    let mut n = Vector3::zeros();
-    let m = pts.len();
-    for i in 0..m {
-        let a = pts[i];
-        let b = pts[(i + 1) % m];
-        n.x += (a.y - b.y) * (a.z + b.z);
-        n.y += (a.z - b.z) * (a.x + b.x);
-        n.z += (a.x - b.x) * (a.y + b.y);
-    }
-    n
 }
 
 /// A curved (plan-arc) wall: a vertical prism whose plan footprint is a circular
@@ -171,6 +253,7 @@ pub struct MakeCurvedWall {
     end_angle: f64,
     height: f64,
     thickness: f64,
+    op_id: Option<OpId>,
 }
 
 impl MakeCurvedWall {
@@ -191,7 +274,17 @@ impl MakeCurvedWall {
             end_angle,
             height,
             thickness,
+            op_id: None,
         }
+    }
+
+    /// Registers persistent names for the wall's six faces under the
+    /// caller-supplied operation identity (0 = inner, 1 = outer, 2 = start
+    /// end, 3 = end end, plus Top / Bottom).
+    #[must_use]
+    pub fn with_op_id(mut self, op: OpId) -> Self {
+        self.op_id = Some(op);
+        self
     }
 
     /// Builds the curved wall solid in the store.
@@ -263,6 +356,20 @@ impl MakeCurvedWall {
             faces.push(make_outward_face(store, surf, &centroid)?);
         }
 
+        if let Some(op) = &self.op_id {
+            let roles = [
+                FaceRole::Side(0),
+                FaceRole::Side(1),
+                FaceRole::Bottom,
+                FaceRole::Top,
+                FaceRole::Side(2),
+                FaceRole::Side(3),
+            ];
+            for (&face, role) in faces.iter().zip(roles) {
+                bind_created_face(store, face, op, role);
+            }
+        }
+
         Ok(finish_solid(store, faces))
     }
 }
@@ -330,6 +437,7 @@ fn ruled_surface(a: &NurbsCurve3D, b: &NurbsCurve3D) -> Result<NurbsSurface> {
 /// The slab spans `[0, size] x [0, size]` in XY; the front patch sits at
 /// `z = base_z + bulge * shape(u,v)` and the back patch `thickness` below it.
 pub struct MakeCurvedSlab {
+    op_id: Option<OpId>,
     size: f64,
     base_z: f64,
     bulge: f64,
@@ -342,11 +450,21 @@ impl MakeCurvedSlab {
     #[must_use]
     pub fn new(size: f64, base_z: f64, bulge: f64, thickness: f64) -> Self {
         Self {
+            op_id: None,
             size,
             base_z,
             bulge,
             thickness,
         }
+    }
+
+    /// Registers persistent names for the slab's six faces under the
+    /// caller-supplied operation identity (Top = front, Bottom = back,
+    /// Side(0..=3) = the ruled side walls in build order).
+    #[must_use]
+    pub fn with_op_id(mut self, op: OpId) -> Self {
+        self.op_id = Some(op);
+        self
     }
 
     /// Builds the slab solid in the store.
@@ -378,6 +496,16 @@ impl MakeCurvedSlab {
 
         let mut faces = vec![front, back];
         faces.extend(sides);
+
+        if let Some(op) = &self.op_id {
+            bind_created_face(store, faces[0], op, FaceRole::Top);
+            bind_created_face(store, faces[1], op, FaceRole::Bottom);
+            for (k, &side) in faces[2..].iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation)]
+                bind_created_face(store, side, op, FaceRole::Side(k as u8));
+            }
+        }
+
         Ok(finish_solid(store, faces))
     }
 
@@ -463,13 +591,25 @@ fn side_normal_points_outward(side: &NurbsSurface, center: &Point3) -> Result<bo
 /// first and last profile heights.
 pub struct MakeRevolvedSolid {
     profile: Vec<(f64, f64)>,
+    op_id: Option<OpId>,
 }
 
 impl MakeRevolvedSolid {
     /// Creates a revolved solid from `(radius, z)` profile samples (at least 2).
     #[must_use]
     pub fn new(profile: Vec<(f64, f64)>) -> Self {
-        Self { profile }
+        Self {
+            profile,
+            op_id: None,
+        }
+    }
+
+    /// Registers persistent names (Wall, CapStart / CapEnd, ring edges)
+    /// under the caller-supplied operation identity.
+    #[must_use]
+    pub fn with_op_id(mut self, op: OpId) -> Self {
+        self.op_id = Some(op);
+        self
     }
 
     /// Builds the revolved solid in the store.
@@ -505,39 +645,59 @@ impl MakeRevolvedSolid {
             Vector3::z(),
             std::f64::consts::TAU,
         )?;
-        let wall = MakeNurbsFace::new(wall_surface).execute(store)?;
+        let ((u0, u1), (v0, v1)) = wall_surface.parameter_domain();
 
-        let (r0, z0) = self.profile[0];
-        let (r1, z1) = self.profile[self.profile.len() - 1];
-        let bottom = disk_face(store, Point3::new(0.0, 0.0, z0), r0, false)?;
-        let top = disk_face(store, Point3::new(0.0, 0.0, z1), r1, true)?;
+        // Shared ring edges: the wall's exact u-boundary isocurves (rational
+        // circles at the first / last profile heights; the revolve puts the
+        // profile in u and the azimuth in v).
+        let bottom_edge = closed_ring_edge(store, wall_surface.isocurve_u(u0)?)?;
+        let top_edge = closed_ring_edge(store, wall_surface.isocurve_u(u1)?)?;
+
+        let wall_wire = store.add_wire(WireData {
+            edges: vec![
+                OrientedEdge::new(bottom_edge, true),
+                OrientedEdge::new(top_edge, false),
+            ],
+            is_closed: true,
+        });
+        let pcurves = vec![
+            FacePcurve {
+                edge: bottom_edge,
+                curve: iso_pcurve_v(v0, v1, u0)?,
+            },
+            FacePcurve {
+                edge: top_edge,
+                curve: iso_pcurve_v(v0, v1, u1)?,
+            },
+        ];
+        let wall = MakeNurbsFace::new(wall_surface)
+            .with_boundary(wall_wire, pcurves)
+            .execute(store)?;
+
+        // Caps: exact disks on the SAME ring edges, normals away from the body.
+        let bottom = cap_from_ring(store, bottom_edge, -Vector3::z())?;
+        let top = cap_from_ring(store, top_edge, Vector3::z())?;
+
+        if let Some(op) = &self.op_id {
+            bind_created_face(store, wall, op, FaceRole::Wall);
+            bind_created_face(store, bottom, op, FaceRole::CapStart);
+            bind_created_face(store, top, op, FaceRole::CapEnd);
+            bind_created_edge(store, bottom_edge, op, EdgeRole::RingStart);
+            bind_created_edge(store, top_edge, op, EdgeRole::RingEnd);
+        }
 
         Ok(finish_solid(store, vec![wall, bottom, top]))
     }
 }
 
-/// Builds a planar polygonal disk face centered at `center` with `radius`.
-/// `upward` orients the disk so its normal points away from the body.
-fn disk_face(
-    store: &mut TopologyStore,
-    center: Point3,
-    radius: f64,
-    upward: bool,
-) -> Result<FaceId> {
-    const SEGMENTS: usize = 48;
-    let mut pts = Vec::with_capacity(SEGMENTS);
-    for i in 0..SEGMENTS {
-        #[allow(clippy::cast_precision_loss)]
-        let angle = std::f64::consts::TAU * (i as f64) / (SEGMENTS as f64);
-        let a = if upward { angle } else { -angle };
-        pts.push(Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
-            center.z,
-        ));
-    }
-    let wire = MakeWire::new(pts, true).execute(store)?;
-    MakeFace::new(wire, vec![]).execute(store)
+/// Degree-1 pcurve mapping a ring edge's parameter onto the `v` axis at a
+/// fixed `u` (`t → (u, t)` over `[v0, v1]`).
+fn iso_pcurve_v(v0: f64, v1: f64, u: f64) -> Result<NurbsCurve2D> {
+    NurbsCurve2D::from_unweighted(
+        vec![Point2::new(u, v0), Point2::new(u, v1)],
+        KnotVector::new(vec![v0, v0, v1, v1])?,
+        1,
+    )
 }
 
 /// Wraps a face list into a closed shell + solid.
@@ -576,6 +736,142 @@ mod tests {
         }
         for (&(a, b), &c) in &counts {
             assert!(c == 1 || c == 2, "edge ({a},{b}) used {c} times");
+        }
+    }
+
+    /// F4a determinism: rebuilding the same op with the same op id into a
+    /// fresh store resolves every persistent name, and the resolved faces
+    /// carry identical geometry.
+    #[test]
+    fn creation_names_are_rebuild_stable() {
+        use crate::topology::{EdgeName, EdgeRole, FaceName, FaceRole, OpId};
+
+        let build = || {
+            let mut store = TopologyStore::new();
+            let solid = MakeNurbsTube::new(Point3::new(2.0, 2.0, -1.0), 0.8, 4.0)
+                .with_op_id(OpId::new("tube1"))
+                .execute(&mut store)
+                .unwrap();
+            (store, solid)
+        };
+        let (store_a, _) = build();
+        let (store_b, _) = build();
+
+        let side = FaceName::Created {
+            op: OpId::new("tube1"),
+            role: FaceRole::Side(0),
+        };
+        let cap_end = FaceName::Created {
+            op: OpId::new("tube1"),
+            role: FaceRole::CapEnd,
+        };
+        let ring_start = EdgeName::Created {
+            op: OpId::new("tube1"),
+            role: EdgeRole::RingStart,
+        };
+
+        for name in [&side, &cap_end] {
+            let fa = store_a.names().face(name).expect("resolves in build A");
+            let fb = store_b.names().face(name).expect("resolves in build B");
+            // Same geometry across rebuilds: compare a surface sample.
+            let sample = |store: &TopologyStore, f| match &store.face(f).unwrap().surface {
+                FaceSurface::Nurbs(s) => s.point_at(0.3, 0.6).unwrap(),
+                FaceSurface::Plane(p) => *p.origin(),
+                _ => panic!("unexpected surface"),
+            };
+            let pa = sample(&store_a, fa);
+            let pb = sample(&store_b, fb);
+            assert!(
+                (pa - pb).norm() < 1e-12,
+                "rebuilt face for {name:?} moved: {pa:?} vs {pb:?}"
+            );
+        }
+        assert!(store_a.names().edge(&ring_start).is_some());
+        assert!(store_b.names().edge(&ring_start).is_some());
+
+        // Without an op id nothing is registered.
+        let mut store = TopologyStore::new();
+        MakeNurbsTube::new(Point3::new(2.0, 2.0, -1.0), 0.8, 4.0)
+            .execute(&mut store)
+            .unwrap();
+        assert!(store.names().face(&side).is_none());
+    }
+
+    /// F4a: the slab and wall builders name all six faces deterministically.
+    #[test]
+    fn slab_and_wall_faces_are_named() {
+        use crate::topology::{FaceName, FaceRole, OpId};
+
+        let mut store = TopologyStore::new();
+        MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+            .with_op_id(OpId::new("slab1"))
+            .execute(&mut store)
+            .unwrap();
+        for role in [
+            FaceRole::Top,
+            FaceRole::Bottom,
+            FaceRole::Side(0),
+            FaceRole::Side(1),
+            FaceRole::Side(2),
+            FaceRole::Side(3),
+        ] {
+            let name = FaceName::Created {
+                op: OpId::new("slab1"),
+                role,
+            };
+            assert!(
+                store.names().face(&name).is_some(),
+                "slab face {role:?} must be named"
+            );
+        }
+
+        let mut store = TopologyStore::new();
+        MakeCurvedWall::new(Point3::origin(), 5.0, 0.2, 1.4, 3.0, 0.4)
+            .with_op_id(OpId::new("wall1"))
+            .execute(&mut store)
+            .unwrap();
+        for role in [
+            FaceRole::Side(0),
+            FaceRole::Side(1),
+            FaceRole::Bottom,
+            FaceRole::Top,
+            FaceRole::Side(2),
+            FaceRole::Side(3),
+        ] {
+            let name = FaceName::Created {
+                op: OpId::new("wall1"),
+                role,
+            };
+            assert!(
+                store.names().face(&name).is_some(),
+                "wall face {role:?} must be named"
+            );
+        }
+    }
+
+    /// F4a: the revolved solid names its wall, caps, and ring edges.
+    #[test]
+    fn revolved_solid_faces_are_named() {
+        use crate::topology::{EdgeName, EdgeRole, FaceName, FaceRole, OpId};
+
+        let mut store = TopologyStore::new();
+        MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.4, 1.2), (2.1, 2.4)])
+            .with_op_id(OpId::new("vase1"))
+            .execute(&mut store)
+            .unwrap();
+        for role in [FaceRole::Wall, FaceRole::CapStart, FaceRole::CapEnd] {
+            let name = FaceName::Created {
+                op: OpId::new("vase1"),
+                role,
+            };
+            assert!(store.names().face(&name).is_some(), "{role:?} named");
+        }
+        for role in [EdgeRole::RingStart, EdgeRole::RingEnd] {
+            let name = EdgeName::Created {
+                op: OpId::new("vase1"),
+                role,
+            };
+            assert!(store.names().edge(&name).is_some(), "{role:?} named");
         }
     }
 

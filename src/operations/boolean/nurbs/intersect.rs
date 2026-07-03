@@ -8,8 +8,8 @@
 //! plug's side wall (`same_sense = true`, normals pointing outward from the
 //! plug rather than into a hole).
 //!
-//! The loops / seam-fill / band machinery is shared verbatim with subtract —
-//! only the trim polarity and the band orientation differ.
+//! The loops / band machinery is shared verbatim with subtract — only the trim
+//! polarity and the band orientation differ.
 //!
 //! ## v1 topology assumptions
 //!
@@ -32,7 +32,7 @@ use crate::topology::{FaceId, FaceSurface, FaceTrim, SolidId, TopologyStore, Wir
 
 use super::assemble::{assert_no_cap_intersection, copy_face, finish_solid, solid_faces};
 use super::band::{build_band_face_oriented, BandRingWires};
-use super::loops::{collect_nurbs_faces, extract_cut_loops, CutLoop};
+use super::loops::{collect_nurbs_faces, extract_cut_loops, CutLoop, ToolFaceCut};
 use super::punch::{build_ring_wire, ssi_trim_loop};
 
 /// Executes the keep-inside through-cut `target ∩ tool`.
@@ -47,6 +47,7 @@ pub(crate) fn intersect_through_cut(
     store: &mut TopologyStore,
     target: SolidId,
     tool: SolidId,
+    op_id: Option<&crate::topology::OpId>,
 ) -> Result<SolidId> {
     let target_faces = solid_faces(store, target)?;
     let tool_faces = solid_faces(store, tool)?;
@@ -69,7 +70,15 @@ pub(crate) fn intersect_through_cut(
     // intersect requires at most one loop per target face.
     let mut faces_with_loops: HashSet<FaceId> = HashSet::new();
     for cut in &cuts {
-        for l in &cut.loops {
+        let ToolFaceCut::Through { loops, .. } = cut else {
+            return Err(OperationError::Failed(
+                "keep-inside intersect requires through cuts (a pocket tool \
+                 ending inside the target is unsupported)"
+                    .into(),
+            )
+            .into());
+        };
+        for l in loops {
             if !faces_with_loops.insert(l.target_face) {
                 return Err(OperationError::Failed(
                     "keep-inside intersect requires at most one loop per target \
@@ -89,6 +98,8 @@ pub(crate) fn intersect_through_cut(
     for &fid in &target_faces {
         if faces_with_loops.contains(&fid) {
             let copy = copy_face(store, fid)?;
+            // Persistent names carry over to the kept (trimmed) copies.
+            store.names_mut().transfer_face(fid, copy);
             id_map.insert(fid, copy);
             result_faces.push(copy);
         }
@@ -98,10 +109,31 @@ pub(crate) fn intersect_through_cut(
     // (plug wall) sharing the exact ring wires. `same_sense = true` orients the
     // band outward from the kept plug (opposite the subtract hole wall).
     for cut in &cuts {
-        let entry = punch_inside_onto_copy(store, &cut.loops[0], &id_map)?;
-        let exit = punch_inside_onto_copy(store, &cut.loops[1], &id_map)?;
-        let band = build_band_face_oriented(store, cut, BandRingWires { entry, exit }, true)?;
+        let ToolFaceCut::Through { tool_face, loops } = cut else {
+            continue; // Pocket cuts were rejected above.
+        };
+        let entry = punch_inside_onto_copy(store, &loops[0], &id_map)?;
+        let exit = punch_inside_onto_copy(store, &loops[1], &id_map)?;
+        let band = build_band_face_oriented(
+            store,
+            *tool_face,
+            loops,
+            BandRingWires { entry, exit },
+            true,
+        )?;
         result_faces.push(band);
+        if let Some(op) = op_id {
+            if let Some(tool_name) = store.names().name_of_face(*tool_face).cloned() {
+                store.names_mut().bind_face(
+                    band,
+                    crate::topology::FaceName::Band {
+                        op: op.clone(),
+                        tool_face: Box::new(tool_name),
+                        loop_index: 0,
+                    },
+                );
+            }
+        }
     }
 
     Ok(finish_solid(store, result_faces))
@@ -160,7 +192,7 @@ mod tests {
         let tube = MakeNurbsTube::new(Point3::new(3.0, 3.0, -1.5), radius, 5.0)
             .execute(&mut store)
             .unwrap();
-        let plug = intersect_through_cut(&mut store, slab, tube).unwrap();
+        let plug = intersect_through_cut(&mut store, slab, tube, None).unwrap();
         (store, plug)
     }
 
@@ -387,7 +419,7 @@ mod tests {
             .unwrap()
             .faces
             .clone();
-        let _ = intersect_through_cut(&mut store, slab, tube).unwrap();
+        let _ = intersect_through_cut(&mut store, slab, tube, None).unwrap();
         for f in slab_faces {
             let face = store.face(f).unwrap();
             assert!(face.trim.is_none(), "input slab face must stay untrimmed");

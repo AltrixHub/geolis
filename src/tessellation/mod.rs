@@ -1,3 +1,4 @@
+mod edge_samples;
 mod stroke_style;
 mod tessellate_curve;
 mod tessellate_face;
@@ -11,6 +12,7 @@ pub use stroke_style::{LineJoin, StrokeStyle};
 pub use tessellate_curve::TessellateCurve;
 pub use tessellate_face::TessellateFace;
 pub(crate) use tessellate_nurbs::nurbs_surface_is_open;
+pub(crate) use tessellate_nurbs::tessellate_nurbs_curve_params;
 pub use tessellate_nurbs::{
     tessellate_nurbs_curve, tessellate_nurbs_surface, CurveTessellationOptions,
     SurfaceTessellationOptions,
@@ -18,7 +20,9 @@ pub use tessellate_nurbs::{
 pub use tessellate_solid::TessellateSolid;
 pub use tessellate_stroke::TessellateStroke;
 pub use tessellate_trimmed::tessellate_trimmed_nurbs_face;
-pub(crate) use tessellate_trimmed::tessellate_untrimmed_conforming;
+pub(crate) use tessellate_trimmed::{
+    edge_driven_outer_uv, tessellate_untrimmed_conforming, tessellate_with_outer_uv,
+};
 
 #[cfg(test)]
 pub(crate) use tessellate_solid::max_adjacent_boundary_deviation;

@@ -23,6 +23,7 @@ pub(crate) mod assemble;
 pub(crate) mod band;
 pub(crate) mod intersect;
 pub(crate) mod loops;
+pub(crate) mod pocket;
 pub(crate) mod punch;
 
 use crate::error::{OperationError, Result};
@@ -41,10 +42,11 @@ pub(crate) fn try_boolean(
     solid_a: SolidId,
     solid_b: SolidId,
     op: BooleanOp,
+    op_id: Option<&crate::topology::OpId>,
 ) -> Result<SolidId> {
     match op {
-        BooleanOp::Subtract => assemble::subtract_through_cut(store, solid_a, solid_b),
-        BooleanOp::Intersect => intersect::intersect_through_cut(store, solid_a, solid_b),
+        BooleanOp::Subtract => assemble::subtract_through_cut(store, solid_a, solid_b, op_id),
+        BooleanOp::Intersect => intersect::intersect_through_cut(store, solid_a, solid_b, op_id),
         BooleanOp::Union => Err(OperationError::Failed(
             "union of NURBS-faced solids is not supported (through-cut subtract/intersect only)"
                 .into(),

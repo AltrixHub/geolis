@@ -276,6 +276,7 @@ fn build_mirrored_faces(
             inner_wires: new_inner_wires,
             same_sense: true,
             trim: None,
+            pcurves: Vec::new(),
         });
         new_faces.push(new_face_id);
     }
