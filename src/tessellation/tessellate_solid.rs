@@ -146,4 +146,34 @@ mod tests {
             "plain slab adjacent-boundary deviation {dev} exceeds 1e-6"
         );
     }
+
+    /// F2 target: the tube's planar caps and NURBS side wall share true ring
+    /// edges sampled once per edge, so the cap rim and the side boundary emit
+    /// identical vertices. Red until the prism builds shared ring edges.
+    #[test]
+    #[ignore = "F2: shared ring edges land in the prism creation task"]
+    fn tube_boundaries_conform() {
+        use crate::operations::creation::MakeNurbsTube;
+        let mut store = TopologyStore::new();
+        let solid = MakeNurbsTube::new(crate::math::Point3::new(0.0, 0.0, 0.0), 0.8, 3.0)
+            .execute(&mut store)
+            .unwrap();
+        let dev = max_adjacent_boundary_deviation(&store, solid);
+        assert!(dev < 1e-6, "tube cap/side deviation {dev} exceeds 1e-6");
+    }
+
+    /// F2 target: the revolved solid's disk caps reference the wall's true
+    /// boundary circles instead of independent 48-gons. Red until the revolved
+    /// creation task shares those edges.
+    #[test]
+    #[ignore = "F2: shared ring edges land in the revolved creation task"]
+    fn revolved_solid_boundaries_conform() {
+        use crate::operations::creation::MakeRevolvedSolid;
+        let mut store = TopologyStore::new();
+        let solid = MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.4, 1.2), (2.1, 2.4)])
+            .execute(&mut store)
+            .unwrap();
+        let dev = max_adjacent_boundary_deviation(&store, solid);
+        assert!(dev < 1e-6, "revolved cap/wall deviation {dev} exceeds 1e-6");
+    }
 }

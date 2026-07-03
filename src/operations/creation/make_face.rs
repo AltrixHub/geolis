@@ -66,6 +66,7 @@ impl MakeFace {
             inner_wires: self.inner_wires.clone(),
             same_sense: true,
             trim: None,
+            pcurves: Vec::new(),
         });
 
         Ok(face_id)

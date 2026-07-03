@@ -143,6 +143,9 @@ pub(crate) fn copy_face(store: &mut TopologyStore, face: FaceId) -> Result<FaceI
         inner_wires: src.inner_wires.clone(),
         same_sense: src.same_sense,
         trim: src.trim.clone(),
+        // The copy references the same shared boundary edges, so the per-edge
+        // UV images remain valid on the copy.
+        pcurves: src.pcurves.clone(),
     };
     Ok(store.add_face(data))
 }

@@ -66,6 +66,7 @@ impl MakeNurbsFace {
             inner_wires,
             same_sense: true,
             trim: self.trim.clone(),
+            pcurves: Vec::new(),
         });
         Ok(face_id)
     }

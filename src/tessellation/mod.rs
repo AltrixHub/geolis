@@ -1,3 +1,4 @@
+mod edge_samples;
 mod stroke_style;
 mod tessellate_curve;
 mod tessellate_face;
