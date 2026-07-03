@@ -14,6 +14,10 @@
 //! along +Y so its holes sit at wall azimuths safely away from the wall's
 //! parametric seam at +X (a seam-straddling hole is a typed error until
 //! general boolean face splitting).
+//!
+//! Variant 3 is the F3a pocket showcase: a tube entering the slab from below
+//! and ending inside it cuts a blind pocket (entry hole + band wall + the
+//! sense-flipped tool cap as the pocket floor).
 
 use geolis::geometry::nurbs::NurbsCurve3D;
 use geolis::math::{Point3, Vector3};
@@ -33,10 +37,45 @@ const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 const SLAB_COLOR: Color = Color::rgb(120, 190, 210);
 const VASE_COLOR: Color = Color::rgb(210, 160, 120);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
+const POCKET_COLOR: Color = Color::rgb(150, 200, 150);
 
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     register_slab_variant(storage, bounds);
     register_revolved_variant(storage, bounds);
+    register_pocket_variant(storage, bounds);
+}
+
+/// Variant 3: curved slab − buried tube (F3a pocket subtract). The tube enters
+/// from below and ends inside the slab, cutting a blind pocket: entry hole,
+/// band wall, and the sense-flipped tool cap as the pocket floor.
+fn register_pocket_variant(storage: &MeshStorage, bounds: &mut SceneBounds) {
+    const OFFSET_X: f64 = -12.0;
+    register_label(storage, OFFSET_X - 1.5, 8.0, "3", LABEL_SIZE, LABEL_COLOR);
+
+    let mut store = TopologyStore::new();
+
+    let Ok(slab) = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0).execute(&mut store) else {
+        return;
+    };
+    // Tube from below ending inside the slab (top z = 0.5; the front surface
+    // sits near z ≈ 1.0 over the tube's footprint).
+    let Ok(tube) = MakeNurbsTube::new(Point3::new(3.0, 3.0, -3.0), 0.8, 3.5).execute(&mut store)
+    else {
+        return;
+    };
+
+    let Ok(result) = Subtract::new(slab, tube).execute(&mut store) else {
+        return;
+    };
+
+    let Ok(mut mesh) = TessellateSolid::new(result, TessellationParams::default()).execute(&store)
+    else {
+        return;
+    };
+    for v in &mut mesh.vertices {
+        v.x += OFFSET_X;
+    }
+    register_face(storage, bounds, mesh, POCKET_COLOR);
 }
 
 /// Variant 1: curved slab − vertical tube.

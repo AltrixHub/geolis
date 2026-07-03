@@ -71,13 +71,23 @@ pub(crate) fn subtract_through_cut(
                     build_band_face(store, *tool_face, loops, BandRingWires { entry, exit })?;
                 result_faces.push(band);
             }
-            super::loops::ToolFaceCut::Pocket { .. } => {
-                return Err(OperationError::Failed(
-                    "pocket subtract (tool ending inside the target) is not \
-                     supported yet"
-                        .into(),
-                )
-                .into());
+            super::loops::ToolFaceCut::Pocket { tool_face, entry } => {
+                // Punch the entry hole, band down to the buried ring, and keep
+                // the buried tool cap (sense-flipped) as the pocket floor.
+                let buried = super::pocket::resolve_buried_end(store, entry, &tool_faces)?;
+                let entry_ring = punch_onto_copy(store, entry, &id_map)?;
+                let buried_uv =
+                    super::pocket::buried_ring_uv(store, buried.ring_wire, buried.v_boundary)?;
+                let band = super::band::build_pocket_band_face(
+                    store,
+                    *tool_face,
+                    entry,
+                    &buried_uv,
+                    entry_ring,
+                    buried.ring_wire,
+                )?;
+                result_faces.push(band);
+                result_faces.push(super::pocket::pocket_floor(store, buried.cap_face)?);
             }
         }
     }
@@ -202,6 +212,86 @@ mod tests {
             .unwrap();
         let result = subtract_through_cut(&mut store, slab, tube).unwrap();
         (store, result)
+    }
+
+    /// F3a pocket subtract: a tube entering the slab from below and ending
+    /// INSIDE it cuts a blind pocket — entry hole on the back face, a band
+    /// down the tube wall, and the buried tool cap (sense-flipped) as the
+    /// pocket floor.
+    #[test]
+    fn half_buried_tube_cuts_a_pocket() {
+        use crate::topology::FaceSurface;
+
+        let mut store = TopologyStore::new();
+        // Slab: front z in [0, 1.5] (peak at center), back = front - 1.0.
+        let slab = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
+            .execute(&mut store)
+            .unwrap();
+        // Tube from z = -3 up to z = 0.5: crosses the back face (z ≈ 0 at the
+        // tube footprint) once and ends inside the slab (front ≈ 0.98 there).
+        let tube = MakeNurbsTube::new(Point3::new(3.0, 3.0, -3.0), 0.7, 3.5)
+            .execute(&mut store)
+            .unwrap();
+
+        let result = subtract_through_cut(&mut store, slab, tube).unwrap();
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+
+        // Exactly one punched face (the entry face carries the hole).
+        let punched = shell
+            .faces
+            .iter()
+            .filter(|&&f| !store.face(f).unwrap().inner_wires.is_empty())
+            .count();
+        assert!(punched >= 2, "entry face + band expected, got {punched}");
+
+        // The pocket floor exists: a planar face at z ≈ 0.5 whose effective
+        // outward normal points DOWN into the cavity (sense-flipped tool cap).
+        let mut floor_found = false;
+        for &f in &shell.faces {
+            let face = store.face(f).unwrap();
+            if let FaceSurface::Plane(plane) = &face.surface {
+                let origin_z = plane.origin().z;
+                if (origin_z - 0.5).abs() < 1e-6 {
+                    let n = plane.plane_normal();
+                    let effective_z = if face.same_sense { n.z } else { -n.z };
+                    assert!(
+                        effective_z < 0.0,
+                        "pocket floor must face down into the cavity"
+                    );
+                    floor_found = true;
+                }
+            }
+        }
+        assert!(floor_found, "expected a planar pocket floor at z = 0.5");
+
+        // The result tessellates edge-manifold and stays inside the slab's
+        // z-range (the tube below the slab is discarded).
+        let mesh = TessellateSolid::new(result, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty());
+        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &mesh.indices {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for (&(a, b), &c) in &counts {
+            assert!(c == 1 || c == 2, "edge ({a},{b}) used {c} times");
+        }
+        let zmin = mesh
+            .vertices
+            .iter()
+            .map(|p| p.z)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            zmin > -1.0 - 1e-6,
+            "mesh reaches below the slab (zmin = {zmin}); the tube stub \
+             outside the target must be discarded"
+        );
     }
 
     /// The deferred F1 acceptance case: a revolved solid (closed wall, u/v seam

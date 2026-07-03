@@ -134,6 +134,52 @@ pub(crate) fn build_band_face_oriented(
     }))
 }
 
+/// Builds the pocket band face: the tool side strip from the entry loop down
+/// to the buried ring (`v = v_boundary` across the full `u` domain).
+///
+/// `entry_ring` is the punched entry hole's wire (shared with the entry
+/// face); `buried_ring` is the tool's own shared ring wire at the buried end
+/// (shared with the pocket floor). `buried_uv` carries the ring's UV samples
+/// at the cache-identical chord parameters (see
+/// [`super::pocket::buried_ring_uv`]).
+///
+/// # Errors
+///
+/// Returns an error if the tool face is not NURBS or the ribbon degenerates.
+pub(crate) fn build_pocket_band_face(
+    store: &mut TopologyStore,
+    tool_face: FaceId,
+    entry_loop: &CutLoop,
+    buried_uv: &[Point2],
+    entry_ring: WireId,
+    buried_ring: WireId,
+) -> Result<FaceId> {
+    let surface = match &store.face(tool_face)?.surface {
+        FaceSurface::Nurbs(s) => s.clone(),
+        _ => {
+            return Err(OperationError::Failed(
+                "pocket band requires a NURBS tool side face".into(),
+            )
+            .into())
+        }
+    };
+
+    let entry = clamp_trace(&entry_loop.branch.uv_b, &surface);
+    let outer = stitch_band_loop(&entry, buried_uv)?;
+    let trim = FaceTrim::new(outer, Vec::new());
+
+    // Pocket band normals point INTO the cavity (`same_sense = false`), like
+    // the through-cut hole wall.
+    Ok(store.add_face(FaceData {
+        surface: FaceSurface::Nurbs(surface),
+        outer_wire: entry_ring,
+        inner_wires: vec![buried_ring],
+        same_sense: false,
+        trim: Some(trim),
+        pcurves: Vec::new(),
+    }))
+}
+
 /// Clamps a UV trace into the surface's parameter domain (the SSI corrector may
 /// land a hair outside on the seam side) and deduplicates.
 fn clamp_trace(uv: &[Point2], surface: &NurbsSurface) -> Vec<Point2> {

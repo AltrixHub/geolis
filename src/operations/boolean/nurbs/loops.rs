@@ -124,7 +124,7 @@ fn group_per_tool_face(
             // when NO loops exist at all (tool disjoint from target, caught
             // below). If some other tool face cut the target but this one did
             // not, the tool is not passing cleanly through — unsupported.
-            0 => continue,
+            0 => {}
             1 => {
                 cuts.push(ToolFaceCut::Pocket {
                     tool_face: *tool_id,
