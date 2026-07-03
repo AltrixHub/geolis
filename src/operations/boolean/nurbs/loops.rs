@@ -32,12 +32,18 @@ pub(crate) struct CutLoop {
     pub branch: SurfaceIntersectionCurve,
 }
 
-/// All cut loops belonging to a single tool side face. The through-cut contract
-/// guarantees exactly two: the entry loop and the exit loop.
+/// The cut class of one tool side face.
 #[derive(Debug, Clone)]
-pub(crate) struct ToolFaceCut {
-    pub tool_face: FaceId,
-    pub loops: [CutLoop; 2],
+pub(crate) enum ToolFaceCut {
+    /// Entry + exit loops, sorted by mean tool-`v` — the tool passes fully
+    /// through the target.
+    Through {
+        tool_face: FaceId,
+        loops: [CutLoop; 2],
+    },
+    /// A single entry loop — the tool enters the target and ends inside it
+    /// (pocket / blind cut).
+    Pocket { tool_face: FaceId, entry: CutLoop },
 }
 
 /// Extracts and validates the through-cut loops for `target` minus `tool`.
@@ -98,7 +104,8 @@ pub(crate) fn extract_cut_loops(
     group_per_tool_face(&loops, tool_faces)
 }
 
-/// Groups loops per tool side face and validates the exactly-two contract.
+/// Groups loops per tool side face and classifies each face's cut: two loops
+/// form a through cut, a single loop a pocket. Three or more are unsupported.
 fn group_per_tool_face(
     loops: &[CutLoop],
     tool_faces: &[(FaceId, NurbsSurface)],
@@ -112,33 +119,41 @@ fn group_per_tool_face(
             .cloned()
             .collect();
 
-        if mine.is_empty() {
+        match mine.len() {
             // A tool side face that misses the target entirely is allowed only
-            // when NO loops exist at all (tool disjoint from target). If some
-            // other tool face cut the target but this one did not, the tool is
-            // not passing cleanly through — unsupported.
-            continue;
+            // when NO loops exist at all (tool disjoint from target, caught
+            // below). If some other tool face cut the target but this one did
+            // not, the tool is not passing cleanly through — unsupported.
+            0 => continue,
+            1 => {
+                cuts.push(ToolFaceCut::Pocket {
+                    tool_face: *tool_id,
+                    entry: mine[0].clone(),
+                });
+            }
+            2 => {
+                // Order the two loops by mean v on the tool surface so the band
+                // path can treat loops[0] as the lower (entry) and loops[1] as
+                // the upper (exit).
+                mine.sort_by(|a, b| {
+                    mean_v_b(&a.branch)
+                        .partial_cmp(&mean_v_b(&b.branch))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let [lo, hi] = [mine[0].clone(), mine[1].clone()];
+                cuts.push(ToolFaceCut::Through {
+                    tool_face: *tool_id,
+                    loops: [lo, hi],
+                });
+            }
+            n => {
+                return Err(OperationError::Failed(format!(
+                    "NURBS subtract supports 1 (pocket) or 2 (through) closed \
+                     loops per tool side face; tool face yielded {n}"
+                ))
+                .into());
+            }
         }
-        if mine.len() != 2 {
-            return Err(OperationError::Failed(format!(
-                "through-cut subtract requires exactly 2 closed loops per tool \
-                 side face (entry + exit); tool face yielded {}",
-                mine.len()
-            ))
-            .into());
-        }
-        // Order the two loops by mean v on the tool surface so the band path can
-        // treat loops[0] as the lower (entry) and loops[1] as the upper (exit).
-        mine.sort_by(|a, b| {
-            mean_v_b(&a.branch)
-                .partial_cmp(&mean_v_b(&b.branch))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let [lo, hi] = [mine[0].clone(), mine[1].clone()];
-        cuts.push(ToolFaceCut {
-            tool_face: *tool_id,
-            loops: [lo, hi],
-        });
     }
 
     if cuts.is_empty() {
@@ -252,14 +267,19 @@ mod tests {
         let cuts = extract_cut_loops(&target, &tool).unwrap();
         // The tube has one NURBS side face; it must yield exactly 2 loops.
         assert_eq!(cuts.len(), 1, "one tool side face");
-        let cut = &cuts[0];
+        let ToolFaceCut::Through {
+            loops: cut_loops, ..
+        } = &cuts[0]
+        else {
+            panic!("expected a through cut");
+        };
         // Both loops arrive genuinely closed from the marcher and carry exact
         // seam samples, so each `uv_b` trace spans the full tool u domain (it
         // reaches both the u0 and u1 boundaries across the seam).
         let tool_surf = &tool[0].1;
         let ((u0, u1), _) = tool_surf.parameter_domain();
         let u_span = u1 - u0;
-        for loop_ in &cut.loops {
+        for loop_ in cut_loops {
             let umin = loop_
                 .branch
                 .uv_b
@@ -281,7 +301,7 @@ mod tests {
         // Each loop lies on a target face; the two target faces differ
         // (front + back of the slab).
         assert_ne!(
-            cut.loops[0].target_face, cut.loops[1].target_face,
+            cut_loops[0].target_face, cut_loops[1].target_face,
             "entry and exit loops lie on different slab faces"
         );
     }
@@ -343,8 +363,11 @@ mod tests {
 
         let cuts = extract_cut_loops(&target, &tool).unwrap();
         assert_eq!(cuts.len(), 1, "one tilted tool side face");
+        let ToolFaceCut::Through { loops, .. } = &cuts[0] else {
+            panic!("expected a through cut");
+        };
         assert_ne!(
-            cuts[0].loops[0].target_face, cuts[0].loops[1].target_face,
+            loops[0].target_face, loops[1].target_face,
             "tilted entry/exit loops still land on different slab faces"
         );
     }

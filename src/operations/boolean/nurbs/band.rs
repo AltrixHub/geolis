@@ -47,7 +47,7 @@ use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsSurface};
 use crate::math::Point2;
 use crate::topology::{FaceData, FaceId, FaceSurface, FaceTrim, TopologyStore, TrimLoop, WireId};
 
-use super::loops::ToolFaceCut;
+use super::loops::CutLoop;
 
 /// The two hole-ring wires shared with the punched target faces for one tool
 /// side face: the entry ring (lower mean v) and the exit ring (upper mean v).
@@ -77,11 +77,12 @@ pub(crate) struct BandRingWires {
 /// polygon degenerates (fewer than 3 distinct UV points).
 pub(crate) fn build_band_face(
     store: &mut TopologyStore,
-    cut: &ToolFaceCut,
+    tool_face: FaceId,
+    loops: &[CutLoop; 2],
     rings: BandRingWires,
 ) -> Result<FaceId> {
     // Subtract: band normals point INTO the hole (`same_sense = false`).
-    build_band_face_oriented(store, cut, rings, false)
+    build_band_face_oriented(store, tool_face, loops, rings, false)
 }
 
 /// Builds the band (hole-wall / plug-wall) face for one tool side face with an
@@ -99,11 +100,12 @@ pub(crate) fn build_band_face(
 /// polygon degenerates (fewer than 3 distinct UV points).
 pub(crate) fn build_band_face_oriented(
     store: &mut TopologyStore,
-    cut: &ToolFaceCut,
+    tool_face: FaceId,
+    loops: &[CutLoop; 2],
     rings: BandRingWires,
     same_sense: bool,
 ) -> Result<FaceId> {
-    let surface = match &store.face(cut.tool_face)?.surface {
+    let surface = match &store.face(tool_face)?.surface {
         FaceSurface::Nurbs(s) => s.clone(),
         _ => {
             return Err(OperationError::Failed(
@@ -113,8 +115,8 @@ pub(crate) fn build_band_face_oriented(
         }
     };
 
-    let entry = clamp_trace(&cut.loops[0].branch.uv_b, &surface);
-    let exit = clamp_trace(&cut.loops[1].branch.uv_b, &surface);
+    let entry = clamp_trace(&loops[0].branch.uv_b, &surface);
+    let exit = clamp_trace(&loops[1].branch.uv_b, &surface);
 
     let outer = stitch_band_loop(&entry, &exit)?;
     let trim = FaceTrim::new(outer, Vec::new());
@@ -264,10 +266,15 @@ mod tests {
         let cuts = extract_cut_loops(&target, &tool).unwrap();
         let tool_surf = tool[0].1.clone();
         // Punch both loops (entry then exit) and share their ring wires.
-        let entry = punch_loop(&mut store, &cuts[0].loops[0]).unwrap();
-        let exit = punch_loop(&mut store, &cuts[0].loops[1]).unwrap();
+        let crate::operations::boolean::nurbs::loops::ToolFaceCut::Through { tool_face, loops } =
+            &cuts[0]
+        else {
+            panic!("expected a through cut");
+        };
+        let entry = punch_loop(&mut store, &loops[0]).unwrap();
+        let exit = punch_loop(&mut store, &loops[1]).unwrap();
         let rings = BandRingWires { entry, exit };
-        let band = build_band_face(&mut store, &cuts[0], rings).unwrap();
+        let band = build_band_face(&mut store, *tool_face, loops, rings).unwrap();
         (store, band, tool_surf, rings)
     }
 

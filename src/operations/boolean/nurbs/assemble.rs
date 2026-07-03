@@ -59,14 +59,27 @@ pub(crate) fn subtract_through_cut(
     }
 
     // Punch each loop onto the COPIED target face, then build the band face that
-    // shares those exact hole-ring wires. `cut.loops` is ordered [entry, exit]
-    // (loops.rs sorts by mean v), so the two punch results map directly to the
-    // band's entry/exit rings.
+    // shares those exact hole-ring wires. Through loops are ordered
+    // [entry, exit] (loops.rs sorts by mean v), so the two punch results map
+    // directly to the band's entry/exit rings.
     for cut in &cuts {
-        let entry = punch_onto_copy(store, &cut.loops[0], &id_map)?;
-        let exit = punch_onto_copy(store, &cut.loops[1], &id_map)?;
-        let band = build_band_face(store, cut, BandRingWires { entry, exit })?;
-        result_faces.push(band);
+        match cut {
+            super::loops::ToolFaceCut::Through { tool_face, loops } => {
+                let entry = punch_onto_copy(store, &loops[0], &id_map)?;
+                let exit = punch_onto_copy(store, &loops[1], &id_map)?;
+                let band =
+                    build_band_face(store, *tool_face, loops, BandRingWires { entry, exit })?;
+                result_faces.push(band);
+            }
+            super::loops::ToolFaceCut::Pocket { .. } => {
+                return Err(OperationError::Failed(
+                    "pocket subtract (tool ending inside the target) is not \
+                     supported yet"
+                        .into(),
+                )
+                .into());
+            }
+        }
     }
 
     Ok(finish_solid(store, result_faces))
