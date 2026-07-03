@@ -195,6 +195,185 @@ impl NameRegistry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Canonical string form (opaque to consumers; stable for graph storage).
+//
+// Grammar (all tokens ASCII; op ids are percent-escaped for `%(:)`):
+//   face := "created:" op ":" role
+//         | "band:" op ":" index ":(" face ")"
+//         | "floor:" op ":(" face ")"
+//   edge := "ring:" op ":" ("start" | "end")
+//         | "rim:"  op ":" index ":(" face ")"
+//   role := "side" u8 | "cap-start" | "cap-end" | "top" | "bottom" | "wall"
+// ---------------------------------------------------------------------------
+
+/// Percent-escapes the characters the grammar reserves.
+fn escape_op(op: &OpId) -> String {
+    let mut out = String::with_capacity(op.as_str().len());
+    for c in op.as_str().chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            ':' => out.push_str("%3A"),
+            '(' => out.push_str("%28"),
+            ')' => out.push_str("%29"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape_op(s: &str) -> Option<OpId> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            let code = u8::from_str_radix(&hex, 16).ok()?;
+            out.push(code as char);
+        } else {
+            out.push(c);
+        }
+    }
+    Some(OpId::new(out))
+}
+
+impl fmt::Display for FaceRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Side(k) => write!(f, "side{k}"),
+            Self::CapStart => f.write_str("cap-start"),
+            Self::CapEnd => f.write_str("cap-end"),
+            Self::Top => f.write_str("top"),
+            Self::Bottom => f.write_str("bottom"),
+            Self::Wall => f.write_str("wall"),
+        }
+    }
+}
+
+impl std::str::FromStr for FaceRole {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "cap-start" => Ok(Self::CapStart),
+            "cap-end" => Ok(Self::CapEnd),
+            "top" => Ok(Self::Top),
+            "bottom" => Ok(Self::Bottom),
+            "wall" => Ok(Self::Wall),
+            _ => s
+                .strip_prefix("side")
+                .and_then(|k| k.parse::<u8>().ok())
+                .map(Self::Side)
+                .ok_or(()),
+        }
+    }
+}
+
+impl fmt::Display for FaceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created { op, role } => write!(f, "created:{}:{role}", escape_op(op)),
+            Self::Band {
+                op,
+                tool_face,
+                loop_index,
+            } => write!(f, "band:{}:{loop_index}:({tool_face})", escape_op(op)),
+            Self::Floor { op, cap } => write!(f, "floor:{}:({cap})", escape_op(op)),
+        }
+    }
+}
+
+impl fmt::Display for EdgeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created { op, role } => {
+                let end = match role {
+                    EdgeRole::RingStart => "start",
+                    EdgeRole::RingEnd => "end",
+                };
+                write!(f, "ring:{}:{end}", escape_op(op))
+            }
+            Self::CutRim {
+                op,
+                target,
+                loop_index,
+            } => write!(f, "rim:{}:{loop_index}:({target})", escape_op(op)),
+        }
+    }
+}
+
+/// Splits `"op:rest"` at the first unescaped `:`.
+fn split_op(s: &str) -> Option<(OpId, &str)> {
+    let idx = s.find(':')?;
+    Some((unescape_op(&s[..idx])?, &s[idx + 1..]))
+}
+
+/// Parses `"index:(inner)"` into the index and the inner text.
+fn split_indexed_inner(s: &str) -> Option<(u32, &str)> {
+    let idx = s.find(':')?;
+    let n = s[..idx].parse::<u32>().ok()?;
+    let inner = s[idx + 1..].strip_prefix('(')?.strip_suffix(')')?;
+    Some((n, inner))
+}
+
+impl std::str::FromStr for FaceName {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        if let Some(rest) = s.strip_prefix("created:") {
+            let (op, role) = split_op(rest).ok_or(())?;
+            return Ok(Self::Created {
+                op,
+                role: role.parse()?,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("band:") {
+            let (op, rest) = split_op(rest).ok_or(())?;
+            let (loop_index, inner) = split_indexed_inner(rest).ok_or(())?;
+            return Ok(Self::Band {
+                op,
+                tool_face: Box::new(inner.parse()?),
+                loop_index,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("floor:") {
+            let (op, rest) = split_op(rest).ok_or(())?;
+            let inner = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')'));
+            return Ok(Self::Floor {
+                op,
+                cap: Box::new(inner.ok_or(())?.parse()?),
+            });
+        }
+        Err(())
+    }
+}
+
+impl std::str::FromStr for EdgeName {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        if let Some(rest) = s.strip_prefix("ring:") {
+            let (op, end) = split_op(rest).ok_or(())?;
+            let role = match end {
+                "start" => EdgeRole::RingStart,
+                "end" => EdgeRole::RingEnd,
+                _ => return Err(()),
+            };
+            return Ok(Self::Created { op, role });
+        }
+        if let Some(rest) = s.strip_prefix("rim:") {
+            let (op, rest) = split_op(rest).ok_or(())?;
+            let (loop_index, inner) = split_indexed_inner(rest).ok_or(())?;
+            return Ok(Self::CutRim {
+                op,
+                target: Box::new(inner.parse()?),
+                loop_index,
+            });
+        }
+        Err(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -245,6 +424,78 @@ mod tests {
         reg.bind_face(new, outer("wall1"));
         assert_eq!(reg.face(&outer("wall1")), Some(new));
         assert_eq!(reg.name_of_face(old), None, "old holder must be unbound");
+    }
+
+    #[test]
+    fn canonical_string_round_trips() {
+        let cases: Vec<FaceName> = vec![
+            FaceName::Created {
+                op: OpId::new("wall1"),
+                role: FaceRole::Side(1),
+            },
+            FaceName::Created {
+                op: OpId::new("node:with(specials)%"),
+                role: FaceRole::CapEnd,
+            },
+            FaceName::Band {
+                op: OpId::new("cut1"),
+                tool_face: Box::new(FaceName::Created {
+                    op: OpId::new("win1"),
+                    role: FaceRole::Side(0),
+                }),
+                loop_index: 0,
+            },
+            FaceName::Floor {
+                op: OpId::new("cut1"),
+                cap: Box::new(FaceName::Created {
+                    op: OpId::new("win1"),
+                    role: FaceRole::CapEnd,
+                }),
+            },
+            // Nested: a band cut into a band (future splits compose too).
+            FaceName::Band {
+                op: OpId::new("cut2"),
+                tool_face: Box::new(FaceName::Band {
+                    op: OpId::new("cut1"),
+                    tool_face: Box::new(FaceName::Created {
+                        op: OpId::new("win1"),
+                        role: FaceRole::Side(0),
+                    }),
+                    loop_index: 0,
+                }),
+                loop_index: 3,
+            },
+        ];
+        for name in cases {
+            let text = name.to_string();
+            let parsed: FaceName = text.parse().unwrap_or_else(|()| panic!("parse {text}"));
+            assert_eq!(parsed, name, "round trip failed for {text}");
+        }
+
+        let edges: Vec<EdgeName> = vec![
+            EdgeName::Created {
+                op: OpId::new("tube1"),
+                role: EdgeRole::RingStart,
+            },
+            EdgeName::CutRim {
+                op: OpId::new("cut1"),
+                target: Box::new(FaceName::Created {
+                    op: OpId::new("slab1"),
+                    role: FaceRole::Top,
+                }),
+                loop_index: 1,
+            },
+        ];
+        for name in edges {
+            let text = name.to_string();
+            let parsed: EdgeName = text.parse().unwrap_or_else(|()| panic!("parse {text}"));
+            assert_eq!(parsed, name, "round trip failed for {text}");
+        }
+
+        assert!("garbage".parse::<FaceName>().is_err());
+        assert!("band:cut1:zero:(created:a:top)"
+            .parse::<FaceName>()
+            .is_err());
     }
 
     #[test]
