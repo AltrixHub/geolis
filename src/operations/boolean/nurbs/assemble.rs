@@ -143,6 +143,9 @@ pub(crate) fn copy_face(store: &mut TopologyStore, face: FaceId) -> Result<FaceI
         inner_wires: src.inner_wires.clone(),
         same_sense: src.same_sense,
         trim: src.trim.clone(),
+        // The copy references the same shared boundary edges, so the per-edge
+        // UV images remain valid on the copy.
+        pcurves: src.pcurves.clone(),
     };
     Ok(store.add_face(data))
 }
@@ -478,30 +481,31 @@ mod tests {
                 .collect()
         }
 
-        // Plain slab already exhibits per-face perimeter boundary edges with no
-        // boolean applied — the generic independent-per-face limitation.
+        // Since shared-edge topology (F2), the plain slab position-welds fully
+        // watertight: per-face perimeters conform exactly, so position-dedup
+        // leaves ZERO boundary edges.
         let mut plain_store = TopologyStore::new();
         let plain = MakeCurvedSlab::new(6.0, 0.0, 1.5, 1.0)
             .execute(&mut plain_store)
             .unwrap();
         let plain_boundary = boundary_edges(&plain_store, plain).len();
-        assert!(
-            plain_boundary > 0,
-            "expected the plain slab to already exhibit per-face perimeter \
-             boundary edges (the pre-existing tessellation limitation)"
+        assert_eq!(
+            plain_boundary, 0,
+            "plain slab must position-weld watertight (found {plain_boundary} \
+             boundary edges)"
         );
 
         let (store, result) = slab_minus_tube(RADIUS);
         let cut_edges = boundary_edges(&store, result);
         let cut_boundary = cut_edges.len();
 
-        // (1) The cut result carries no MORE boundary edges than the plain
-        // slab's own perimeter nonconformance (plus a small margin). The prior
-        // ~1404 hole-ring T-junctions are eliminated.
+        // (1) The cut result carries no more boundary edges than a small
+        // margin above the (now zero) plain-slab baseline. The prior ~1404
+        // hole-ring T-junctions are eliminated.
         assert!(
             cut_boundary <= plain_boundary + MARGIN,
             "cut result has {cut_boundary} boundary edges, expected \
-             <= {plain_boundary} (plain perimeter) + {MARGIN}; hole-ring \
+             <= {plain_boundary} (plain baseline) + {MARGIN}; hole-ring \
              T-junctions appear to have returned"
         );
 

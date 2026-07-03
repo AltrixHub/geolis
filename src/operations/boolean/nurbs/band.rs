@@ -128,6 +128,7 @@ pub(crate) fn build_band_face_oriented(
         inner_wires: vec![rings.exit],
         same_sense,
         trim: Some(trim),
+        pcurves: Vec::new(),
     }))
 }
 

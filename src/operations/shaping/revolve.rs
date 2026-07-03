@@ -487,6 +487,7 @@ fn create_side_face(
         inner_wires: vec![],
         same_sense,
         trim: None,
+        pcurves: Vec::new(),
     }))
 }
 
@@ -554,6 +555,7 @@ fn create_partial_side_face(
         inner_wires: vec![],
         same_sense,
         trim: None,
+        pcurves: Vec::new(),
     }))
 }
 

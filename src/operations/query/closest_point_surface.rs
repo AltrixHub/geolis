@@ -207,6 +207,7 @@ mod tests {
             inner_wires: vec![],
             same_sense: true,
             trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -222,6 +223,7 @@ mod tests {
             inner_wires: vec![],
             same_sense: true,
             trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -237,6 +239,7 @@ mod tests {
             inner_wires: vec![],
             same_sense: true,
             trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -324,6 +327,7 @@ mod tests {
             inner_wires: vec![],
             same_sense: true,
             trim: None,
+            pcurves: Vec::new(),
         })
     }
 

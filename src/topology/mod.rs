@@ -8,7 +8,7 @@ pub mod vertex;
 pub mod wire;
 
 pub use edge::{EdgeCurve, EdgeData, EdgeId};
-pub use face::{FaceData, FaceId, FaceSurface};
+pub use face::{FaceData, FaceId, FacePcurve, FaceSurface};
 pub use shell::{ShellData, ShellId};
 pub use solid::{SolidData, SolidId};
 pub use trim::{FaceTrim, TrimLoop};

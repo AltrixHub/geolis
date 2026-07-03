@@ -66,6 +66,7 @@ impl MakeFace {
             inner_wires: self.inner_wires.clone(),
             same_sense: true,
             trim: None,
+            pcurves: Vec::new(),
         });
 
         Ok(face_id)
@@ -81,16 +82,50 @@ fn validate_wire_closed(store: &TopologyStore, wire_id: WireId) -> Result<()> {
     Ok(())
 }
 
-/// Collects vertex positions from a wire in traversal order.
+/// Collects boundary positions from a wire in traversal order, for plane
+/// fitting and coplanarity validation.
+///
+/// Straight edges contribute their start vertex; curved edges contribute a
+/// handful of interior samples too, so a wire made of a single closed curve
+/// (e.g. a shared ring edge) still yields enough points to define its plane.
 fn collect_wire_points(store: &TopologyStore, wire_id: WireId) -> Result<Vec<Point3>> {
+    use crate::geometry::curve::Curve;
+    use crate::topology::EdgeCurve;
+
+    /// Interior samples per curved edge (plane fitting needs only a few).
+    const CURVED_EDGE_SAMPLES: usize = 8;
+
     let edges = store.wire(wire_id)?.edges.clone();
     let mut points = Vec::with_capacity(edges.len());
 
     for oe in &edges {
         let edge = store.edge(oe.edge)?;
-        let vertex_id = if oe.forward { edge.start } else { edge.end };
-        let vertex = store.vertex(vertex_id)?;
-        points.push(vertex.point);
+        let (t_start, t_end) = if oe.forward {
+            (edge.t_start, edge.t_end)
+        } else {
+            (edge.t_end, edge.t_start)
+        };
+        match &edge.curve {
+            EdgeCurve::Line(_) => {
+                let vertex_id = if oe.forward { edge.start } else { edge.end };
+                points.push(store.vertex(vertex_id)?.point);
+            }
+            curve => {
+                for i in 0..CURVED_EDGE_SAMPLES {
+                    #[allow(clippy::cast_precision_loss)]
+                    let frac = i as f64 / CURVED_EDGE_SAMPLES as f64;
+                    let t = t_start + (t_end - t_start) * frac;
+                    let p = match curve {
+                        EdgeCurve::Line(c) => c.evaluate(t)?,
+                        EdgeCurve::Arc(c) => c.evaluate(t)?,
+                        EdgeCurve::Circle(c) => c.evaluate(t)?,
+                        EdgeCurve::Ellipse(c) => c.evaluate(t)?,
+                        EdgeCurve::Nurbs(c) => c.point_at(t)?,
+                    };
+                    points.push(p);
+                }
+            }
+        }
     }
 
     Ok(points)
