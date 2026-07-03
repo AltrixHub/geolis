@@ -20,11 +20,24 @@ pub fn boolean_execute(
     solid_b: SolidId,
     op: BooleanOp,
 ) -> Result<SolidId> {
+    boolean_execute_named(store, solid_a, solid_b, op, None)
+}
+
+/// [`boolean_execute`] with a caller-supplied operation identity for
+/// persistent-name evolution (NURBS path only; the planar pipeline does not
+/// name its entities yet).
+pub fn boolean_execute_named(
+    store: &mut TopologyStore,
+    solid_a: SolidId,
+    solid_b: SolidId,
+    op: BooleanOp,
+    op_id: Option<&crate::topology::OpId>,
+) -> Result<SolidId> {
     // NURBS routing: if either solid has a NURBS face, the planar pipeline does
     // not apply. The through-cut subtract handles it; everything else returns an
     // explicit unsupported error.
     if solid_has_nurbs_face(store, solid_a)? || solid_has_nurbs_face(store, solid_b)? {
-        return super::nurbs::try_boolean(store, solid_a, solid_b, op);
+        return super::nurbs::try_boolean(store, solid_a, solid_b, op, op_id);
     }
 
     // Step 1: AABB early-out
