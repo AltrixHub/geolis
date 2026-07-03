@@ -8,32 +8,31 @@
 //! hole) are discarded, and the surviving vertices are mapped through the
 //! surface to 3D.
 //!
-//! ## Boundary conformance (design decision)
+//! ## Boundary conformance (two shipped layers)
 //!
-//! Adjacent faces of a solid own independent per-face wires (no shared `BRep`
-//! edge topology), so each face used to tessellate a shared boundary curve with
-//! its own chord subdivision. Where the chords disagreed, one face's mesh poked
-//! past its neighbour at the silhouette (a visible sliver).
+//! **Design (b) — shared-edge `BRep` adjacency (shipped for prism / tube /
+//! revolved solids):** adjacent faces reference the same [`EdgeId`] for their
+//! common boundary curve; the edge is sampled once per
+//! [`super::edge_samples::EdgeSampleCache`] and every face consumes the same
+//! polyline. NURBS faces carrying per-edge pcurves take the edge-driven outer
+//! loop ([`edge_driven_outer_uv`]); planar caps consume the cached 3D samples
+//! directly. Conformance is structural: both faces emit bit-identical
+//! boundary vertices by construction, and closed side surfaces (whose seam is
+//! not a topological edge) close their UV rectangle with seam connectors.
 //!
-//! The fix is **design (a): solid-agnostic boundary-conforming sampling**. Any
-//! face whose outer boundary is the full parameter rectangle — an untrimmed face
+//! **Design (a) — solid-agnostic boundary-conforming sampling (fallback for
+//! faces without pcurves, e.g. the curved slab / wall builders):** any face
+//! whose outer boundary is the full parameter rectangle — an untrimmed face
 //! (via [`tessellate_untrimmed_conforming`]) or a punched target face whose
-//! outer loop is the domain rectangle (detected by [`loop_is_domain_rectangle`])
-//! — samples that boundary at the *curve-intrinsic* parameters of each boundary
-//! isocurve ([`super::tessellate_nurbs::conforming_boundary_uv`]). Because that
-//! sampling is a function of the boundary curve's geometry alone, two faces that
-//! share a curve (e.g. a curved top face and the ruled side wall extruded from
-//! its boundary) independently arrive at the *identical* parameter set and emit
-//! coincident 3D vertices — the deviation collapses to floating-point noise with
-//! no densification. The CDT decouples the boundary from the interior grid, so
-//! this needs no cross-face communication and no shared-edge topology.
-//!
-//! Path toward **design (b)** (true shared-edge `BRep` adjacency with per-`EdgeId`
-//! cached boundary polylines): once creation ops and the boolean share edges
-//! between adjacent faces, the boundary polyline could be sampled once per edge
-//! and looked up by both faces, making conformance structural rather than
-//! geometric. That is a larger refactor of the topology layer and the boolean's
-//! face copying; the geometry-only approach here is the proportionate step.
+//! outer loop is the domain rectangle (detected by
+//! [`loop_is_domain_rectangle`]) — samples that boundary at the
+//! *curve-intrinsic* parameters of each boundary isocurve
+//! ([`super::tessellate_nurbs::conforming_boundary_uv`]). Because that
+//! sampling is a function of the boundary curve's geometry alone, two faces
+//! sharing a curve independently arrive at the identical parameter set; the
+//! deviation collapses to floating-point noise. The per-edge cache uses the
+//! same chord-adaptive algorithm, so the two layers agree exactly where they
+//! meet.
 
 use std::collections::HashMap;
 
@@ -496,19 +495,19 @@ const SEGMENT_SKIP_EPS: f64 = 1e-9;
 /// the outer loop or a hole loop.
 fn near_any_segment(p: &Point2, outer: &[Point2], holes: &[Vec<Point2>]) -> bool {
     let near_loop = |poly: &[Point2]| -> bool {
-        let n = poly.len();
-        (0..n).any(|i| {
-            let a = poly[i];
-            let b = poly[(i + 1) % n];
-            let ab = b - a;
-            let len_sq = ab.norm_squared();
-            let d_sq = if len_sq < 1e-30 {
-                (*p - a).norm_squared()
+        let count = poly.len();
+        (0..count).any(|i| {
+            let seg_a = poly[i];
+            let seg_b = poly[(i + 1) % count];
+            let dir = seg_b - seg_a;
+            let len_sq = dir.norm_squared();
+            let dist_sq = if len_sq < 1e-30 {
+                (*p - seg_a).norm_squared()
             } else {
-                let t = ((*p - a).dot(&ab) / len_sq).clamp(0.0, 1.0);
-                (*p - (a + ab * t)).norm_squared()
+                let frac = ((*p - seg_a).dot(&dir) / len_sq).clamp(0.0, 1.0);
+                (*p - (seg_a + dir * frac)).norm_squared()
             };
-            d_sq < SEGMENT_SKIP_EPS * SEGMENT_SKIP_EPS
+            dist_sq < SEGMENT_SKIP_EPS * SEGMENT_SKIP_EPS
         })
     };
     near_loop(outer) || holes.iter().any(|h| near_loop(h))

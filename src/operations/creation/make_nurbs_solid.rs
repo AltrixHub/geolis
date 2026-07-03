@@ -112,11 +112,11 @@ fn closed_ring_edge(store: &mut TopologyStore, curve: NurbsCurve3D) -> Result<Ed
 /// Degree-1 pcurve mapping a ring edge's parameter onto the `u` axis at a
 /// fixed `v` (`t → (t, v)` over `[u0, u1]`).
 fn iso_pcurve_u(u0: f64, u1: f64, v: f64) -> Result<NurbsCurve2D> {
-    Ok(NurbsCurve2D::from_unweighted(
+    NurbsCurve2D::from_unweighted(
         vec![Point2::new(u0, v), Point2::new(u1, v)],
         KnotVector::new(vec![u0, u0, u1, u1])?,
         1,
-    )?)
+    )
 }
 
 /// Planar cap face on a shared ring edge, oriented so its stored normal points
@@ -569,11 +569,11 @@ impl MakeRevolvedSolid {
 /// Degree-1 pcurve mapping a ring edge's parameter onto the `v` axis at a
 /// fixed `u` (`t → (u, t)` over `[v0, v1]`).
 fn iso_pcurve_v(v0: f64, v1: f64, u: f64) -> Result<NurbsCurve2D> {
-    Ok(NurbsCurve2D::from_unweighted(
+    NurbsCurve2D::from_unweighted(
         vec![Point2::new(u, v0), Point2::new(u, v1)],
         KnotVector::new(vec![v0, v0, v1, v1])?,
         1,
-    )?)
+    )
 }
 
 /// Wraps a face list into a closed shell + solid.

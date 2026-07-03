@@ -74,9 +74,34 @@ impl TessellateFace {
                     )
                 }
             }
+            FaceSurface::Cylinder(_)
+            | FaceSurface::Sphere(_)
+            | FaceSurface::Cone(_)
+            | FaceSurface::Torus(_) => {
+                self.tessellate_analytic(store, outer_wire_id, same_sense, full_rev)
+            }
+            FaceSurface::Nurbs(n) => {
+                let n = n.clone();
+                tessellate_nurbs_face(store, cache, face, &n, same_sense)
+            }
+        }
+    }
+
+    /// Tessellates the analytic revolved-surface arms (cylinder / sphere /
+    /// cone / torus) on their UV grids, with bounds probed from the outer
+    /// wire's inverse-mapped points.
+    fn tessellate_analytic(
+        &self,
+        store: &TopologyStore,
+        outer_wire_id: WireId,
+        same_sense: bool,
+        full_rev: bool,
+    ) -> Result<TriangleMesh> {
+        let face = store.face(self.face)?;
+        let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
+
+        match &face.surface {
             FaceSurface::Cylinder(cyl) => {
-                let cyl = cyl.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| cyl.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -85,21 +110,13 @@ impl TessellateFace {
                 };
                 let n_u = adaptive_angular_segments(cyl.radius(), u_max - u_min, &self.params);
                 let n_v = adaptive_linear_segments(v_max - v_min, &self.params);
-                tessellate_surface(
-                    &cyl,
-                    u_min,
-                    u_max,
-                    v_min,
-                    v_max,
-                    n_u,
-                    n_v,
-                    same_sense,
-                    &self.params,
-                )
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    cyl, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
             FaceSurface::Sphere(sph) => {
-                let sph = sph.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| sph.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -108,21 +125,13 @@ impl TessellateFace {
                 };
                 let n_u = adaptive_angular_segments(sph.radius(), u_max - u_min, &self.params);
                 let n_v = adaptive_angular_segments(sph.radius(), v_max - v_min, &self.params);
-                tessellate_surface(
-                    &sph,
-                    u_min,
-                    u_max,
-                    v_min,
-                    v_max,
-                    n_u,
-                    n_v,
-                    same_sense,
-                    &self.params,
-                )
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    sph, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
             FaceSurface::Cone(cone) => {
-                let cone = cone.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| cone.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -132,21 +141,13 @@ impl TessellateFace {
                 let max_radius = v_max * cone.half_angle().sin();
                 let n_u = adaptive_angular_segments(max_radius, u_max - u_min, &self.params);
                 let n_v = adaptive_linear_segments(v_max - v_min, &self.params);
-                tessellate_surface(
-                    &cone,
-                    u_min,
-                    u_max,
-                    v_min,
-                    v_max,
-                    n_u,
-                    n_v,
-                    same_sense,
-                    &self.params,
-                )
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    cone, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
             FaceSurface::Torus(torus) => {
-                let torus = torus.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| torus.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -160,22 +161,16 @@ impl TessellateFace {
                 );
                 let n_v =
                     adaptive_angular_segments(torus.minor_radius(), v_max - v_min, &self.params);
-                tessellate_surface(
-                    &torus,
-                    u_min,
-                    u_max,
-                    v_min,
-                    v_max,
-                    n_u,
-                    n_v,
-                    same_sense,
-                    &self.params,
-                )
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    torus, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
-            FaceSurface::Nurbs(n) => {
-                let n = n.clone();
-                tessellate_nurbs_face(store, cache, face, &n, same_sense)
-            }
+            FaceSurface::Plane(_) | FaceSurface::Nurbs(_) => Err(TessellationError::Failed(
+                "tessellate_analytic called for a non-analytic face".into(),
+            )
+            .into()),
         }
     }
 }
