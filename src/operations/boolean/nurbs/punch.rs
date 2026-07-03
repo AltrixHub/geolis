@@ -218,7 +218,9 @@ fn dedup3d(pts: &[Point3]) -> Vec<Point3> {
 mod tests {
     use super::*;
     use crate::math::Point3;
-    use crate::operations::boolean::nurbs::loops::{collect_nurbs_faces, extract_cut_loops};
+    use crate::operations::boolean::nurbs::loops::{
+        collect_nurbs_faces, extract_cut_loops, ToolFaceCut,
+    };
     use crate::operations::creation::{MakeCurvedSlab, MakeNurbsTube};
     use crate::tessellation::{TessellateFace, TessellationParams};
     use crate::topology::SolidId;
@@ -246,12 +248,15 @@ mod tests {
         let mut front_face = None;
         let mut front_trace = Vec::new();
         for loop_pair in &cuts {
-            for cut in &loop_pair.loops {
+            let ToolFaceCut::Through { loops, .. } = loop_pair else {
+                panic!("expected a through cut");
+            };
+            for cut in loops {
                 punch_loop(&mut store, cut).unwrap();
             }
             // Identify the front (top) loop: higher mean 3D z.
-            let lo = &loop_pair.loops[0];
-            let hi = &loop_pair.loops[1];
+            let lo = &loops[0];
+            let hi = &loops[1];
             let mean_z = |c: &CutLoop| {
                 c.branch.points.iter().map(|p| p.z).sum::<f64>() / c.branch.points.len() as f64
             };
@@ -350,14 +355,16 @@ mod tests {
             let tool = collect_nurbs_faces(store, &solid_faces(store, tube));
             let cuts = extract_cut_loops(&target, &tool).unwrap();
             // Front loop = higher mean z.
-            let pair = &cuts[0];
+            let ToolFaceCut::Through { loops, .. } = &cuts[0] else {
+                panic!("expected a through cut");
+            };
             let mean_z = |c: &CutLoop| {
                 c.branch.points.iter().map(|p| p.z).sum::<f64>() / c.branch.points.len() as f64
             };
-            let front = if mean_z(&pair.loops[1]) >= mean_z(&pair.loops[0]) {
-                pair.loops[1].clone()
+            let front = if mean_z(&loops[1]) >= mean_z(&loops[0]) {
+                loops[1].clone()
             } else {
-                pair.loops[0].clone()
+                loops[0].clone()
             };
             let face = front.target_face;
             punch_loop(store, &front).unwrap();

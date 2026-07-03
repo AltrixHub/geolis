@@ -23,6 +23,7 @@ pub(crate) mod assemble;
 pub(crate) mod band;
 pub(crate) mod intersect;
 pub(crate) mod loops;
+pub(crate) mod pocket;
 pub(crate) mod punch;
 
 use crate::error::{OperationError, Result};
