@@ -47,6 +47,7 @@ pub(crate) fn intersect_through_cut(
     store: &mut TopologyStore,
     target: SolidId,
     tool: SolidId,
+    op_id: Option<&crate::topology::OpId>,
 ) -> Result<SolidId> {
     let target_faces = solid_faces(store, target)?;
     let tool_faces = solid_faces(store, tool)?;
@@ -97,6 +98,8 @@ pub(crate) fn intersect_through_cut(
     for &fid in &target_faces {
         if faces_with_loops.contains(&fid) {
             let copy = copy_face(store, fid)?;
+            // Persistent names carry over to the kept (trimmed) copies.
+            store.names_mut().transfer_face(fid, copy);
             id_map.insert(fid, copy);
             result_faces.push(copy);
         }
@@ -119,6 +122,18 @@ pub(crate) fn intersect_through_cut(
             true,
         )?;
         result_faces.push(band);
+        if let Some(op) = op_id {
+            if let Some(tool_name) = store.names().name_of_face(*tool_face).cloned() {
+                store.names_mut().bind_face(
+                    band,
+                    crate::topology::FaceName::Band {
+                        op: op.clone(),
+                        tool_face: Box::new(tool_name),
+                        loop_index: 0,
+                    },
+                );
+            }
+        }
     }
 
     Ok(finish_solid(store, result_faces))
@@ -177,7 +192,7 @@ mod tests {
         let tube = MakeNurbsTube::new(Point3::new(3.0, 3.0, -1.5), radius, 5.0)
             .execute(&mut store)
             .unwrap();
-        let plug = intersect_through_cut(&mut store, slab, tube).unwrap();
+        let plug = intersect_through_cut(&mut store, slab, tube, None).unwrap();
         (store, plug)
     }
 
@@ -404,7 +419,7 @@ mod tests {
             .unwrap()
             .faces
             .clone();
-        let _ = intersect_through_cut(&mut store, slab, tube).unwrap();
+        let _ = intersect_through_cut(&mut store, slab, tube, None).unwrap();
         for f in slab_faces {
             let face = store.face(f).unwrap();
             assert!(face.trim.is_none(), "input slab face must stay untrimmed");
