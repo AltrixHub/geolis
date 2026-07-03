@@ -9,13 +9,12 @@
 //! - The hole pcurve is a **degree-1 polyline** through the SSI trace points
 //!   (not a fitted rational arc); the trimmed CDT tessellator samples loops into
 //!   polylines anyway, so this is lossless for tessellation.
-//! - Seam-closed SSI branches are **seam-filled** upstream (see
-//!   [`super::loops::fill_seam_gap`]): the wedge at the tool's parametric u-seam
-//!   is populated with true intersection samples shared by the punch (`uv_a`)
-//!   and band (`uv_b`) rings. The final wrap segment then closes a genuinely small
-//!   sub-step arc rather than chording across the whole seam. If the seam fill
-//!   fails (Newton non-convergence), the wrap segment falls back to the original
-//!   single straight chord across the (unfilled) gap — bounded and documented,
+//! - Loops on a geometrically closed tool arrive genuinely `closed` from the
+//!   SSI marcher (periodic-domain wrapping) with exact seam samples at every
+//!   crossing, shared by the punch (`uv_a`) and band (`uv_b`) rings. The ring's
+//!   wrap-around segment therefore closes a genuinely small sub-step arc. If a
+//!   seam sample did not converge in the marcher, the wrap segment degrades to
+//!   a single straight chord across the sub-step gap — bounded and documented,
 //!   never fabricated geometry.
 
 use crate::error::{OperationError, Result};
@@ -99,9 +98,9 @@ fn uv_segment(a: Point2, b: Point2) -> NurbsCurve2D {
 }
 
 /// Converts a target-UV SSI trace into a clockwise (hole) `TrimLoop` of degree-1
-/// segments. The trace is seam-filled upstream, so the wrap-around segment closes
-/// a small sub-step arc (it only degrades to a straight seam chord if the seam
-/// fill could not converge).
+/// segments. The marcher emits genuinely closed traces, so the wrap-around
+/// segment closes a small sub-step arc (it only degrades to a straight chord if
+/// a marcher seam sample did not converge).
 fn hole_loop_from_trace(uv_a: &[Point2]) -> Result<TrimLoop> {
     ssi_trim_loop(uv_a, true)
 }
@@ -129,8 +128,8 @@ pub(crate) fn ssi_trim_loop(uv: &[Point2], clockwise: bool) -> Result<TrimLoop> 
     for i in 0..n {
         let a = pts[i];
         let b = pts[(i + 1) % n];
-        // The wrap-around segment (i = n-1) closes the ring; with seam-filled
-        // traces it is a short sub-step arc, not a chord across the seam.
+        // The wrap-around segment (i = n-1) closes the ring; with the marcher's
+        // exact seam samples it is a short sub-step arc, not a seam chord.
         curves.push(uv_segment(a, b));
     }
     Ok(TrimLoop::new(curves))
@@ -303,7 +302,7 @@ mod tests {
         let cu = trace.iter().map(|p| p.x).sum::<f64>() / trace.len() as f64;
         let cv = trace.iter().map(|p| p.y).sum::<f64>() / trace.len() as f64;
         // Approximate hole radius in UV (max trace deviation).
-        let r = trace
+        let hole_r_uv = trace
             .iter()
             .map(|p| ((p.x - cu).powi(2) + (p.y - cv).powi(2)).sqrt())
             .fold(0.0_f64, f64::max);
@@ -313,22 +312,22 @@ mod tests {
         // No triangle centroid lies near the hole center in 3D (well inside the
         // hole). Use 40% of the hole's 3D radius as the exclusion band.
         let hole_r_3d = {
-            let edge = surface.point_at((cu + r).min(1.0), cv).unwrap();
+            let edge = surface.point_at((cu + hole_r_uv).min(1.0), cv).unwrap();
             (edge - hole_center_3d).norm()
         };
-        for t in &mesh.indices {
-            let a = mesh.vertices[t[0] as usize];
-            let b = mesh.vertices[t[1] as usize];
-            let c = mesh.vertices[t[2] as usize];
+        for tri in &mesh.indices {
+            let pa = mesh.vertices[tri[0] as usize];
+            let pb = mesh.vertices[tri[1] as usize];
+            let pc = mesh.vertices[tri[2] as usize];
             let cen = Point3::new(
-                (a.x + b.x + c.x) / 3.0,
-                (a.y + b.y + c.y) / 3.0,
-                (a.z + b.z + c.z) / 3.0,
+                (pa.x + pb.x + pc.x) / 3.0,
+                (pa.y + pb.y + pc.y) / 3.0,
+                (pa.z + pb.z + pc.z) / 3.0,
             );
-            let d = (cen - hole_center_3d).norm();
+            let dist = (cen - hole_center_3d).norm();
             assert!(
-                d > hole_r_3d * 0.4,
-                "triangle centroid {d} too close to hole center (r3d={hole_r_3d})"
+                dist > hole_r_3d * 0.4,
+                "triangle centroid {dist} too close to hole center (r3d={hole_r_3d})"
             );
         }
     }

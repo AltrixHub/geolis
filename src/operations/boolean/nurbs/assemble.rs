@@ -188,6 +188,66 @@ mod tests {
         (store, result)
     }
 
+    /// The deferred F1 acceptance case: a revolved solid (closed wall, u/v seam
+    /// on the wall surface) cut by a HORIZONTAL tube. Both the entry and exit
+    /// holes land on the SAME closed wall face, and the tool's own periodic
+    /// direction wraps during SSI. The tube runs along +Y so its holes sit at
+    /// wall azimuths ±π/2, safely away from the wall's parametric seam at +X.
+    #[test]
+    fn revolved_solid_minus_horizontal_tube_is_manifold() {
+        use crate::geometry::nurbs::NurbsCurve3D;
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeNurbsPrism, MakeRevolvedSolid};
+
+        let mut store = TopologyStore::new();
+        // Vase-like profile: wall radius 2.0-2.6 over height 0-3.6.
+        let vase = MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.4, 1.2), (2.1, 2.4), (2.6, 3.6)])
+            .execute(&mut store)
+            .unwrap();
+        // Horizontal tube along +Y through both walls at mid-height.
+        let circle =
+            NurbsCurve3D::circle(Point3::new(0.0, -4.0, 1.8), 0.5, Vector3::y(), Vector3::x())
+                .unwrap();
+        let tube = MakeNurbsPrism::new(circle, Vector3::new(0.0, 8.0, 0.0))
+            .execute(&mut store)
+            .unwrap();
+
+        let result = subtract_through_cut(&mut store, vase, tube).unwrap();
+
+        // Entry and exit holes both land on the single closed wall face: one
+        // result face carries exactly 2 hole inner wires (the band face carries
+        // 1 — its exit ring).
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        let two_hole_faces = shell
+            .faces
+            .iter()
+            .filter(|&&f| store.face(f).unwrap().inner_wires.len() == 2)
+            .count();
+        assert_eq!(
+            two_hole_faces, 1,
+            "exactly one face (the revolved wall) carries both holes"
+        );
+
+        // The whole result tessellates edge-manifold: every undirected edge is
+        // used by 1 or 2 triangles.
+        let mesh = TessellateSolid::new(result, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty(), "empty result mesh");
+        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &mesh.indices {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        for (&(a, b), &c) in &counts {
+            assert!(c == 1 || c == 2, "edge ({a},{b}) used {c} times");
+        }
+    }
+
     /// The slab − tube result's adjacent faces conform along every shared
     /// boundary: the outer silhouette (punched top/bottom vs untrimmed side
     /// walls) is now sampled at the boundary-curve-intrinsic parameters, and the
@@ -355,14 +415,14 @@ mod tests {
     /// - plain curved slab (no hole): 384 boundary edges (all perimeter)
     /// - slab − tube, BEFORE the shared-sampling fix: 1788 boundary edges (384
     ///   perimeter + 1404 along the hole rings — the dense punch-vs-band mismatch).
-    /// - slab − tube, before the SEAM-FILL fix: 264 boundary edges, 4 of them in
+    /// - slab − tube, before seam conformance: 264 boundary edges, 4 of them in
     ///   the hole-ring region at the SSI seam azimuth (the punch chord vs. band
     ///   vertical-stitch disagreement at the tool's u-seam).
-    /// - slab − tube, AFTER the seam-fill fix: 0 hole-ring boundary edges. The
-    ///   seam wedge is filled with true intersection samples shared by both the
-    ///   punch ring (`uv_a`) and the band ribbon (`uv_b`, see
-    ///   `super::super::loops::fill_seam_gap`), so the two sides conform across
-    ///   the seam and the band ribbon spans the full tool u domain.
+    /// - slab − tube, WITH seam conformance: 0 hole-ring boundary edges. The
+    ///   SSI marcher wraps the tool's periodic u direction and emits exact seam
+    ///   samples shared by both the punch ring (`uv_a`) and the band ribbon
+    ///   (`uv_b`), so the two sides conform across the seam and the band ribbon
+    ///   spans the full tool u domain.
     ///
     /// Two assertions pin the result:
     /// 1. The cut result's total boundary-edge count is no worse than the plain
@@ -370,10 +430,13 @@ mod tests {
     ///    ~1404 hole-ring boundary edges are gone.
     /// 2. Direct hole-ring conformance: NO boundary-edge midpoint lies in the
     ///    tube-wall ring region (distance to the tube axis within [0.7·r, 1.3·r]
-    ///    while z is inside the slab). The seam gap is now filled, so even the
-    ///    former seam-azimuth residual is gone.
+    ///    while z is inside the slab). The marcher's exact seam samples close
+    ///    the seam, so even the former seam-azimuth residual is gone.
     #[test]
     fn hole_rings_tessellate_conformally() {
+        const RADIUS: f64 = 0.7;
+        const MARGIN: usize = 16;
+
         #[allow(clippy::cast_possible_truncation)]
         fn canon_id(canon: &mut HashMap<(i64, i64, i64), u32>, p: &Point3) -> u32 {
             const Q: f64 = 1e6;
@@ -428,7 +491,6 @@ mod tests {
              boundary edges (the pre-existing tessellation limitation)"
         );
 
-        const RADIUS: f64 = 0.7;
         let (store, result) = slab_minus_tube(RADIUS);
         let cut_edges = boundary_edges(&store, result);
         let cut_boundary = cut_edges.len();
@@ -436,7 +498,6 @@ mod tests {
         // (1) The cut result carries no MORE boundary edges than the plain
         // slab's own perimeter nonconformance (plus a small margin). The prior
         // ~1404 hole-ring T-junctions are eliminated.
-        const MARGIN: usize = 16;
         assert!(
             cut_boundary <= plain_boundary + MARGIN,
             "cut result has {cut_boundary} boundary edges, expected \
@@ -447,15 +508,15 @@ mod tests {
         // (2) Direct hole-ring conformance: NO boundary-edge midpoint lies in
         // the tube-wall ring region. The tube axis runs along (3,3,z); a ring
         // boundary edge would sit at radius ~RADIUS from that axis, inside the
-        // slab body in z. The seam wedge is now filled with shared intersection
-        // samples (see `fill_seam_gap`), so even the former seam-azimuth residual
-        // (up to 4 edges) is gone.
+        // slab body in z. The marcher's exact seam samples are shared by punch
+        // and band, so even the former seam-azimuth residual (up to 4 edges)
+        // is gone.
         let axis = Point3::new(3.0, 3.0, 0.0);
         let mut ring_edges = 0usize;
         for (p, q) in &cut_edges {
             let m = Point3::new((p.x + q.x) * 0.5, (p.y + q.y) * 0.5, (p.z + q.z) * 0.5);
             let dxy = ((m.x - axis.x).powi(2) + (m.y - axis.y).powi(2)).sqrt();
-            let in_ring_radius = dxy >= 0.7 * RADIUS && dxy <= 1.3 * RADIUS;
+            let in_ring_radius = (0.7 * RADIUS..=1.3 * RADIUS).contains(&dxy);
             let in_slab_z = m.z > -1.2 && m.z < 1.7;
             if in_ring_radius && in_slab_z {
                 ring_edges += 1;
@@ -463,7 +524,7 @@ mod tests {
         }
         assert_eq!(
             ring_edges, 0,
-            "expected 0 hole-ring boundary edges after the seam-fill fix, \
+            "expected 0 hole-ring boundary edges with marcher seam conformance, \
              found {ring_edges}; the punch/band rings are not conforming along \
              the tube wall"
         );
