@@ -434,6 +434,9 @@ mod tests {
     ///    the seam, so even the former seam-azimuth residual is gone.
     #[test]
     fn hole_rings_tessellate_conformally() {
+        const RADIUS: f64 = 0.7;
+        const MARGIN: usize = 16;
+
         #[allow(clippy::cast_possible_truncation)]
         fn canon_id(canon: &mut HashMap<(i64, i64, i64), u32>, p: &Point3) -> u32 {
             const Q: f64 = 1e6;
@@ -488,7 +491,6 @@ mod tests {
              boundary edges (the pre-existing tessellation limitation)"
         );
 
-        const RADIUS: f64 = 0.7;
         let (store, result) = slab_minus_tube(RADIUS);
         let cut_edges = boundary_edges(&store, result);
         let cut_boundary = cut_edges.len();
@@ -496,7 +498,6 @@ mod tests {
         // (1) The cut result carries no MORE boundary edges than the plain
         // slab's own perimeter nonconformance (plus a small margin). The prior
         // ~1404 hole-ring T-junctions are eliminated.
-        const MARGIN: usize = 16;
         assert!(
             cut_boundary <= plain_boundary + MARGIN,
             "cut result has {cut_boundary} boundary edges, expected \
@@ -515,7 +516,7 @@ mod tests {
         for (p, q) in &cut_edges {
             let m = Point3::new((p.x + q.x) * 0.5, (p.y + q.y) * 0.5, (p.z + q.z) * 0.5);
             let dxy = ((m.x - axis.x).powi(2) + (m.y - axis.y).powi(2)).sqrt();
-            let in_ring_radius = dxy >= 0.7 * RADIUS && dxy <= 1.3 * RADIUS;
+            let in_ring_radius = (0.7 * RADIUS..=1.3 * RADIUS).contains(&dxy);
             let in_slab_z = m.z > -1.2 && m.z < 1.7;
             if in_ring_radius && in_slab_z {
                 ring_edges += 1;

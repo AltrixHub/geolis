@@ -302,7 +302,7 @@ mod tests {
         let cu = trace.iter().map(|p| p.x).sum::<f64>() / trace.len() as f64;
         let cv = trace.iter().map(|p| p.y).sum::<f64>() / trace.len() as f64;
         // Approximate hole radius in UV (max trace deviation).
-        let r = trace
+        let hole_r_uv = trace
             .iter()
             .map(|p| ((p.x - cu).powi(2) + (p.y - cv).powi(2)).sqrt())
             .fold(0.0_f64, f64::max);
@@ -312,22 +312,22 @@ mod tests {
         // No triangle centroid lies near the hole center in 3D (well inside the
         // hole). Use 40% of the hole's 3D radius as the exclusion band.
         let hole_r_3d = {
-            let edge = surface.point_at((cu + r).min(1.0), cv).unwrap();
+            let edge = surface.point_at((cu + hole_r_uv).min(1.0), cv).unwrap();
             (edge - hole_center_3d).norm()
         };
-        for t in &mesh.indices {
-            let a = mesh.vertices[t[0] as usize];
-            let b = mesh.vertices[t[1] as usize];
-            let c = mesh.vertices[t[2] as usize];
+        for tri in &mesh.indices {
+            let pa = mesh.vertices[tri[0] as usize];
+            let pb = mesh.vertices[tri[1] as usize];
+            let pc = mesh.vertices[tri[2] as usize];
             let cen = Point3::new(
-                (a.x + b.x + c.x) / 3.0,
-                (a.y + b.y + c.y) / 3.0,
-                (a.z + b.z + c.z) / 3.0,
+                (pa.x + pb.x + pc.x) / 3.0,
+                (pa.y + pb.y + pc.y) / 3.0,
+                (pa.z + pb.z + pc.z) / 3.0,
             );
-            let d = (cen - hole_center_3d).norm();
+            let dist = (cen - hole_center_3d).norm();
             assert!(
-                d > hole_r_3d * 0.4,
-                "triangle centroid {d} too close to hole center (r3d={hole_r_3d})"
+                dist > hole_r_3d * 0.4,
+                "triangle centroid {dist} too close to hole center (r3d={hole_r_3d})"
             );
         }
     }
