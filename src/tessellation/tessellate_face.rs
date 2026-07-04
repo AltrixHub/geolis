@@ -945,7 +945,7 @@ fn insert_constraint_loop(
 ///
 /// Starts from faces adjacent to the outer (infinite) face at depth 0. Each time
 /// a constraint edge is crossed, depth increments. Odd depth = interior.
-fn classify_interior_faces(
+pub(crate) fn classify_interior_faces(
     cdt: &ConstrainedDelaunayTriangulation<SpadePoint2<f64>>,
 ) -> HashSet<usize> {
     let mut interior = HashSet::new();
