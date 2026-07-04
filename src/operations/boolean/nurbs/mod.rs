@@ -27,6 +27,10 @@ pub(crate) mod assemble;
 pub(crate) mod band;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cap_cut_tests;
+pub(crate) mod caps;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod cascade_tests;
 pub(crate) mod intersect;
 pub(crate) mod loops;
