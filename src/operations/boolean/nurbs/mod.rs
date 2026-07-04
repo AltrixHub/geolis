@@ -32,6 +32,9 @@ pub(crate) mod caps;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod cascade_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod degenerate_tests;
 pub(crate) mod intersect;
 pub(crate) mod loops;
 pub(crate) mod pocket;

@@ -70,6 +70,11 @@ pub(crate) struct ChainTopology {
     pub junctions: Vec<VertexId>,
     /// Target-UV pcurve of `edges[i]`, parameterized identically.
     pub pcurves: Vec<NurbsCurve2D>,
+    /// Tool-UV pcurve of `edges[i]` (in `segments[i].tool_face`'s parameter
+    /// space), parameterized identically — the band fragments register these
+    /// so edge-driven tessellation pins their rim vertices to the same
+    /// canonical edge samples as the target side.
+    pub tool_pcurves: Vec<NurbsCurve2D>,
 }
 
 /// Builds the shared trace topology of a chained loop (see
@@ -106,50 +111,58 @@ pub(crate) fn build_chain_topology(
     }
     let mut edges = Vec::with_capacity(n);
     let mut pcurves = Vec::with_capacity(n);
+    let mut tool_pcurves = Vec::with_capacity(n);
     for (i, seg) in chain.segments.iter().enumerate() {
         let end_junction = if chain.closed {
             junctions[(i + 1) % n]
         } else {
             junctions[i + 1]
         };
-        let (edge, pcurve) = trace_edge(
+        let (edge, pcurve, tool_pcurve) = trace_edge(
             store,
             &seg.branch.points,
             &seg.branch.uv_a,
+            &seg.branch.uv_b,
             junctions[i],
             end_junction,
         )?;
         edges.push(edge);
         pcurves.push(pcurve);
+        tool_pcurves.push(tool_pcurve);
     }
     Ok(ChainTopology {
         edges,
         junctions,
         pcurves,
+        tool_pcurves,
     })
 }
 
 /// Builds one trace edge: a degree-1 3D polyline through the SSI samples
-/// plus its target-UV pcurve on the SAME knot vector, so the edge sample
-/// cache (degree-1 breakpoint rule) reproduces exactly the SSI sample
-/// points on both sides of the shared edge.
-fn trace_edge(
+/// plus its target-UV and tool-UV pcurves on the SAME knot vector, so the
+/// edge sample cache (degree-1 breakpoint rule) reproduces exactly the SSI
+/// sample points on both sides of the shared edge.
+pub(crate) fn trace_edge(
     store: &mut TopologyStore,
     points: &[Point3],
     uv: &[Point2],
+    uv_tool: &[Point2],
     start: VertexId,
     end: VertexId,
-) -> Result<(EdgeId, NurbsCurve2D)> {
-    // Deduplicate 3D and UV in lockstep so the pcurve stays synchronized.
+) -> Result<(EdgeId, NurbsCurve2D, NurbsCurve2D)> {
+    // Deduplicate 3D and both UV traces in lockstep so the pcurves stay
+    // knot-synchronized with the 3D polyline.
     let mut pts: Vec<Point3> = Vec::with_capacity(points.len());
-    let mut uvs: Vec<Point2> = Vec::with_capacity(uv.len());
-    for (p, q) in points.iter().zip(uv) {
+    let mut target_uvs: Vec<Point2> = Vec::with_capacity(uv.len());
+    let mut tool_uvs: Vec<Point2> = Vec::with_capacity(uv_tool.len());
+    for ((p, q), r) in points.iter().zip(uv).zip(uv_tool) {
         if pts
             .last()
             .is_none_or(|last| (*p - *last).norm() > TOLERANCE)
         {
             pts.push(*p);
-            uvs.push(*q);
+            target_uvs.push(*q);
+            tool_uvs.push(*r);
         }
     }
     if pts.len() < 2 {
@@ -160,7 +173,8 @@ fn trace_edge(
     }
     let curve = NurbsCurve3D::polyline(&pts)?;
     let knots = KnotVector::new(curve.knots().as_slice().to_vec())?;
-    let pcurve = NurbsCurve2D::from_unweighted(uvs, knots, 1)?;
+    let pcurve = NurbsCurve2D::from_unweighted(target_uvs, knots.clone(), 1)?;
+    let tool_pcurve = NurbsCurve2D::from_unweighted(tool_uvs, knots, 1)?;
     let (t0, t1) = curve.parameter_domain();
     let edge = store.add_edge(EdgeData {
         start,
@@ -169,7 +183,7 @@ fn trace_edge(
         t_start: t0,
         t_end: t1,
     });
-    Ok((edge, pcurve))
+    Ok((edge, pcurve, tool_pcurve))
 }
 
 /// One contiguous run of chain segments on a single target face — an open
@@ -363,8 +377,38 @@ pub(crate) fn split_seam_loop(
 
     // Segments between consecutive crossings (cyclic): segment k runs from
     // the far sample of crossing k to the near sample of crossing k + 1.
+    let (topo, segments) = seam_segments(store, cut, &crossings, &junctions)?;
+    let runs = segments
+        .iter()
+        .enumerate()
+        .map(|(k, seg)| TraceRun {
+            target_face: cut.target_face,
+            segments: vec![seg.clone()],
+            edges: vec![topo.edges[k]],
+            pcurves: vec![topo.pcurves[k].clone()],
+            loop_index,
+            start_vertex: junctions[k],
+            end_vertex: junctions[(k + 1) % m],
+        })
+        .collect();
+    Ok((topo, runs))
+}
+
+/// Builds the per-segment trace edges of a seam-split loop: segment `k` runs
+/// from the far sample of crossing `k` to the near sample of crossing
+/// `k + 1`, with its ends pinned exactly onto the shared junction points.
+fn seam_segments(
+    store: &mut TopologyStore,
+    cut: &CutLoop,
+    crossings: &[usize],
+    junctions: &[VertexId],
+) -> Result<(ChainTopology, Vec<CutLoop>)> {
+    let branch = &cut.branch;
+    let n = branch.points.len();
+    let m = crossings.len();
     let mut edges = Vec::with_capacity(m);
     let mut pcurves = Vec::with_capacity(m);
+    let mut tool_pcurves = Vec::with_capacity(m);
     let mut segments: Vec<CutLoop> = Vec::with_capacity(m);
     for k in 0..m {
         let start = (crossings[k] + 1) % n;
@@ -390,9 +434,17 @@ pub(crate) fn split_seam_loop(
         if let Some(last) = pts.last_mut() {
             *last = last_junction;
         }
-        let (edge, pcurve) = trace_edge(store, &pts, &uva, junctions[k], junctions[(k + 1) % m])?;
+        let (edge, pcurve, tool_pcurve) = trace_edge(
+            store,
+            &pts,
+            &uva,
+            &uvb,
+            junctions[k],
+            junctions[(k + 1) % m],
+        )?;
         edges.push(edge);
         pcurves.push(pcurve);
+        tool_pcurves.push(tool_pcurve);
         segments.push(CutLoop {
             target_face: cut.target_face,
             tool_face: cut.tool_face,
@@ -404,26 +456,13 @@ pub(crate) fn split_seam_loop(
             },
         });
     }
-
     let topo = ChainTopology {
-        edges: edges.clone(),
-        junctions: junctions.clone(),
-        pcurves: pcurves.clone(),
+        edges,
+        junctions: junctions.to_vec(),
+        pcurves,
+        tool_pcurves,
     };
-    let runs = segments
-        .iter()
-        .enumerate()
-        .map(|(k, seg)| TraceRun {
-            target_face: cut.target_face,
-            segments: vec![seg.clone()],
-            edges: vec![edges[k]],
-            pcurves: vec![pcurves[k].clone()],
-            loop_index,
-            start_vertex: junctions[k],
-            end_vertex: junctions[(k + 1) % m],
-        })
-        .collect();
-    Ok((topo, runs))
+    Ok((topo, segments))
 }
 
 /// One kept fragment of a split target face.
@@ -1568,6 +1607,20 @@ fn transfer_parent_holes(
                         .into(),
                 )
             })?;
+        // The parent's pcurves for the hole ring edges transfer with the
+        // wire, so edge-driven tessellation keeps pinning the transferred
+        // rim to the shared edge samples.
+        let ring_pcurves: Vec<FacePcurve> = store
+            .wire(wire)?
+            .edges
+            .iter()
+            .filter_map(|oe| {
+                parent.pcurve_for(oe.edge).map(|curve| FacePcurve {
+                    edge: oe.edge,
+                    curve: curve.clone(),
+                })
+            })
+            .collect();
         let face = store.face_mut(fragment.face)?;
         let trim = face
             .trim
@@ -1575,6 +1628,11 @@ fn transfer_parent_holes(
             .unwrap_or_else(|| unreachable!("fragments are built with trim"));
         trim.holes.push(hole.clone());
         face.inner_wires.push(wire);
+        for pcurve in ring_pcurves {
+            if face.pcurve_for(pcurve.edge).is_none() {
+                face.pcurves.push(pcurve);
+            }
+        }
     }
     Ok(())
 }

@@ -19,11 +19,15 @@
 //! open boundary of the target face (a target kink / ring boundary) while
 //! staying strictly inside the tool face's domain — always within the
 //! marcher's own [`BOUNDARY_EPS`], never a new tolerance. A corner endpoint
-//! (pinned on both) is degenerate and rejected. Every endpoint must find
-//! exactly one partner endpoint at the same 3D point; a junction must change
-//! the tool face (kink crossing, same target) or the target face (target
-//! boundary crossing, same tool) — changing both at once is ambiguous. Any
-//! violation keeps the pre-chaining typed errors verbatim.
+//! (pinned on both — a tool kink coinciding with a target boundary, e.g. a
+//! cutter sill flush with the target's cap) is admissible as a
+//! target-boundary terminal (F6 R3): the chain continues through the kink
+//! when a partner branch exists and terminates on the target boundary
+//! otherwise. Every endpoint must find exactly one partner endpoint at the
+//! same 3D point; a junction must change the tool face (kink crossing, same
+//! target) or the target face (target boundary crossing, same tool) —
+//! changing both at once is ambiguous. Any violation keeps the pre-chaining
+//! typed errors verbatim.
 
 use crate::error::Result;
 use crate::geometry::nurbs::{NurbsSurface, SurfaceIntersectionCurve, BOUNDARY_EPS};
@@ -136,6 +140,13 @@ fn classify_endpoint(
     match (on_tool_kink, on_target) {
         (true, false) => Some(EndpointKind::ToolKink),
         (false, true) if !on_tool_u && !on_tool_v => Some(EndpointKind::TargetBoundary),
+        // A corner endpoint — tool kink coinciding with a target boundary
+        // (e.g. a cutter sill flush with the target's bottom cap, F6 R3).
+        // Admissible as a target-boundary terminal: chain extension still
+        // continues through the kink when a partner branch exists, and
+        // terminates on the target boundary when the flush face's
+        // tangential branches were dropped by the loop extraction.
+        (true, true) => Some(EndpointKind::TargetBoundary),
         _ => None,
     }
 }
