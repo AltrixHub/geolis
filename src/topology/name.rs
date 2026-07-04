@@ -105,6 +105,27 @@ pub enum EdgeRole {
     RingEnd,
 }
 
+/// The side of a face split, determined by the split's canonical trace
+/// orientation.
+///
+/// **Deterministic rule:** the canonical trace is the boundary-to-boundary
+/// trace whose canonically-oriented UV chord starts lexicographically first
+/// (a trace chord `end - start` is canonically oriented so that it is
+/// lexicographically positive: `du > 0`, or `du == 0 && dv > 0`). A fragment
+/// is `Left` when its representative interior point lies on the positive
+/// cross-product side of that oriented chord (`cross(chord, point - start) >
+/// 0`), `Right` otherwise. The rule depends only on the cut geometry, so it
+/// is stable across rebuilds and parameter changes.
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+pub enum SplitSide {
+    /// The fragment on the positive cross-product side of the canonical
+    /// trace chord.
+    Left,
+    /// The fragment on the negative cross-product side of the canonical
+    /// trace chord.
+    Right,
+}
+
 /// A persistent, rebuild-stable name for a face.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub enum FaceName {
@@ -131,6 +152,17 @@ pub enum FaceName {
         op: OpId,
         /// The buried cap's name.
         cap: Box<FaceName>,
+    },
+    /// One kept fragment of a face a boolean split along a cut trace
+    /// (F3b). The parent name retires; the two fragments carry composed
+    /// names distinguished by [`SplitSide`].
+    Split {
+        /// The boolean operation that split the face.
+        op: OpId,
+        /// The split face's former name.
+        parent: Box<FaceName>,
+        /// Which side of the canonical trace this fragment lies on.
+        side: SplitSide,
     },
 }
 
@@ -202,6 +234,34 @@ impl NameRegistry {
         }
     }
 
+    /// The split-aware transfer (F3b): the parent face's name retires and the
+    /// two kept fragments bind composed [`FaceName::Split`] names (`left`
+    /// gets [`SplitSide::Left`], `right` gets [`SplitSide::Right`]).
+    ///
+    /// An unnamed parent propagates unnamed fragments (no-op).
+    pub fn split_face(&mut self, from: FaceId, op: &OpId, left: FaceId, right: FaceId) {
+        let Some(parent) = self.face_names.remove(&from) else {
+            return;
+        };
+        self.faces_by_name.remove(&parent);
+        self.bind_face(
+            left,
+            FaceName::Split {
+                op: op.clone(),
+                parent: Box::new(parent.clone()),
+                side: SplitSide::Left,
+            },
+        );
+        self.bind_face(
+            right,
+            FaceName::Split {
+                op: op.clone(),
+                parent: Box::new(parent),
+                side: SplitSide::Right,
+            },
+        );
+    }
+
     /// Resolves a face name to the current face id.
     #[must_use]
     pub fn face(&self, name: &FaceName) -> Option<FaceId> {
@@ -235,6 +295,7 @@ impl NameRegistry {
 //   face := "created:" op ":" role
 //         | "band:" op ":" index ":(" face ")"
 //         | "floor:" op ":(" face ")"
+//         | "split:" op ":" ("l" | "r") ":(" face ")"
 //   edge := "ring:" op ":" ("start" | "end")
 //         | "rim:"  op ":" index ":(" face ")"
 //   role := "side" u8 | "side:" tag | "cap-start" | "cap-end" | "top"
@@ -330,6 +391,13 @@ impl fmt::Display for FaceName {
                 loop_index,
             } => write!(f, "band:{}:{loop_index}:({tool_face})", escape_op(op)),
             Self::Floor { op, cap } => write!(f, "floor:{}:({cap})", escape_op(op)),
+            Self::Split { op, parent, side } => {
+                let s = match side {
+                    SplitSide::Left => "l",
+                    SplitSide::Right => "r",
+                };
+                write!(f, "split:{}:{s}:({parent})", escape_op(op))
+            }
         }
     }
 }
@@ -393,6 +461,20 @@ impl std::str::FromStr for FaceName {
             return Ok(Self::Floor {
                 op,
                 cap: Box::new(inner.ok_or(())?.parse()?),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("split:") {
+            let (op, rest) = split_op(rest).ok_or(())?;
+            let (side, inner) = match rest.split_once(':') {
+                Some(("l", inner)) => (SplitSide::Left, inner),
+                Some(("r", inner)) => (SplitSide::Right, inner),
+                _ => return Err(()),
+            };
+            let inner = inner.strip_prefix('(').and_then(|r| r.strip_suffix(')'));
+            return Ok(Self::Split {
+                op,
+                parent: Box::new(inner.ok_or(())?.parse()?),
+                side,
             });
         }
         Err(())
@@ -535,6 +617,49 @@ mod tests {
                 }),
                 loop_index: 3,
             },
+            // Split fragments (F3b): left / right of a tagged wall face.
+            FaceName::Split {
+                op: OpId::new("cut1"),
+                parent: Box::new(FaceName::Created {
+                    op: OpId::new("wall1"),
+                    role: FaceRole::Tagged(SegmentTag::new("outer")),
+                }),
+                side: SplitSide::Left,
+            },
+            FaceName::Split {
+                op: OpId::new("cut:with(specials)%"),
+                parent: Box::new(FaceName::Created {
+                    op: OpId::new("wall1"),
+                    role: FaceRole::Side(2),
+                }),
+                side: SplitSide::Right,
+            },
+            // A split of a split (repeated cuts compose).
+            FaceName::Split {
+                op: OpId::new("cut2"),
+                parent: Box::new(FaceName::Split {
+                    op: OpId::new("cut1"),
+                    parent: Box::new(FaceName::Created {
+                        op: OpId::new("wall1"),
+                        role: FaceRole::Top,
+                    }),
+                    side: SplitSide::Right,
+                }),
+                side: SplitSide::Left,
+            },
+            // A band whose tool face is itself a split fragment.
+            FaceName::Band {
+                op: OpId::new("cut2"),
+                tool_face: Box::new(FaceName::Split {
+                    op: OpId::new("cut1"),
+                    parent: Box::new(FaceName::Created {
+                        op: OpId::new("win1"),
+                        role: FaceRole::Side(0),
+                    }),
+                    side: SplitSide::Left,
+                }),
+                loop_index: 0,
+            },
         ];
         for name in cases {
             let text = name.to_string();
@@ -566,6 +691,8 @@ mod tests {
         assert!("band:cut1:zero:(created:a:top)"
             .parse::<FaceName>()
             .is_err());
+        assert!("split:cut1:x:(created:a:top)".parse::<FaceName>().is_err());
+        assert!("split:cut1:l:created:a:top".parse::<FaceName>().is_err());
     }
 
     /// The positional `side<k>` and tagged `side:<tag>` forms stay distinct:
@@ -582,6 +709,42 @@ mod tests {
         // Round trip preserves the distinction.
         assert_eq!(FaceRole::Side(0).to_string(), "side0");
         assert_eq!(FaceRole::Tagged(SegmentTag::new("0")).to_string(), "side:0");
+    }
+
+    /// `split_face` retires the parent name and binds the two composed
+    /// fragment names; an unnamed parent propagates unnamed fragments.
+    #[test]
+    fn split_face_retires_parent_and_binds_fragments() {
+        let mut store = TopologyStore::new();
+        let parent = dummy_face(&mut store);
+        let left = dummy_face(&mut store);
+        let right = dummy_face(&mut store);
+        let mut reg = NameRegistry::default();
+        reg.bind_face(parent, outer("wall1"));
+        reg.split_face(parent, &OpId::new("cut1"), left, right);
+
+        assert_eq!(reg.name_of_face(parent), None, "parent name retired");
+        assert_eq!(reg.face(&outer("wall1")), None, "parent name unresolvable");
+        let left_name = FaceName::Split {
+            op: OpId::new("cut1"),
+            parent: Box::new(outer("wall1")),
+            side: SplitSide::Left,
+        };
+        let right_name = FaceName::Split {
+            op: OpId::new("cut1"),
+            parent: Box::new(outer("wall1")),
+            side: SplitSide::Right,
+        };
+        assert_eq!(reg.face(&left_name), Some(left));
+        assert_eq!(reg.face(&right_name), Some(right));
+
+        // Unnamed parent: nothing binds.
+        let unnamed = dummy_face(&mut store);
+        let a = dummy_face(&mut store);
+        let b = dummy_face(&mut store);
+        reg.split_face(unnamed, &OpId::new("cut2"), a, b);
+        assert_eq!(reg.name_of_face(a), None);
+        assert_eq!(reg.name_of_face(b), None);
     }
 
     #[test]
