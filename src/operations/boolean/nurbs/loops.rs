@@ -124,6 +124,17 @@ pub(crate) fn extract_cut_loops_trimmed(
                 if branch.points.len() < 3 {
                     continue;
                 }
+                // A branch whose target trace lies entirely ON one open
+                // boundary of the target's domain is a tangential boundary
+                // contact (e.g. a cutter sill flush with the target's cap,
+                // F6 R3): it bounds no removed material on this face and
+                // would otherwise poison the chain with degenerate
+                // along-boundary segments. Drop it; the adjacent faces'
+                // branches terminate on the same boundary and chain into a
+                // cap-touching open cut.
+                if branch_on_target_boundary(&branch, target_surf) {
+                    continue;
+                }
                 // Drop branches outside the target face's kept trim region
                 // (a twin fragment of the same parent surface owns them).
                 if let Some(region) = target_trims.get(target_id) {
@@ -167,6 +178,24 @@ pub(crate) fn extract_cut_loops_trimmed(
         .into());
     }
     Ok(cuts)
+}
+
+/// Whether the branch's whole target trace sits on ONE open boundary of the
+/// target face's parameter domain (within the marcher's own
+/// [`crate::geometry::nurbs::BOUNDARY_EPS`] — no new tolerance): a
+/// tangential along-boundary contact that removes no material on this face.
+fn branch_on_target_boundary(branch: &SurfaceIntersectionCurve, target: &NurbsSurface) -> bool {
+    use crate::geometry::nurbs::BOUNDARY_EPS;
+
+    let ((u0, u1), (v0, v1)) = target.parameter_domain();
+    let all_at = |bound: f64, pick_u: bool| {
+        branch.uv_a.iter().all(|p| {
+            let c = if pick_u { p.x } else { p.y };
+            (c - bound).abs() < BOUNDARY_EPS
+        })
+    };
+    (!target.is_closed_in_u() && (all_at(u0, true) || all_at(u1, true)))
+        || (!target.is_closed_in_v() && (all_at(v0, false) || all_at(v1, false)))
 }
 
 /// Groups loops per tool side face and classifies each face's cut: two loops
