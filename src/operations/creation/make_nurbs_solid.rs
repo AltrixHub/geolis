@@ -118,7 +118,12 @@ impl MakeNurbsPrism {
 }
 
 /// Registers a creation-op face name.
-fn bind_created_face(store: &mut TopologyStore, face: FaceId, op: &OpId, role: FaceRole) {
+pub(crate) fn bind_created_face(
+    store: &mut TopologyStore,
+    face: FaceId,
+    op: &OpId,
+    role: FaceRole,
+) {
     store.names_mut().bind_face(
         face,
         FaceName::Created {
@@ -155,7 +160,7 @@ fn closed_ring_edge(store: &mut TopologyStore, curve: NurbsCurve3D) -> Result<Ed
 
 /// Degree-1 pcurve mapping a ring edge's parameter onto the `u` axis at a
 /// fixed `v` (`t → (t, v)` over `[u0, u1]`).
-fn iso_pcurve_u(u0: f64, u1: f64, v: f64) -> Result<NurbsCurve2D> {
+pub(crate) fn iso_pcurve_u(u0: f64, u1: f64, v: f64) -> Result<NurbsCurve2D> {
     NurbsCurve2D::from_unweighted(
         vec![Point2::new(u0, v), Point2::new(u1, v)],
         KnotVector::new(vec![u0, u0, u1, u1])?,
