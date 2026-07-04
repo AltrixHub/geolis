@@ -160,120 +160,20 @@ impl MakeSegmentedPrism {
             surfaces.push(NurbsSurface::extrude(curve, self.direction)?);
         }
 
-        // Shared joint vertices: bottom / top ring vertices at each segment
-        // start point.
-        let mut bottom_joints: Vec<VertexId> = Vec::with_capacity(n);
-        let mut top_joints: Vec<VertexId> = Vec::with_capacity(n);
-        let mut joint_points: Vec<Point3> = Vec::with_capacity(n);
-        for curve in &curves {
-            let (t0, _) = curve.parameter_domain();
-            let p = curve.point_at(t0)?;
-            bottom_joints.push(store.add_vertex(VertexData::new(p)));
-            top_joints.push(store.add_vertex(VertexData::new(p + self.direction)));
-            joint_points.push(p);
-        }
-
-        // Shared edges: per-segment bottom / top boundary edges (shared with
-        // the caps) and one vertical kink edge per joint (shared by the two
-        // adjacent side faces).
-        let mut bottom_edges: Vec<EdgeId> = Vec::with_capacity(n);
-        let mut top_edges: Vec<EdgeId> = Vec::with_capacity(n);
-        let mut kink_edges: Vec<EdgeId> = Vec::with_capacity(n);
-        for k in 0..n {
-            let next = (k + 1) % n;
-            let (t0, t1) = curves[k].parameter_domain();
-            bottom_edges.push(store.add_edge(EdgeData {
-                start: bottom_joints[k],
-                end: bottom_joints[next],
-                curve: EdgeCurve::Nurbs(curves[k].clone()),
-                t_start: t0,
-                t_end: t1,
-            }));
-            // The surface's exact v = 1 isocurve is the segment curve
-            // translated by `direction`, with identical knots.
-            let (_, (_, v1)) = surfaces[k].parameter_domain();
-            let top_curve = surfaces[k].isocurve_v(v1)?;
-            let (tt0, tt1) = top_curve.parameter_domain();
-            top_edges.push(store.add_edge(EdgeData {
-                start: top_joints[k],
-                end: top_joints[next],
-                curve: EdgeCurve::Nurbs(top_curve),
-                t_start: tt0,
-                t_end: tt1,
-            }));
-            let kink_curve =
-                NurbsCurve3D::polyline(&[joint_points[k], joint_points[k] + self.direction])?;
-            let (kt0, kt1) = kink_curve.parameter_domain();
-            kink_edges.push(store.add_edge(EdgeData {
-                start: bottom_joints[k],
-                end: top_joints[k],
-                curve: EdgeCurve::Nurbs(kink_curve),
-                t_start: kt0,
-                t_end: kt1,
-            }));
-        }
+        let edges = build_shared_edges(store, &curves, &surfaces, self.direction)?;
 
         // Side faces: one per segment, each a full-domain extruded surface
         // whose 4-edge wire references only shared edges, with pcurves for
         // all four boundary edges.
         let mut side_faces = Vec::with_capacity(n);
-        for k in 0..n {
-            let next = (k + 1) % n;
-            let ((u0, u1), (v0, v1)) = surfaces[k].parameter_domain();
-            let wire = store.add_wire(WireData {
-                edges: vec![
-                    OrientedEdge::new(bottom_edges[k], true),
-                    OrientedEdge::new(kink_edges[next], true),
-                    OrientedEdge::new(top_edges[k], false),
-                    OrientedEdge::new(kink_edges[k], false),
-                ],
-                is_closed: true,
-            });
-            let pcurves = vec![
-                FacePcurve {
-                    edge: bottom_edges[k],
-                    curve: iso_pcurve_u(u0, u1, v0)?,
-                },
-                FacePcurve {
-                    edge: top_edges[k],
-                    curve: iso_pcurve_u(u0, u1, v1)?,
-                },
-                FacePcurve {
-                    edge: kink_edges[k],
-                    curve: iso_pcurve_v_unit(u0, v0, v1)?,
-                },
-                FacePcurve {
-                    edge: kink_edges[next],
-                    curve: iso_pcurve_v_unit(u1, v0, v1)?,
-                },
-            ];
-            let face = MakeNurbsFace::new(surfaces[k].clone())
-                .with_boundary(wire, pcurves)
-                .execute(store)?;
-            if !ccw {
-                store.face_mut(face)?.same_sense = false;
-            }
-            side_faces.push(face);
+        for (k, surface) in surfaces.iter().enumerate() {
+            side_faces.push(build_side_face(store, surface, &edges, k, ccw)?);
         }
 
         // Caps: one planar face per end, each with a single wire around ALL
         // per-segment boundary edges (the same edges the side faces use).
-        let bottom_wire = store.add_wire(WireData {
-            edges: bottom_edges
-                .iter()
-                .map(|&e| OrientedEdge::new(e, true))
-                .collect(),
-            is_closed: true,
-        });
-        let top_wire = store.add_wire(WireData {
-            edges: top_edges
-                .iter()
-                .map(|&e| OrientedEdge::new(e, true))
-                .collect(),
-            is_closed: true,
-        });
-        let bottom_cap = cap_from_wire(store, bottom_wire, -self.direction)?;
-        let top_cap = cap_from_wire(store, top_wire, self.direction)?;
+        let bottom_cap = cap_over_edges(store, &edges.bottom, -self.direction)?;
+        let top_cap = cap_over_edges(store, &edges.top, self.direction)?;
 
         if let Some(op) = &self.op_id {
             for (k, &face) in side_faces.iter().enumerate() {
@@ -351,6 +251,138 @@ impl MakeSegmentedPrism {
     }
 }
 
+/// The prism's shared boundary edges, indexed per segment: `bottom[k]` /
+/// `top[k]` run along segment `k` (shared between side face `k` and the
+/// corresponding cap), `kink[k]` rises at joint `k` (shared between side
+/// faces `k − 1` and `k`).
+struct SharedEdges {
+    bottom: Vec<EdgeId>,
+    top: Vec<EdgeId>,
+    kink: Vec<EdgeId>,
+}
+
+/// Builds the shared joint vertices and the `3n` shared edges of the prism.
+fn build_shared_edges(
+    store: &mut TopologyStore,
+    curves: &[NurbsCurve3D],
+    surfaces: &[NurbsSurface],
+    direction: Vector3,
+) -> Result<SharedEdges> {
+    let n = curves.len();
+
+    // Shared joint vertices: bottom / top ring vertices at each segment
+    // start point.
+    let mut bottom_joints: Vec<VertexId> = Vec::with_capacity(n);
+    let mut top_joints: Vec<VertexId> = Vec::with_capacity(n);
+    let mut joint_points: Vec<Point3> = Vec::with_capacity(n);
+    for curve in curves {
+        let (t0, _) = curve.parameter_domain();
+        let point = curve.point_at(t0)?;
+        bottom_joints.push(store.add_vertex(VertexData::new(point)));
+        top_joints.push(store.add_vertex(VertexData::new(point + direction)));
+        joint_points.push(point);
+    }
+
+    // Per-segment bottom / top boundary edges (shared with the caps) and one
+    // vertical kink edge per joint (shared by the two adjacent side faces).
+    let mut edges = SharedEdges {
+        bottom: Vec::with_capacity(n),
+        top: Vec::with_capacity(n),
+        kink: Vec::with_capacity(n),
+    };
+    for k in 0..n {
+        let next = (k + 1) % n;
+        let (t0, t1) = curves[k].parameter_domain();
+        edges.bottom.push(store.add_edge(EdgeData {
+            start: bottom_joints[k],
+            end: bottom_joints[next],
+            curve: EdgeCurve::Nurbs(curves[k].clone()),
+            t_start: t0,
+            t_end: t1,
+        }));
+        // The surface's exact v = 1 isocurve is the segment curve translated
+        // by `direction`, with identical knots.
+        let (_, (_, v1)) = surfaces[k].parameter_domain();
+        let top_curve = surfaces[k].isocurve_v(v1)?;
+        let (tt0, tt1) = top_curve.parameter_domain();
+        edges.top.push(store.add_edge(EdgeData {
+            start: top_joints[k],
+            end: top_joints[next],
+            curve: EdgeCurve::Nurbs(top_curve),
+            t_start: tt0,
+            t_end: tt1,
+        }));
+        let kink_curve = NurbsCurve3D::polyline(&[joint_points[k], joint_points[k] + direction])?;
+        let (kt0, kt1) = kink_curve.parameter_domain();
+        edges.kink.push(store.add_edge(EdgeData {
+            start: bottom_joints[k],
+            end: top_joints[k],
+            curve: EdgeCurve::Nurbs(kink_curve),
+            t_start: kt0,
+            t_end: kt1,
+        }));
+    }
+    Ok(edges)
+}
+
+/// Builds side face `k`: a full-domain extruded surface whose 4-edge wire
+/// references only shared edges, with pcurves for all four boundary edges.
+/// Flips the face sense for clockwise profiles so the normal points outward.
+fn build_side_face(
+    store: &mut TopologyStore,
+    surface: &NurbsSurface,
+    edges: &SharedEdges,
+    k: usize,
+    ccw: bool,
+) -> Result<FaceId> {
+    let next = (k + 1) % edges.bottom.len();
+    let ((u0, u1), (v0, v1)) = surface.parameter_domain();
+    let wire = store.add_wire(WireData {
+        edges: vec![
+            OrientedEdge::new(edges.bottom[k], true),
+            OrientedEdge::new(edges.kink[next], true),
+            OrientedEdge::new(edges.top[k], false),
+            OrientedEdge::new(edges.kink[k], false),
+        ],
+        is_closed: true,
+    });
+    let pcurves = vec![
+        FacePcurve {
+            edge: edges.bottom[k],
+            curve: iso_pcurve_u(u0, u1, v0)?,
+        },
+        FacePcurve {
+            edge: edges.top[k],
+            curve: iso_pcurve_u(u0, u1, v1)?,
+        },
+        FacePcurve {
+            edge: edges.kink[k],
+            curve: iso_pcurve_v_unit(u0, v0, v1)?,
+        },
+        FacePcurve {
+            edge: edges.kink[next],
+            curve: iso_pcurve_v_unit(u1, v0, v1)?,
+        },
+    ];
+    let face = MakeNurbsFace::new(surface.clone())
+        .with_boundary(wire, pcurves)
+        .execute(store)?;
+    if !ccw {
+        store.face_mut(face)?.same_sense = false;
+    }
+    Ok(face)
+}
+
+/// Builds a planar cap over the given shared boundary edges (one wire around
+/// all segments), oriented so its stored normal points along `outward`.
+fn cap_over_edges(store: &mut TopologyStore, edges: &[EdgeId], outward: Vector3) -> Result<FaceId> {
+    let wire = store.add_wire(WireData {
+        edges: edges.iter().map(|&e| OrientedEdge::new(e, true)).collect(),
+        is_closed: true,
+    });
+    cap_from_wire(store, wire, outward)
+}
+
 /// Degree-1 pcurve for a vertical kink edge: maps the edge's `[0, 1]`
 /// parameter onto the `v` axis at a fixed `u` (`t → (u, v0 + t·(v1 − v0))`).
 /// Exact same-parameter by construction: the extruded surface is degree-1
@@ -421,7 +453,7 @@ fn cap_from_wire(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::tessellation::{TessellateSolid, TessellationParams};
@@ -486,7 +518,7 @@ mod tests {
             .unwrap()
     }
 
-    fn shell_of<'a>(store: &'a TopologyStore, solid: SolidId) -> &'a ShellData {
+    fn shell_of(store: &TopologyStore, solid: SolidId) -> &ShellData {
         store
             .shell(store.solid(solid).unwrap().outer_shell)
             .unwrap()

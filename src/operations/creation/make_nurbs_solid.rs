@@ -609,7 +609,7 @@ impl MakeRevolvedSolid {
         }
     }
 
-    /// Registers persistent names (Wall, CapStart / CapEnd, ring edges)
+    /// Registers persistent names (`Wall`, `CapStart` / `CapEnd`, ring edges)
     /// under the caller-supplied operation identity.
     #[must_use]
     pub fn with_op_id(mut self, op: OpId) -> Self {
@@ -718,7 +718,7 @@ pub(crate) fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> Sol
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::tessellation::{TessellateSolid, TessellationParams};

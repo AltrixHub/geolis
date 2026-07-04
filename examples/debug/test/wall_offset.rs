@@ -890,6 +890,8 @@ fn case_29_inner_tl() -> Vec<(f64, f64)> {
 
 // ── Drawing helper ──────────────────────────────────────────────────
 
+// Demo drawing helper: the flat parameter list mirrors the call sites.
+#[allow(clippy::too_many_arguments)]
 fn draw_ground_truth(
     storage: &MeshStorage,
     bounds: &mut SceneBounds,

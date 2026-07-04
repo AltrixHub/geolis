@@ -297,10 +297,10 @@ fn find_connected_components(group: &[usize], face_infos: &[FaceInfo]) -> Vec<Ve
 /// The new implementation projects every input face fragment to the
 /// component's plane UV, hands the polygon-with-holes set to
 /// `boolean_2d::engine::run_arrangement` with `UnionOracle`, and
-/// converts each resulting union polygon back to a BRep face. The 2D
+/// converts each resulting union polygon back to a `BRep` face. The 2D
 /// engine handles segment splitting at T-junctions / proper crossings,
 /// vertex snapping, bilateral half-edge classification, and face
-/// walking — so the BRep faces it produces are guaranteed simple in
+/// walking — so the `BRep` faces it produces are guaranteed simple in
 /// the plane and CDT-safe (a debug post-condition in the engine
 /// asserts the latter).
 ///
@@ -338,9 +338,8 @@ fn merge_component(
     };
     let u_axis = n_unit.cross(&seed).normalize();
     let v_axis = n_unit.cross(&u_axis);
-    let origin = match face_infos[component[0]].edges.first() {
-        Some(&(start, _)) => start,
-        None => return Ok(Vec::new()),
+    let Some(&(origin, _)) = face_infos[component[0]].edges.first() else {
+        return Ok(Vec::new());
     };
 
     let project = |p: &Point3| -> (f64, f64) {

@@ -11,7 +11,7 @@
 //! wall face is still "the wall's outer face"); new faces (band, pocket
 //! floor) and new edges (hole rims) get names composed from their parents.
 //! Resolution failure is `None` — no geometric best-match heuristics
-//! (Kripac 1997 / Chen & Hoffmann 1995 / OCCT TNaming motivate the problem;
+//! (Kripac 1997 / Chen & Hoffmann 1995 / OCCT `TNaming` motivate the problem;
 //! geolis's small deterministic op set lets derivational names replace their
 //! heavyweight history machinery).
 

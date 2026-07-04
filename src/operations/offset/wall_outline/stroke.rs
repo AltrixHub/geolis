@@ -352,6 +352,8 @@ mod tests {
     }
 
     #[test]
+    // The bbox extremes are clearest as input_{min,max}_{x,y}.
+    #[allow(clippy::similar_names)]
     fn angled_closed_polygon_no_dent() {
         // Regression test: diagonal (non-axis-aligned) closed polygon.
         // Earlier iterations produced corner "dents" on the outer boundary

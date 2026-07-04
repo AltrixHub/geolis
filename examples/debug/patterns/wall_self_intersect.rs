@@ -103,6 +103,8 @@ fn clip_miter_vertices(verts: &mut Vec<PlineVertex>, centerlines: &[Pline], max_
     *verts = result;
 }
 
+// Two flat segments are clearest as 8 scalar endpoints in a demo helper.
+#[allow(clippy::too_many_arguments)]
 fn segment_segment_intersection(
     ax: f64,
     ay: f64,
@@ -154,7 +156,7 @@ fn find_self_intersection(vertices: &[PlineVertex]) -> Option<(usize, usize, f64
     None
 }
 
-/// Resolve keeping both loops (algorithm output for wall_group.rs).
+/// Resolve keeping both loops (algorithm output for `wall_group.rs`).
 /// Miter clip → split at self-intersection → keep both loops.
 fn resolve_keep_both(boundaries: &mut Vec<Pline>, centerlines: &[Pline], half_thickness: f64) {
     let max_allowed = half_thickness * 4.0;
@@ -193,15 +195,15 @@ fn resolve_keep_both(boundaries: &mut Vec<Pline>, centerlines: &[Pline], half_th
                     Some((edge_i, edge_j, ix, iy)) => {
                         let n = verts.len();
                         let mut loop_a = vec![PlineVertex::line(ix, iy)];
-                        for k in (edge_i + 1)..=edge_j {
-                            loop_a.push(PlineVertex::line(verts[k].x, verts[k].y));
+                        for v in &verts[(edge_i + 1)..=edge_j] {
+                            loop_a.push(PlineVertex::line(v.x, v.y));
                         }
                         let mut loop_b = vec![PlineVertex::line(ix, iy)];
-                        for k in (edge_j + 1)..n {
-                            loop_b.push(PlineVertex::line(verts[k].x, verts[k].y));
+                        for v in &verts[(edge_j + 1)..n] {
+                            loop_b.push(PlineVertex::line(v.x, v.y));
                         }
-                        for k in 0..=edge_i {
-                            loop_b.push(PlineVertex::line(verts[k].x, verts[k].y));
+                        for v in &verts[..=edge_i] {
+                            loop_b.push(PlineVertex::line(v.x, v.y));
                         }
 
                         if loop_a.len() >= 3 {
@@ -353,14 +355,17 @@ fn draw_case(
 
 /// Register `wall_self_intersect` pattern meshes.
 ///
-/// Left column: RED = raw WallOutline2D output (BEFORE, may self-intersect)
+/// Left column: RED = raw `WallOutline2D` output (BEFORE, may self-intersect)
 /// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
+/// One demo case: label, centerline points, half-width.
+type DemoCase = (&'static str, Vec<(f64, f64)>, f64);
+
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Labels for columns
     register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
     register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
 
-    let cases: Vec<(&str, Vec<(f64, f64)>, f64)> = vec![
+    let cases: Vec<DemoCase> = vec![
         ("1", v_slight_overlap(), 0.15), // 3pt V, slight overlap, thin
         ("2", v_clear_overlap(), 0.15),  // 3pt V, clear overlap, thin
         ("3", v_thick_overlap(), 0.3),   // 3pt V, thicker wall
@@ -369,6 +374,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     ];
 
     for (i, (label, pts, hw)) in cases.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
         let by = -(i as f64) * 12.0;
         draw_case(storage, bounds, pts, *hw, 0.0, by, label);
     }
