@@ -340,8 +340,34 @@ fn march_direction(
         let anchor = p + dir * step;
 
         // Corrector: 4x4 Newton onto S_a = S_b plus the marching-plane constraint.
-        let Some(next) = correct(pair, cur, anchor, dir, options)? else {
-            break;
+        let next = match correct(pair, cur, anchor, dir, options)? {
+            Corrected::Point(s) => s,
+            // The Newton iterates kept escaping an OPEN parametric direction:
+            // the branch leaves that domain between the current point and the
+            // clamped bound, so the marching-plane system is infeasible there.
+            // Solve the exact boundary crossing instead (the same pinned 3×3
+            // Newton the seam samples use) so the branch endpoint lands ON the
+            // boundary rather than up to one marching step short of it.
+            Corrected::ClampedOut { param, bound } => {
+                if let Some(end) = pinned_correct(pair, param, bound, cur, options)? {
+                    let end_p = pair.a.point_at(end.ua, end.va)?;
+                    // Sanity bound: the crossing lies within the current
+                    // marching neighborhood. A far-away pinned solution means
+                    // Newton escaped toward an unrelated boundary; keep the
+                    // honest sub-step gap instead of fabricating a long edge.
+                    if (end_p - p).norm() <= 2.0 * step {
+                        if let Some(crossing) = seam_crossing(pair, cur, end) {
+                            if let Some((near, far)) = seam_samples(pair, crossing, cur, options)? {
+                                pts.push(near);
+                                pts.push(far);
+                            }
+                        }
+                        pts.push(end);
+                    }
+                }
+                break;
+            }
+            Corrected::Lost => break,
         };
 
         let np = pair.a.point_at(next.ua, next.va)?;
@@ -533,12 +559,28 @@ fn march_dir(pair: &SurfacePair, s: Seed) -> Result<Option<(Point3, Vector3)>> {
     Ok(Some((pa, d / dn)))
 }
 
+/// Outcome of the marching corrector.
+#[derive(Debug, Clone, Copy)]
+enum Corrected {
+    /// Converged onto the intersection at the marching plane.
+    Point(Seed),
+    /// The Newton iterates repeatedly pushed an OPEN parametric direction past
+    /// a domain bound (the clamp kept pinning it back): the intersection curve
+    /// exits the domain within this step. `param` is the escaping parameter's
+    /// index in the `(ua, va, ub, vb)` layout; `bound` the bound it hit.
+    ClampedOut { param: usize, bound: f64 },
+    /// No convergence and no clamping — tangency or runaway.
+    Lost,
+}
+
 /// 4×4 Newton corrector: solve `S_a = S_b` and `(S_a - anchor)·dir = 0`.
 ///
 /// Unknowns `(ua, va, ub, vb)`; residual rows 1-3 = `S_a - S_b`, row 4 =
 /// `(S_a - anchor)·dir`. Jacobian rows 1-3 = `[S_a_u, S_a_v, -S_b_u, -S_b_v]`,
 /// row 4 = `[dir·S_a_u, dir·S_a_v, 0, 0]`. Iterates wrap on closed directions
-/// and clamp on open ones (see [`SurfaceDomain::apply`]).
+/// and clamp on open ones (see [`SurfaceDomain::apply`]); the last open-domain
+/// clamp is recorded so a divergence caused by the curve leaving a domain is
+/// reported as [`Corrected::ClampedOut`] instead of a silent failure.
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn correct(
     pair: &SurfacePair,
@@ -546,9 +588,10 @@ fn correct(
     anchor: Point3,
     dir: Vector3,
     options: &IntersectionOptions,
-) -> Result<Option<Seed>> {
+) -> Result<Corrected> {
     let mut s = start;
     let tol = options.tolerance.max(1e-12);
+    let mut last_clamp: Option<(usize, f64)> = None;
 
     for _ in 0..options.max_iterations {
         let (pa, sau, sav) = pair.a.partials(s.ua, s.va)?;
@@ -556,7 +599,7 @@ fn correct(
         let r3 = pa - pb;
         let r4 = (pa - anchor).dot(&dir);
         if r3.norm() < tol && r4.abs() < tol {
-            return Ok(Some(s));
+            return Ok(Corrected::Point(s));
         }
         let f = Vector4::new(r3.x, r3.y, r3.z, r4);
         // Jacobian columns.
@@ -582,8 +625,17 @@ fn correct(
             break;
         };
         let delta = jinv * f;
-        (s.ua, s.va) = pair.dom_a.apply(s.ua - delta[0], s.va - delta[1]);
-        (s.ub, s.vb) = pair.dom_b.apply(s.ub - delta[2], s.vb - delta[3]);
+        let raw = [
+            s.ua - delta[0],
+            s.va - delta[1],
+            s.ub - delta[2],
+            s.vb - delta[3],
+        ];
+        (s.ua, s.va) = pair.dom_a.apply(raw[0], raw[1]);
+        (s.ub, s.vb) = pair.dom_b.apply(raw[2], raw[3]);
+        if let Some(clamp) = detect_open_clamp(pair, raw) {
+            last_clamp = Some(clamp);
+        }
         if delta.norm() < tol {
             break;
         }
@@ -591,14 +643,44 @@ fn correct(
     let pa = pair.a.point_at(s.ua, s.va)?;
     let pb = pair.b.point_at(s.ub, s.vb)?;
     if (pa - pb).norm() < tol.max(1e-7) {
-        Ok(Some(s))
+        Ok(Corrected::Point(s))
+    } else if let Some((param, bound)) = last_clamp {
+        Ok(Corrected::ClampedOut { param, bound })
     } else {
-        Ok(None)
+        Ok(Corrected::Lost)
     }
 }
 
-/// Boundary-proximity tolerance in parameter space.
-const BOUNDARY_EPS: f64 = 1e-7;
+/// Detects which OPEN parametric direction the last Newton update escaped:
+/// a raw (pre-domain) parameter value outside its open domain means the clamp
+/// pinned it at the bound it crossed. Wrapping of closed directions is not a
+/// clamp. Returns the parameter index in the `(ua, va, ub, vb)` layout and
+/// the bound that pinned it.
+fn detect_open_clamp(pair: &SurfacePair, raw: [f64; 4]) -> Option<(usize, f64)> {
+    let domains = [
+        (!pair.dom_a.u_closed, pair.dom_a.u0, pair.dom_a.u1),
+        (!pair.dom_a.v_closed, pair.dom_a.v0, pair.dom_a.v1),
+        (!pair.dom_b.u_closed, pair.dom_b.u0, pair.dom_b.u1),
+        (!pair.dom_b.v_closed, pair.dom_b.v0, pair.dom_b.v1),
+    ];
+    for (param, &(open, lo, hi)) in domains.iter().enumerate() {
+        if !open {
+            continue;
+        }
+        if raw[param] < lo {
+            return Some((param, lo));
+        }
+        if raw[param] > hi {
+            return Some((param, hi));
+        }
+    }
+    None
+}
+
+/// Boundary-proximity tolerance in parameter space. Shared with the boolean
+/// loop extraction so "this open branch endpoint sits on a parametric
+/// boundary" means exactly what the marcher's own termination meant.
+pub(crate) const BOUNDARY_EPS: f64 = 1e-7;
 
 /// Assembles an (open) branch from a parameter trace. A closed branch is built
 /// by the caller setting `closed = true` on the returned value.
@@ -900,6 +982,59 @@ mod tests {
             branches.len()
         );
         assert!(branches[0].closed, "closed tool branch must close");
+    }
+
+    #[test]
+    fn open_branch_endpoints_land_exactly_on_the_limiting_boundary() {
+        // z=0 patch over [-1,2]x[-1,2] crossed by the x=0.5 vertical patch with
+        // y limited to [0.25, 1.25] (surface `b` truncates the intersection
+        // line; `a` extends beyond on both sides). The open branch must
+        // terminate ON b's u boundaries — the boundary-pinned endpoint solve —
+        // not one marching step short of them. This is the contract the
+        // multi-face (box) tool chaining relies on: branch endpoints land on
+        // the tool's kink edges exactly.
+        let a = z0_patch(-1.0, 2.0, -1.0, 2.0);
+        let b = x_const_patch(0.5, 0.25, 1.25, -1.0, 1.0);
+        let branches = intersect_surfaces(&a, &b, &IntersectionOptions::default()).unwrap();
+        assert_eq!(
+            branches.len(),
+            1,
+            "expected one branch, got {}",
+            branches.len()
+        );
+        let br = &branches[0];
+        assert!(!br.closed);
+        // Endpoints reach y = 0.25 and y = 1.25 exactly (b's u boundaries map
+        // to those y values).
+        let y_first = br.points.first().unwrap().y;
+        let y_last = br.points.last().unwrap().y;
+        let (y_lo, y_hi) = if y_first < y_last {
+            (y_first, y_last)
+        } else {
+            (y_last, y_first)
+        };
+        assert!(
+            (y_lo - 0.25).abs() < BOUNDARY_EPS,
+            "low endpoint must land on b's boundary y=0.25, got {y_lo}"
+        );
+        assert!(
+            (y_hi - 1.25).abs() < BOUNDARY_EPS,
+            "high endpoint must land on b's boundary y=1.25, got {y_hi}"
+        );
+        // The uv_b endpoints sit at b's u domain bounds.
+        let ((u0, u1), _) = b.parameter_domain();
+        let ub_first = br.uv_b.first().unwrap().x;
+        let ub_last = br.uv_b.last().unwrap().x;
+        for ub in [ub_first, ub_last] {
+            assert!(
+                (ub - u0).abs() < BOUNDARY_EPS || (u1 - ub).abs() < BOUNDARY_EPS,
+                "uv_b endpoint {ub} must sit at a u domain bound [{u0}, {u1}]"
+            );
+        }
+        assert!(
+            (ub_first - ub_last).abs() > 0.5 * (u1 - u0),
+            "the two endpoints must sit at OPPOSITE u bounds"
+        );
     }
 
     #[test]

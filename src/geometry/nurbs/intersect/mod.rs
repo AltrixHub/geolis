@@ -31,6 +31,7 @@ pub use curve_curve::intersect_curves_2d;
 pub use curve_surface::intersect_curve_surface;
 pub use surface_plane::intersect_surface_plane;
 pub use surface_surface::intersect_surfaces;
+pub(crate) use surface_surface::BOUNDARY_EPS;
 pub use types::{
     CurveCurveIntersection2D, CurveSurfaceIntersection, IntersectionOptions,
     SurfaceIntersectionCurve,

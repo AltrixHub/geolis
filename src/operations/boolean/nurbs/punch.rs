@@ -26,6 +26,94 @@ use crate::topology::{
 };
 
 use super::loops::CutLoop;
+use super::stitch::CutChain;
+
+/// The punched hole ring of a chained (multi-face-tool) loop: the closed ring
+/// wire plus its per-segment edges and junction vertices, all in chain order.
+/// `edges[i]` runs chain segment `i`; `junctions[i]` is the shared vertex at
+/// segment `i`'s START (the kink crossing between segments `i - 1` and `i`).
+#[derive(Debug, Clone)]
+pub(crate) struct ChainRing {
+    /// The closed hole ring wire (one edge per chain segment).
+    pub wire: WireId,
+    /// Per-segment ring edges, in chain order.
+    pub edges: Vec<crate::topology::EdgeId>,
+    /// Per-junction shared vertices, in chain order.
+    pub junctions: Vec<crate::topology::VertexId>,
+}
+
+/// Punches a chained loop onto its target face: the concatenated target-UV
+/// traces become one CW trim hole, and the 3D trace becomes a closed inner
+/// wire of one edge PER chain segment with shared junction vertices at the
+/// kink crossings — so the per-tool-face band fragments can each reference
+/// exactly their segment's ring edge (F2 shared-edge topology).
+///
+/// # Errors
+///
+/// Returns an error if the target face is not a NURBS face, the concatenated
+/// trace degenerates, or curve / wire construction fails.
+pub(crate) fn punch_chain(store: &mut TopologyStore, chain: &CutChain) -> Result<ChainRing> {
+    let surface = nurbs_surface_of(store, chain.target_face)?;
+
+    // 1. CW hole pcurve from the concatenated target-UV traces (junction
+    //    samples are welded, so consecutive duplicates collapse in dedup).
+    let mut uv: Vec<Point2> = Vec::new();
+    for seg in &chain.segments {
+        uv.extend_from_slice(&seg.branch.uv_a);
+    }
+    let hole_loop = ssi_trim_loop(&uv, true)?;
+
+    // 2. Shared junction vertices + one interpolated 3D edge per segment.
+    let n = chain.segments.len();
+    let mut junctions = Vec::with_capacity(n);
+    for seg in &chain.segments {
+        let start = *seg
+            .branch
+            .points
+            .first()
+            .ok_or_else(|| OperationError::Failed("empty chain segment trace".into()))?;
+        junctions.push(store.add_vertex(VertexData::new(start)));
+    }
+    let mut edges = Vec::with_capacity(n);
+    for (i, seg) in chain.segments.iter().enumerate() {
+        let pts = dedup3d(&seg.branch.points);
+        if pts.len() < 2 {
+            return Err(OperationError::Failed(
+                "chain segment degenerated to fewer than 2 distinct 3D points".into(),
+            )
+            .into());
+        }
+        let degree = 3.min(pts.len() - 1);
+        let (curve, _) = NurbsCurve3D::interpolate(&pts, degree)?;
+        let (t0, t1) = curve.parameter_domain();
+        edges.push(store.add_edge(EdgeData {
+            start: junctions[i],
+            end: junctions[(i + 1) % n],
+            curve: EdgeCurve::Nurbs(curve),
+            t_start: t0,
+            t_end: t1,
+        }));
+    }
+    let wire = store.add_wire(WireData {
+        edges: edges.iter().map(|&e| OrientedEdge::new(e, true)).collect(),
+        is_closed: true,
+    });
+
+    // 3. Attach to the face: full-domain outer trim if absent, push the hole,
+    //    append the inner wire.
+    let face = store.face_mut(chain.target_face)?;
+    let trim = face
+        .trim
+        .get_or_insert_with(|| FaceTrim::new(full_domain_outer_loop(&surface), Vec::new()));
+    trim.holes.push(hole_loop);
+    face.inner_wires.push(wire);
+
+    Ok(ChainRing {
+        wire,
+        edges,
+        junctions,
+    })
+}
 
 /// Punches a single cut loop onto its target face: adds a CW trim hole and a 3D
 /// inner wire. Returns the [`WireId`] of the hole ring wire it created so callers

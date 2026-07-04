@@ -1,10 +1,14 @@
 //! SSI loop extraction for the through-cut subtract.
 //!
 //! Runs surface-surface intersection over every (target NURBS face × tool NURBS
-//! face) pair, keeps only closed loops, and groups them per tool side face. The
-//! through-cut precondition is that each tool side face yields exactly two
-//! closed loops (entry + exit), each lying on a target face. Any deviation is a
-//! typed unsupported error — never silent wrong geometry.
+//! face) pair and classifies the cut loops. Closed branches (periodic tool
+//! faces) are grouped per tool side face: exactly two closed loops (entry +
+//! exit) form a through cut, a single loop a pocket. Open branches are
+//! acceptable only when BOTH endpoints land on a tool kink edge; the
+//! [`super::stitch`] module chains them across adjacent tool side faces into
+//! closed loops, which are then grouped per chained-loop face set with the
+//! same 2-loop (through) / 1-loop (pocket) classification. Any other
+//! deviation is a typed unsupported error — never silent wrong geometry.
 //!
 //! Loops on geometrically closed surfaces arrive genuinely `closed` from the
 //! SSI marcher (periodic-domain wrapping), with traces that reach both
@@ -20,19 +24,25 @@ use crate::geometry::nurbs::{
 };
 use crate::topology::{FaceId, FaceSurface, TopologyStore};
 
-/// One closed intersection loop between a target face and a tool side face.
+use super::stitch::{self, CutChain};
+
+/// One intersection loop (or chained-loop segment) between a target face and
+/// a tool side face.
 #[derive(Debug, Clone)]
 pub(crate) struct CutLoop {
     /// The target face this loop lies on (its `uv_a` trace is in target UV).
     pub target_face: FaceId,
     /// The tool side face this loop lies on (its `uv_b` trace is in tool UV).
     pub tool_face: FaceId,
-    /// The SSI branch (`closed == true`), with `uv_a`/`uv_b` synchronized to
-    /// the 3D `points`.
+    /// The SSI branch (`closed == true` for a whole periodic-face loop; an
+    /// open kink-to-kink segment of a chained loop otherwise), with
+    /// `uv_a`/`uv_b` synchronized to the 3D `points`.
     pub branch: SurfaceIntersectionCurve,
 }
 
-/// The cut class of one tool side face.
+/// The cut class of one tool side face (periodic single-face loops) or of one
+/// chained loop group (multi-face tools whose open branches were stitched
+/// across kink edges).
 #[derive(Debug, Clone)]
 pub(crate) enum ToolFaceCut {
     /// Entry + exit loops, sorted by mean tool-`v` — the tool passes fully
@@ -44,6 +54,25 @@ pub(crate) enum ToolFaceCut {
     /// A single entry loop — the tool enters the target and ends inside it
     /// (pocket / blind cut).
     Pocket { tool_face: FaceId, entry: CutLoop },
+    /// Entry + exit chained loops crossing the same set of tool side faces,
+    /// sorted by mean tool-`v` — a multi-face (box-like) tool passing fully
+    /// through the target.
+    MultiFaceThrough { chains: [CutChain; 2] },
+    /// A single chained entry loop — a multi-face tool ending inside the
+    /// target.
+    MultiFacePocket { entry: CutChain },
+}
+
+/// The typed error for an open branch that cannot participate in kink-edge
+/// chaining (message kept verbatim from the pre-chaining guard).
+pub(crate) fn open_branch_error() -> crate::error::GeolisError {
+    OperationError::Failed(
+        "through-cut subtract requires closed intersection loops; \
+         an open branch (partial cut / tool not passing fully through) \
+         was found"
+            .into(),
+    )
+    .into()
 }
 
 /// Extracts and validates the through-cut loops for `target` minus `tool`.
@@ -51,16 +80,18 @@ pub(crate) enum ToolFaceCut {
 /// # Errors
 ///
 /// Returns [`OperationError::Failed`] naming the unsupported case when: an
-/// intersection branch is open (partial cut), a loop crosses the target face's
-/// parametric seam, no loops are found at all (tool disjoint), or a tool side
-/// face does not yield exactly two closed loops. (Cap-face intersection is
-/// guarded separately by the caller.)
+/// intersection branch is open without both endpoints on tool kink edges
+/// (partial cut), a loop crosses the target face's parametric seam, no loops
+/// are found at all (tool disjoint), a tool side face does not yield exactly
+/// two closed loops, or open branches cannot be chained into closed loops.
+/// (Cap-face intersection is guarded separately by the caller.)
 pub(crate) fn extract_cut_loops(
     target_faces: &[(FaceId, NurbsSurface)],
     tool_faces: &[(FaceId, NurbsSurface)],
 ) -> Result<Vec<ToolFaceCut>> {
     let options = IntersectionOptions::default();
     let mut loops: Vec<CutLoop> = Vec::new();
+    let mut open_segments: Vec<CutLoop> = Vec::new();
 
     for (tool_id, tool_surf) in tool_faces {
         for (target_id, target_surf) in target_faces {
@@ -75,14 +106,13 @@ pub(crate) fn extract_cut_loops(
                 if branch.points.len() < 3 {
                     continue;
                 }
-                if !branch.closed {
-                    return Err(OperationError::Failed(
-                        "through-cut subtract requires closed intersection loops; \
-                         an open branch (partial cut / tool not passing fully through) \
-                         was found"
-                            .into(),
-                    )
-                    .into());
+                // An open branch is acceptable only when BOTH endpoints sit on
+                // a tool kink edge (chained across adjacent tool faces below);
+                // every other open branch keeps the pre-chaining typed error.
+                if !branch.closed
+                    && !stitch::open_branch_on_tool_kinks(&branch, target_surf, tool_surf)
+                {
+                    return Err(open_branch_error());
                 }
                 if crosses_target_seam(&branch, target_surf) {
                     return Err(OperationError::Failed(
@@ -92,16 +122,33 @@ pub(crate) fn extract_cut_loops(
                     )
                     .into());
                 }
-                loops.push(CutLoop {
+                let cut = CutLoop {
                     target_face: *target_id,
                     tool_face: *tool_id,
                     branch,
-                });
+                };
+                if cut.branch.closed {
+                    loops.push(cut);
+                } else {
+                    open_segments.push(cut);
+                }
             }
         }
     }
 
-    group_per_tool_face(&loops, tool_faces)
+    let mut cuts = group_per_tool_face(&loops, tool_faces)?;
+    let chains = stitch::chain_open_segments(&open_segments, tool_faces)?;
+    cuts.extend(group_chains(chains, tool_faces)?);
+
+    if cuts.is_empty() {
+        return Err(OperationError::Failed(
+            "through-cut subtract found no intersection loops (tool does not \
+             pass through the target)"
+                .into(),
+        )
+        .into());
+    }
+    Ok(cuts)
 }
 
 /// Groups loops per tool side face and classifies each face's cut: two loops
@@ -121,9 +168,9 @@ fn group_per_tool_face(
 
         match mine.len() {
             // A tool side face that misses the target entirely is allowed only
-            // when NO loops exist at all (tool disjoint from target, caught
-            // below). If some other tool face cut the target but this one did
-            // not, the tool is not passing cleanly through — unsupported.
+            // when NO loops exist at all (tool disjoint from target, caught by
+            // the caller). If some other tool face cut the target but this one
+            // did not, the tool is not passing cleanly through — unsupported.
             0 => {}
             1 => {
                 cuts.push(ToolFaceCut::Pocket {
@@ -155,14 +202,63 @@ fn group_per_tool_face(
             }
         }
     }
+    Ok(cuts)
+}
 
-    if cuts.is_empty() {
-        return Err(OperationError::Failed(
-            "through-cut subtract found no intersection loops (tool does not \
-             pass through the target)"
-                .into(),
-        )
-        .into());
+/// Groups chained loops by the SET of tool side faces they cross and
+/// classifies each group: two chains form a through cut (sorted by mean
+/// tool-`v`, the same convention as the single-face path), a single chain a
+/// pocket. Groups are ordered deterministically by their lowest tool-face
+/// index.
+fn group_chains(
+    chains: Vec<CutChain>,
+    tool_faces: &[(FaceId, NurbsSurface)],
+) -> Result<Vec<ToolFaceCut>> {
+    use std::collections::BTreeMap;
+
+    let index_of = |face: FaceId| -> usize {
+        tool_faces
+            .iter()
+            .position(|(id, _)| *id == face)
+            .unwrap_or(usize::MAX)
+    };
+
+    let mut groups: BTreeMap<Vec<usize>, Vec<CutChain>> = BTreeMap::new();
+    for chain in chains {
+        let mut key: Vec<usize> = chain
+            .segments
+            .iter()
+            .map(|s| index_of(s.tool_face))
+            .collect();
+        key.sort_unstable();
+        groups.entry(key).or_default().push(chain);
+    }
+
+    let mut cuts = Vec::new();
+    for (_, mut group) in groups {
+        match group.len() {
+            1 => {
+                let entry = group.pop().unwrap_or_else(|| unreachable!());
+                cuts.push(ToolFaceCut::MultiFacePocket { entry });
+            }
+            2 => {
+                group.sort_by(|a, b| {
+                    a.mean_v()
+                        .partial_cmp(&b.mean_v())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let hi = group.pop().unwrap_or_else(|| unreachable!());
+                let lo = group.pop().unwrap_or_else(|| unreachable!());
+                cuts.push(ToolFaceCut::MultiFaceThrough { chains: [lo, hi] });
+            }
+            n => {
+                return Err(OperationError::Failed(format!(
+                    "NURBS subtract supports 1 (pocket) or 2 (through) chained \
+                     loops per tool face group; got {n}"
+                ))
+                .into());
+            }
+        }
     }
     Ok(cuts)
 }
@@ -370,6 +466,88 @@ mod tests {
             loops[0].target_face, loops[1].target_face,
             "tilted entry/exit loops still land on different slab faces"
         );
+    }
+
+    /// A genuine 4-side-face box cutter through a segmented-prism wall: every
+    /// (wall face × box face) SSI branch is OPEN (it ends on the box's kink
+    /// edges), and the stitcher chains them into exactly two closed loops —
+    /// the entry and exit windows — classified as one multi-face through cut.
+    #[test]
+    fn box_cutter_open_branches_chain_into_through_loops() {
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeSegmentedPrism, ProfileSegment};
+
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+
+        let mut store = TopologyStore::new();
+        // Wall: 6 x 0.4 footprint extruded 3 up.
+        let wall = MakeSegmentedPrism::new(
+            vec![
+                line(p(0.0, 0.0, 0.0), p(6.0, 0.0, 0.0)),
+                line(p(6.0, 0.0, 0.0), p(6.0, 0.4, 0.0)),
+                line(p(6.0, 0.4, 0.0), p(0.0, 0.4, 0.0)),
+                line(p(0.0, 0.4, 0.0), p(0.0, 0.0, 0.0)),
+            ],
+            Vector3::new(0.0, 0.0, 3.0),
+        )
+        .execute(&mut store)
+        .unwrap();
+        // Box cutter: window rectangle in the XZ plane at y = -1, extruded
+        // horizontally through the wall.
+        let cutter = MakeSegmentedPrism::new(
+            vec![
+                line(p(2.0, -1.0, 1.0), p(3.5, -1.0, 1.0)),
+                line(p(3.5, -1.0, 1.0), p(3.5, -1.0, 2.0)),
+                line(p(3.5, -1.0, 2.0), p(2.0, -1.0, 2.0)),
+                line(p(2.0, -1.0, 2.0), p(2.0, -1.0, 1.0)),
+            ],
+            Vector3::new(0.0, 2.4, 0.0),
+        )
+        .execute(&mut store)
+        .unwrap();
+
+        let target = collect_nurbs_faces(&store, &solid_faces(&store, wall));
+        let tool = collect_nurbs_faces(&store, &solid_faces(&store, cutter));
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
+        assert_eq!(cuts.len(), 1, "one multi-face through cut");
+        let ToolFaceCut::MultiFaceThrough { chains } = &cuts[0] else {
+            panic!("expected a multi-face through cut, got {:?}", cuts[0]);
+        };
+
+        for chain in chains {
+            assert_eq!(chain.segments.len(), 4, "one segment per box side face");
+            // All four box side faces are distinct.
+            for i in 0..4 {
+                for j in (i + 1)..4 {
+                    assert_ne!(chain.segments[i].tool_face, chain.segments[j].tool_face);
+                }
+            }
+            // Junctions are welded EXACTLY: each segment's last sample is the
+            // next segment's first sample (same 3D point, same target UV).
+            for i in 0..4 {
+                let a = &chain.segments[i];
+                let b = &chain.segments[(i + 1) % 4];
+                let pa = *a.branch.points.last().unwrap();
+                let pb = *b.branch.points.first().unwrap();
+                assert!(
+                    (pa - pb).norm() == 0.0,
+                    "junction {i} not welded: {pa:?} vs {pb:?}"
+                );
+                let ua = *a.branch.uv_a.last().unwrap();
+                let ub = *b.branch.uv_a.first().unwrap();
+                assert!((ua - ub).norm() == 0.0, "junction {i} target UV not welded");
+            }
+            // Every segment lies on the chain's single target face.
+            for seg in &chain.segments {
+                assert_eq!(seg.target_face, chain.target_face);
+            }
+        }
+
+        // Entry (lower mean tool v) and exit land on the two opposite wall
+        // faces, ordered by the same mean-v convention as the tube path.
+        assert_ne!(chains[0].target_face, chains[1].target_face);
+        assert!(chains[0].mean_v() < chains[1].mean_v());
     }
 
     #[test]

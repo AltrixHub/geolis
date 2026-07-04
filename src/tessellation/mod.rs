@@ -1,7 +1,7 @@
 mod edge_samples;
 mod stroke_style;
 mod tessellate_curve;
-mod tessellate_face;
+pub(crate) mod tessellate_face;
 mod tessellate_nurbs;
 mod tessellate_solid;
 mod tessellate_stroke;

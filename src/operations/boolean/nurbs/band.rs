@@ -42,12 +42,19 @@
 //! Subtract pushes the band normals INTO the hole, so the band face is built
 //! with `same_sense = false`.
 
+use std::collections::HashMap;
+
 use crate::error::{OperationError, Result};
-use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsSurface};
+use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::math::Point2;
-use crate::topology::{FaceData, FaceId, FaceSurface, FaceTrim, TopologyStore, TrimLoop, WireId};
+use crate::topology::{
+    EdgeCurve, EdgeData, EdgeId, FaceData, FaceId, FaceSurface, FaceTrim, OrientedEdge,
+    TopologyStore, TrimLoop, VertexId, WireData, WireId,
+};
 
 use super::loops::CutLoop;
+use super::punch::ChainRing;
+use super::stitch::CutChain;
 
 /// The two hole-ring wires shared with the punched target faces for one tool
 /// side face: the entry ring (lower mean v) and the exit ring (upper mean v).
@@ -178,6 +185,323 @@ pub(crate) fn build_pocket_band_face(
         trim: Some(trim),
         pcurves: Vec::new(),
     }))
+}
+
+/// One band fragment of a multi-face through cut: the hole-wall face built on
+/// one tool side face, trimmed to that face's chain segments.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BandFragment {
+    /// The tool side face this fragment lies on (its name seeds the band
+    /// fragment's persistent name).
+    pub tool_face: FaceId,
+    /// The new band fragment face.
+    pub face: FaceId,
+}
+
+/// Builds the band fragments of a multi-face through cut: ONE face per tool
+/// side face crossed by the chained loops, each trimmed to its segment of the
+/// entry and exit chains, sharing its entry / exit ring edges with the
+/// punched target faces and NEW kink-crossing edges with the adjacent
+/// fragments (F2 shared-edge topology).
+///
+/// The kink-crossing edges are straight segments between the entry and exit
+/// junction points — exact for extruded tools, whose kink edges are straight
+/// lines; they map to the fragments' `u = const` trim closings, so adjacent
+/// fragments emit identical rim vertices.
+///
+/// # Errors
+///
+/// Returns an error when the chains disagree on the crossed tool faces or
+/// kink junctions, a tool face is not NURBS, or a fragment polygon
+/// degenerates.
+pub(crate) fn build_band_fragments(
+    store: &mut TopologyStore,
+    entry: &CutChain,
+    exit: &CutChain,
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+) -> Result<Vec<BandFragment>> {
+    let n = entry.segments.len();
+    if n < 3 || exit.segments.len() != n {
+        return Err(OperationError::Failed(
+            "multi-face through cut requires entry and exit chains crossing \
+             the same three or more tool side faces"
+                .into(),
+        )
+        .into());
+    }
+
+    // Face index within the ENTRY chain: normalizes junction face pairs.
+    let entry_index: HashMap<FaceId, usize> = entry
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.tool_face, i))
+        .collect();
+    let exit_index_of = |face: FaceId| -> Result<usize> {
+        exit.segments
+            .iter()
+            .position(|s| s.tool_face == face)
+            .ok_or_else(|| {
+                OperationError::Failed(
+                    "entry and exit chained loops cross different tool side \
+                     faces"
+                        .into(),
+                )
+                .into()
+            })
+    };
+
+    // One shared kink-crossing edge per junction face pair.
+    let mut kink_edges: HashMap<(usize, usize), EdgeId> = HashMap::new();
+    for i in 0..n {
+        let key = junction_key(entry, i, &entry_index)?;
+        let exit_j = matching_junction(exit, key, &entry_index)?;
+        let entry_point = entry.segments[i].branch.points[0];
+        let exit_point = exit.segments[exit_j].branch.points[0];
+        let edge = straight_edge(
+            store,
+            entry_ring.junctions[i],
+            exit_ring.junctions[exit_j],
+            entry_point,
+            exit_point,
+        )?;
+        kink_edges.insert(key, edge);
+    }
+
+    // One fragment per entry segment.
+    let mut fragments = Vec::with_capacity(n);
+    for (i, seg) in entry.segments.iter().enumerate() {
+        let tool_face = seg.tool_face;
+        let surface = match &store.face(tool_face)?.surface {
+            FaceSurface::Nurbs(s) => s.clone(),
+            _ => {
+                return Err(OperationError::Failed(
+                    "through-cut band requires a NURBS tool side face".into(),
+                )
+                .into())
+            }
+        };
+        let j = exit_index_of(tool_face)?;
+
+        let entry_trace = clamp_trace(&seg.branch.uv_b, &surface);
+        let exit_trace = clamp_trace(&exit.segments[j].branch.uv_b, &surface);
+        let outer = stitch_band_loop(&entry_trace, &exit_trace)?;
+        let trim = FaceTrim::new(outer, Vec::new());
+
+        let key_start = junction_key(entry, i, &entry_index)?;
+        let key_end = junction_key(entry, (i + 1) % n, &entry_index)?;
+        let wire_edges = orient_cycle(
+            store,
+            &[
+                entry_ring.edges[i],
+                kink_edges[&key_end],
+                exit_ring.edges[j],
+                kink_edges[&key_start],
+            ],
+        )?;
+        let wire = store.add_wire(WireData {
+            edges: wire_edges,
+            is_closed: true,
+        });
+
+        // Subtract: band normals point INTO the hole (`same_sense = false`).
+        let face = store.add_face(FaceData {
+            surface: FaceSurface::Nurbs(surface),
+            outer_wire: wire,
+            inner_wires: Vec::new(),
+            same_sense: false,
+            trim: Some(trim),
+            pcurves: Vec::new(),
+        });
+        fragments.push(BandFragment { tool_face, face });
+    }
+    Ok(fragments)
+}
+
+/// Builds the pocket band fragments of a multi-face blind cut: ONE face per
+/// tool side face crossed by the entry chain, each running from its entry
+/// chain segment down to that side face's shared buried ring edge (whose
+/// other incident face is the buried cap — the pocket floor), with NEW
+/// kink-crossing edges from the entry junctions to the tool's own buried ring
+/// corner vertices.
+///
+/// # Errors
+///
+/// Returns an error when a tool face is not NURBS, adjacent buried ring
+/// edges share no corner vertex, or a fragment polygon degenerates.
+pub(crate) fn build_pocket_band_fragments(
+    store: &mut TopologyStore,
+    entry: &CutChain,
+    entry_ring: &ChainRing,
+    buried: &super::pocket::BuriedChainEnd,
+) -> Result<Vec<BandFragment>> {
+    let n = entry.segments.len();
+    if n < 3 || buried.rings.len() != n {
+        return Err(OperationError::Failed(
+            "multi-face pocket cut requires an entry chain crossing three or \
+             more tool side faces with one buried ring edge each"
+                .into(),
+        )
+        .into());
+    }
+
+    // One kink-crossing edge per junction: from the entry junction vertex
+    // down to the buried ring corner shared by the two adjacent ring edges.
+    let mut kinks: Vec<EdgeId> = Vec::with_capacity(n);
+    for i in 0..n {
+        let prev_ring = buried.rings[(i + n - 1) % n].0;
+        let next_ring = buried.rings[i].0;
+        let corner = common_vertex(store, prev_ring, next_ring)?;
+        let corner_point = store.vertex(corner)?.point;
+        let entry_point = entry.segments[i].branch.points[0];
+        kinks.push(straight_edge(
+            store,
+            entry_ring.junctions[i],
+            corner,
+            entry_point,
+            corner_point,
+        )?);
+    }
+
+    let mut fragments = Vec::with_capacity(n);
+    for (i, seg) in entry.segments.iter().enumerate() {
+        let tool_face = seg.tool_face;
+        let surface = match &store.face(tool_face)?.surface {
+            FaceSurface::Nurbs(s) => s.clone(),
+            _ => {
+                return Err(OperationError::Failed(
+                    "pocket band requires a NURBS tool side face".into(),
+                )
+                .into())
+            }
+        };
+        let (ring_edge, v_boundary) = buried.rings[i];
+        let entry_trace = clamp_trace(&seg.branch.uv_b, &surface);
+        let buried_uv = super::pocket::buried_edge_uv(store, ring_edge, v_boundary)?;
+        let outer = stitch_band_loop(&entry_trace, &buried_uv)?;
+        let trim = FaceTrim::new(outer, Vec::new());
+
+        let wire_edges = orient_cycle(
+            store,
+            &[entry_ring.edges[i], kinks[(i + 1) % n], ring_edge, kinks[i]],
+        )?;
+        let wire = store.add_wire(WireData {
+            edges: wire_edges,
+            is_closed: true,
+        });
+
+        // Pocket band normals point INTO the cavity (`same_sense = false`).
+        let face = store.add_face(FaceData {
+            surface: FaceSurface::Nurbs(surface),
+            outer_wire: wire,
+            inner_wires: Vec::new(),
+            same_sense: false,
+            trim: Some(trim),
+            pcurves: Vec::new(),
+        });
+        fragments.push(BandFragment { tool_face, face });
+    }
+    Ok(fragments)
+}
+
+/// The vertex shared by two edges (a tool ring corner).
+fn common_vertex(store: &TopologyStore, a: EdgeId, b: EdgeId) -> Result<VertexId> {
+    let ea = store.edge(a)?;
+    let eb = store.edge(b)?;
+    for va in [ea.start, ea.end] {
+        if va == eb.start || va == eb.end {
+            return Ok(va);
+        }
+    }
+    Err(OperationError::Failed("adjacent buried ring edges share no corner vertex".into()).into())
+}
+
+/// The unordered tool-face pair of a chain's junction `i` (between segments
+/// `i - 1` and `i`), normalized through the entry chain's face indices.
+fn junction_key(
+    chain: &CutChain,
+    i: usize,
+    entry_index: &HashMap<FaceId, usize>,
+) -> Result<(usize, usize)> {
+    let n = chain.segments.len();
+    let prev_face = chain.segments[(i + n - 1) % n].tool_face;
+    let next_face = chain.segments[i].tool_face;
+    let (Some(&a), Some(&b)) = (entry_index.get(&prev_face), entry_index.get(&next_face)) else {
+        return Err(OperationError::Failed(
+            "entry and exit chained loops cross different tool side faces".into(),
+        )
+        .into());
+    };
+    Ok((a.min(b), a.max(b)))
+}
+
+/// Finds the junction of `chain` whose face pair equals `key`.
+fn matching_junction(
+    chain: &CutChain,
+    key: (usize, usize),
+    entry_index: &HashMap<FaceId, usize>,
+) -> Result<usize> {
+    for j in 0..chain.segments.len() {
+        if junction_key(chain, j, entry_index)? == key {
+            return Ok(j);
+        }
+    }
+    Err(OperationError::Failed(
+        "entry and exit chained loops disagree on tool kink crossings".into(),
+    )
+    .into())
+}
+
+/// A straight (degree-1) 3D edge between two existing vertices.
+fn straight_edge(
+    store: &mut TopologyStore,
+    start: VertexId,
+    end: VertexId,
+    start_point: crate::math::Point3,
+    end_point: crate::math::Point3,
+) -> Result<EdgeId> {
+    let curve = NurbsCurve3D::polyline(&[start_point, end_point])?;
+    let (t0, t1) = curve.parameter_domain();
+    Ok(store.add_edge(EdgeData {
+        start,
+        end,
+        curve: EdgeCurve::Nurbs(curve),
+        t_start: t0,
+        t_end: t1,
+    }))
+}
+
+/// Orients a cyclic edge list into a closed wire: the first edge runs
+/// forward, every following edge is flipped as needed to continue from the
+/// previous end vertex, and the cycle must return to the first edge's start.
+fn orient_cycle(store: &TopologyStore, edges: &[EdgeId]) -> Result<Vec<OrientedEdge>> {
+    let first = store.edge(edges[0])?;
+    let start_vertex = first.start;
+    let mut current = first.end;
+    let mut oriented = vec![OrientedEdge::new(edges[0], true)];
+    for &e in &edges[1..] {
+        let edge = store.edge(e)?;
+        if edge.start == current {
+            oriented.push(OrientedEdge::new(e, true));
+            current = edge.end;
+        } else if edge.end == current {
+            oriented.push(OrientedEdge::new(e, false));
+            current = edge.start;
+        } else {
+            return Err(OperationError::Failed(
+                "band fragment boundary edges do not form a closed cycle".into(),
+            )
+            .into());
+        }
+    }
+    if current != start_vertex {
+        return Err(OperationError::Failed(
+            "band fragment boundary edges do not close back to their start".into(),
+        )
+        .into());
+    }
+    Ok(oriented)
 }
 
 /// Clamps a UV trace into the surface's parameter domain (the SSI corrector may
