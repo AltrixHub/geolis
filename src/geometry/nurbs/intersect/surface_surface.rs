@@ -304,7 +304,54 @@ fn march_branch(
     if trace.len() < 2 {
         return Ok(None);
     }
+    drop_end_microsteps(pair, &mut trace, options);
+    if trace.len() < 2 {
+        return Ok(None);
+    }
     Ok(Some(assemble(pair.a, &trace)?))
+}
+
+/// Drops the neighbor of an open-trace endpoint when the two lie within the
+/// corrector's own point-acceptance bound (`tolerance.max(1e-7)`): both are
+/// the same converged point by the marcher's acceptance, and the terminal
+/// sample (the exactly pinned boundary crossing) wins. Keeping both leaves a
+/// micro-step sliver at the branch end — typically the march SEED clamped
+/// onto an open bound with a loosely converged partner parameter — that
+/// downstream trim polygons cannot dedup consistently.
+///
+/// Only the two END pairs of an open trace are considered, and a neighbor
+/// lying bit-exactly on a CLOSED direction's bound (an exact seam sample,
+/// intentionally 3D-coincident with its partner) is never dropped.
+fn drop_end_microsteps(pair: &SurfacePair, trace: &mut Vec<Seed>, options: &IntersectionOptions) {
+    let accept = options.tolerance.max(1e-12).max(1e-7);
+    let da = &pair.dom_a;
+    let db = &pair.dom_b;
+    let on = |x: f64, lo: f64, hi: f64| (x - lo).abs() == 0.0 || (hi - x).abs() == 0.0;
+    let is_seam_sample = |s: &Seed| {
+        (da.u_closed && on(s.ua, da.u0, da.u1))
+            || (da.v_closed && on(s.va, da.v0, da.v1))
+            || (db.u_closed && on(s.ub, db.u0, db.u1))
+            || (db.v_closed && on(s.vb, db.v0, db.v1))
+    };
+    let coincident = |a: &Seed, b: &Seed| -> bool {
+        let (Ok(pa), Ok(pb)) = (pair.a.point_at(a.ua, a.va), pair.a.point_at(b.ua, b.va)) else {
+            return false;
+        };
+        (pa - pb).norm() < accept
+    };
+    if trace.len() > 2 {
+        let (end, neighbor) = (&trace[0], &trace[1]);
+        if !is_seam_sample(neighbor) && coincident(end, neighbor) {
+            trace.remove(1);
+        }
+    }
+    if trace.len() > 2 {
+        let n = trace.len();
+        let (end, neighbor) = (&trace[n - 1], &trace[n - 2]);
+        if !is_seam_sample(neighbor) && coincident(end, neighbor) {
+            trace.remove(n - 2);
+        }
+    }
 }
 
 /// Marches in one direction collecting intersection points. Returns the trace

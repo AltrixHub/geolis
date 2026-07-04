@@ -617,6 +617,44 @@ mod tests {
                 }),
                 loop_index: 3,
             },
+        ];
+        for name in cases {
+            let text = name.to_string();
+            let parsed: FaceName = text.parse().unwrap_or_else(|()| panic!("parse {text}"));
+            assert_eq!(parsed, name, "round trip failed for {text}");
+        }
+
+        let edges: Vec<EdgeName> = vec![
+            EdgeName::Created {
+                op: OpId::new("tube1"),
+                role: EdgeRole::RingStart,
+            },
+            EdgeName::CutRim {
+                op: OpId::new("cut1"),
+                target: Box::new(FaceName::Created {
+                    op: OpId::new("slab1"),
+                    role: FaceRole::Top,
+                }),
+                loop_index: 1,
+            },
+        ];
+        for name in edges {
+            let text = name.to_string();
+            let parsed: EdgeName = text.parse().unwrap_or_else(|()| panic!("parse {text}"));
+            assert_eq!(parsed, name, "round trip failed for {text}");
+        }
+
+        assert!("garbage".parse::<FaceName>().is_err());
+        assert!("band:cut1:zero:(created:a:top)"
+            .parse::<FaceName>()
+            .is_err());
+    }
+
+    /// The `split:` grammar arm round-trips, composes recursively, and
+    /// rejects malformed side / parenthesis forms.
+    #[test]
+    fn split_names_round_trip() {
+        let cases: Vec<FaceName> = vec![
             // Split fragments (F3b): left / right of a tagged wall face.
             FaceName::Split {
                 op: OpId::new("cut1"),
@@ -667,30 +705,17 @@ mod tests {
             assert_eq!(parsed, name, "round trip failed for {text}");
         }
 
-        let edges: Vec<EdgeName> = vec![
-            EdgeName::Created {
-                op: OpId::new("tube1"),
-                role: EdgeRole::RingStart,
-            },
-            EdgeName::CutRim {
-                op: OpId::new("cut1"),
-                target: Box::new(FaceName::Created {
-                    op: OpId::new("slab1"),
-                    role: FaceRole::Top,
-                }),
-                loop_index: 1,
-            },
-        ];
-        for name in edges {
-            let text = name.to_string();
-            let parsed: EdgeName = text.parse().unwrap_or_else(|()| panic!("parse {text}"));
-            assert_eq!(parsed, name, "round trip failed for {text}");
-        }
+        // The canonical form is exactly the documented grammar.
+        let sample = FaceName::Split {
+            op: OpId::new("cut1"),
+            parent: Box::new(FaceName::Created {
+                op: OpId::new("wall1"),
+                role: FaceRole::Top,
+            }),
+            side: SplitSide::Left,
+        };
+        assert_eq!(sample.to_string(), "split:cut1:l:(created:wall1:top)");
 
-        assert!("garbage".parse::<FaceName>().is_err());
-        assert!("band:cut1:zero:(created:a:top)"
-            .parse::<FaceName>()
-            .is_err());
         assert!("split:cut1:x:(created:a:top)".parse::<FaceName>().is_err());
         assert!("split:cut1:l:created:a:top".parse::<FaceName>().is_err());
     }

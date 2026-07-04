@@ -302,7 +302,6 @@ fn weld_chain(
     tool_faces: &[(FaceId, NurbsSurface)],
 ) -> Result<()> {
     use crate::error::OperationError;
-    use crate::math::Point2;
 
     let surface_in = |faces: &[(FaceId, NurbsSurface)], face: FaceId| -> Option<NurbsSurface> {
         faces
@@ -323,53 +322,12 @@ fn weld_chain(
                 *seg.branch.uv_a.last().unwrap_or_else(|| unreachable!()),
             )
         };
-        let (next_tool, next_target, next_uv_b, next_uv_a) = {
+        let (next_tool, next_target) = {
             let seg = &chain.segments[j];
-            (
-                seg.tool_face,
-                seg.target_face,
-                *seg.branch.uv_b.first().unwrap_or_else(|| unreachable!()),
-                *seg.branch.uv_a.first().unwrap_or_else(|| unreachable!()),
-            )
+            (seg.tool_face, seg.target_face)
         };
 
-        if prev_tool != next_tool {
-            // Tool-kink junction (same target face on both sides).
-            let (Some(prev_surf), Some(next_surf)) = (
-                surface_in(tool_faces, prev_tool),
-                surface_in(tool_faces, next_tool),
-            ) else {
-                return Err(OperationError::Failed(
-                    "chained cut loop references an unknown tool face".into(),
-                )
-                .into());
-            };
-            let bound_prev = nearest_u_bound(&prev_surf, prev_uv_b.x);
-            let bound_next = nearest_u_bound(&next_surf, next_uv_b.x);
-            let v_weld = prev_uv_b.y;
-            let point = prev_surf.point_at(bound_prev, v_weld)?;
-            let next_point = next_surf.point_at(bound_next, v_weld)?;
-            if (next_point - point).norm() > JUNCTION_TOLERANCE {
-                return Err(OperationError::Failed(
-                    "adjacent tool side faces do not share the kink-edge \
-                     parameterization at a chain junction"
-                        .into(),
-                )
-                .into());
-            }
-            {
-                let seg = &mut chain.segments[prev];
-                let last = seg.branch.points.len() - 1;
-                seg.branch.points[last] = point;
-                seg.branch.uv_b[last] = Point2::new(bound_prev, v_weld);
-            }
-            {
-                let seg = &mut chain.segments[j];
-                seg.branch.points[0] = point;
-                seg.branch.uv_b[0] = Point2::new(bound_next, v_weld);
-                seg.branch.uv_a[0] = prev_uv_a;
-            }
-        } else {
+        if prev_tool == next_tool {
             // Target-boundary junction (same tool face on both sides).
             let (Some(prev_surf), Some(next_surf)) = (
                 surface_in(target_faces, prev_target),
@@ -380,31 +338,121 @@ fn weld_chain(
                 )
                 .into());
             };
-            let prev_pin = pin_to_boundary(&prev_surf, prev_uv_a);
-            let next_pin = pin_to_boundary(&next_surf, next_uv_a);
-            let point = prev_surf.point_at(prev_pin.x, prev_pin.y)?;
-            let next_point = next_surf.point_at(next_pin.x, next_pin.y)?;
-            if (next_point - point).norm() > JUNCTION_TOLERANCE {
+            weld_target_junction(chain, prev, j, &prev_surf, &next_surf, prev_uv_b)?;
+        } else {
+            // Tool-kink junction (same target face on both sides).
+            let (Some(prev_surf), Some(next_surf)) = (
+                surface_in(tool_faces, prev_tool),
+                surface_in(tool_faces, next_tool),
+            ) else {
                 return Err(OperationError::Failed(
-                    "adjacent target faces do not share the boundary-edge \
-                     parameterization at a chain junction"
-                        .into(),
+                    "chained cut loop references an unknown tool face".into(),
                 )
                 .into());
-            }
-            {
-                let seg = &mut chain.segments[prev];
-                let last = seg.branch.points.len() - 1;
-                seg.branch.points[last] = point;
-                seg.branch.uv_a[last] = prev_pin;
-            }
-            {
-                let seg = &mut chain.segments[j];
-                seg.branch.points[0] = point;
-                seg.branch.uv_a[0] = next_pin;
-                seg.branch.uv_b[0] = prev_uv_b;
-            }
+            };
+            weld_tool_junction(chain, prev, j, &prev_surf, &next_surf, prev_uv_a)?;
         }
+    }
+    Ok(())
+}
+
+/// Welds a tool-kink junction: tool UVs pinned exactly on their `u` bounds
+/// at a common `v`; the shared 3D point evaluated on the outgoing tool face.
+fn weld_tool_junction(
+    chain: &mut CutChain,
+    prev: usize,
+    next: usize,
+    prev_surf: &NurbsSurface,
+    next_surf: &NurbsSurface,
+    prev_uv_a: crate::math::Point2,
+) -> Result<()> {
+    use crate::error::OperationError;
+    use crate::math::Point2;
+
+    let prev_uv_b = *chain.segments[prev]
+        .branch
+        .uv_b
+        .last()
+        .unwrap_or_else(|| unreachable!());
+    let next_uv_b = *chain.segments[next]
+        .branch
+        .uv_b
+        .first()
+        .unwrap_or_else(|| unreachable!());
+    let bound_prev = nearest_u_bound(prev_surf, prev_uv_b.x);
+    let bound_next = nearest_u_bound(next_surf, next_uv_b.x);
+    let v_weld = prev_uv_b.y;
+    let point = prev_surf.point_at(bound_prev, v_weld)?;
+    let next_point = next_surf.point_at(bound_next, v_weld)?;
+    if (next_point - point).norm() > JUNCTION_TOLERANCE {
+        return Err(OperationError::Failed(
+            "adjacent tool side faces do not share the kink-edge \
+             parameterization at a chain junction"
+                .into(),
+        )
+        .into());
+    }
+    {
+        let seg = &mut chain.segments[prev];
+        let last = seg.branch.points.len() - 1;
+        seg.branch.points[last] = point;
+        seg.branch.uv_b[last] = Point2::new(bound_prev, v_weld);
+    }
+    {
+        let seg = &mut chain.segments[next];
+        seg.branch.points[0] = point;
+        seg.branch.uv_b[0] = Point2::new(bound_next, v_weld);
+        seg.branch.uv_a[0] = prev_uv_a;
+    }
+    Ok(())
+}
+
+/// Welds a target-boundary junction: target UVs pinned exactly on their
+/// domain bounds; the shared 3D point evaluated on the outgoing target face
+/// and verified against the incoming face's parameterization.
+fn weld_target_junction(
+    chain: &mut CutChain,
+    prev: usize,
+    next: usize,
+    prev_surf: &NurbsSurface,
+    next_surf: &NurbsSurface,
+    prev_uv_b: crate::math::Point2,
+) -> Result<()> {
+    use crate::error::OperationError;
+
+    let prev_uv_a = *chain.segments[prev]
+        .branch
+        .uv_a
+        .last()
+        .unwrap_or_else(|| unreachable!());
+    let next_uv_a = *chain.segments[next]
+        .branch
+        .uv_a
+        .first()
+        .unwrap_or_else(|| unreachable!());
+    let prev_pin = pin_to_boundary(prev_surf, prev_uv_a);
+    let next_pin = pin_to_boundary(next_surf, next_uv_a);
+    let point = prev_surf.point_at(prev_pin.x, prev_pin.y)?;
+    let next_point = next_surf.point_at(next_pin.x, next_pin.y)?;
+    if (next_point - point).norm() > JUNCTION_TOLERANCE {
+        return Err(OperationError::Failed(
+            "adjacent target faces do not share the boundary-edge \
+             parameterization at a chain junction"
+                .into(),
+        )
+        .into());
+    }
+    {
+        let seg = &mut chain.segments[prev];
+        let last = seg.branch.points.len() - 1;
+        seg.branch.points[last] = point;
+        seg.branch.uv_a[last] = prev_pin;
+    }
+    {
+        let seg = &mut chain.segments[next];
+        seg.branch.points[0] = point;
+        seg.branch.uv_a[0] = next_pin;
+        seg.branch.uv_b[0] = prev_uv_b;
     }
     Ok(())
 }

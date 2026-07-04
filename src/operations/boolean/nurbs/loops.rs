@@ -653,7 +653,7 @@ mod tests {
                             .1;
                         let ((u0, u1), _) = surf.parameter_domain();
                         assert!(
-                            uv.x == u0 || uv.x == u1,
+                            (uv.x - u0).abs() == 0.0 || (u1 - uv.x).abs() == 0.0,
                             "target UV not pinned on its u bound: {uv:?}"
                         );
                     }

@@ -29,6 +29,7 @@ pub(crate) mod intersect;
 pub(crate) mod loops;
 pub(crate) mod pocket;
 pub(crate) mod punch;
+pub(crate) mod split;
 pub(crate) mod stitch;
 
 use crate::error::{OperationError, Result};
