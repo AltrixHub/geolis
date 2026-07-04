@@ -137,7 +137,7 @@ pub(crate) fn extract_cut_loops(
     }
 
     let mut cuts = group_per_tool_face(&loops, tool_faces)?;
-    let chains = stitch::chain_open_segments(open_segments, tool_faces)?;
+    let chains = stitch::chain_open_segments(&open_segments, tool_faces)?;
     cuts.extend(group_chains(chains, tool_faces)?);
 
     if cuts.is_empty() {

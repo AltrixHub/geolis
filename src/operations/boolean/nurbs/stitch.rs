@@ -130,7 +130,7 @@ pub(crate) fn open_branch_on_tool_kinks(
 /// error when a junction is ambiguous, a chain mixes target faces, or a chain
 /// crosses one tool face twice.
 pub(crate) fn chain_open_segments(
-    segments: Vec<CutLoop>,
+    segments: &[CutLoop],
     tool_faces: &[(FaceId, NurbsSurface)],
 ) -> Result<Vec<CutChain>> {
     use crate::error::OperationError;

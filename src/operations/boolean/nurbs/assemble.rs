@@ -106,60 +106,82 @@ pub(crate) fn subtract_through_cut(
                 }
             }
             super::loops::ToolFaceCut::MultiFaceThrough { chains } => {
-                // Chained loops: punch each chain as one hole ring of one
-                // edge per segment, then build one band fragment per tool
-                // side face, sharing the ring edges and the new kink edges.
-                let entry = remap_chain(&chains[0], &id_map)?;
-                let exit = remap_chain(&chains[1], &id_map)?;
-                let entry_ring = super::punch::punch_chain(store, &entry)?;
-                let exit_ring = super::punch::punch_chain(store, &exit)?;
-                let fragments = super::band::build_band_fragments(
-                    store,
-                    &entry,
-                    &exit,
-                    &entry_ring,
-                    &exit_ring,
-                )?;
-                for fragment in &fragments {
-                    result_faces.push(fragment.face);
-                }
-                if let Some(op) = op_id {
-                    for fragment in &fragments {
-                        name_band(store, op, fragment.tool_face, fragment.face);
-                    }
-                    name_rim(store, op, entry.target_face, entry_ring.wire, 0);
-                    name_rim(store, op, exit.target_face, exit_ring.wire, 1);
-                }
+                assemble_multiface_through(store, chains, &id_map, &mut result_faces, op_id)?;
             }
             super::loops::ToolFaceCut::MultiFacePocket { entry } => {
-                // Buried multi-face tool: the shared bottom ring is resolved
-                // across all crossed side faces; the floor is the flipped cap.
-                let buried = super::pocket::resolve_buried_chain_end(store, entry, &tool_faces)?;
-                let remapped = remap_chain(entry, &id_map)?;
-                let entry_ring = super::punch::punch_chain(store, &remapped)?;
-                let fragments = super::band::build_pocket_band_fragments(
+                assemble_multiface_pocket(
                     store,
-                    &remapped,
-                    &entry_ring,
-                    &buried,
+                    entry,
+                    &tool_faces,
+                    &id_map,
+                    &mut result_faces,
+                    op_id,
                 )?;
-                for fragment in &fragments {
-                    result_faces.push(fragment.face);
-                }
-                let floor = super::pocket::pocket_floor(store, buried.cap_face)?;
-                result_faces.push(floor);
-                if let Some(op) = op_id {
-                    for fragment in &fragments {
-                        name_band(store, op, fragment.tool_face, fragment.face);
-                    }
-                    name_rim(store, op, remapped.target_face, entry_ring.wire, 0);
-                    name_floor(store, op, buried.cap_face, floor);
-                }
             }
         }
     }
 
     Ok(finish_solid(store, result_faces))
+}
+
+/// Assembles one multi-face through cut: punches each chain as one hole ring
+/// of one edge per segment, then builds one band fragment per tool side face,
+/// sharing the ring edges and the new kink edges.
+fn assemble_multiface_through(
+    store: &mut TopologyStore,
+    chains: &[super::stitch::CutChain; 2],
+    id_map: &HashMap<FaceId, FaceId>,
+    result_faces: &mut Vec<FaceId>,
+    op_id: Option<&crate::topology::OpId>,
+) -> Result<()> {
+    let entry = remap_chain(&chains[0], id_map)?;
+    let exit = remap_chain(&chains[1], id_map)?;
+    let entry_ring = super::punch::punch_chain(store, &entry)?;
+    let exit_ring = super::punch::punch_chain(store, &exit)?;
+    let fragments =
+        super::band::build_band_fragments(store, &entry, &exit, &entry_ring, &exit_ring)?;
+    for fragment in &fragments {
+        result_faces.push(fragment.face);
+    }
+    if let Some(op) = op_id {
+        for fragment in &fragments {
+            name_band(store, op, fragment.tool_face, fragment.face);
+        }
+        name_rim(store, op, entry.target_face, entry_ring.wire, 0);
+        name_rim(store, op, exit.target_face, exit_ring.wire, 1);
+    }
+    Ok(())
+}
+
+/// Assembles one multi-face pocket cut: the shared bottom ring is resolved
+/// across all crossed side faces, one band fragment per face runs down to its
+/// buried ring edge, and the flipped buried cap becomes the floor.
+fn assemble_multiface_pocket(
+    store: &mut TopologyStore,
+    entry: &super::stitch::CutChain,
+    tool_faces: &[FaceId],
+    id_map: &HashMap<FaceId, FaceId>,
+    result_faces: &mut Vec<FaceId>,
+    op_id: Option<&crate::topology::OpId>,
+) -> Result<()> {
+    let buried = super::pocket::resolve_buried_chain_end(store, entry, tool_faces)?;
+    let remapped = remap_chain(entry, id_map)?;
+    let entry_ring = super::punch::punch_chain(store, &remapped)?;
+    let fragments =
+        super::band::build_pocket_band_fragments(store, &remapped, &entry_ring, &buried)?;
+    for fragment in &fragments {
+        result_faces.push(fragment.face);
+    }
+    let floor = super::pocket::pocket_floor(store, buried.cap_face)?;
+    result_faces.push(floor);
+    if let Some(op) = op_id {
+        for fragment in &fragments {
+            name_band(store, op, fragment.tool_face, fragment.face);
+        }
+        name_rim(store, op, remapped.target_face, entry_ring.wire, 0);
+        name_floor(store, op, buried.cap_face, floor);
+    }
+    Ok(())
 }
 
 /// Remaps a chained loop's target face (all segments lie on one face) to its

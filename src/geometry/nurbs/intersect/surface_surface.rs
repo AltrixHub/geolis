@@ -633,7 +633,7 @@ fn correct(
         ];
         (s.ua, s.va) = pair.dom_a.apply(raw[0], raw[1]);
         (s.ub, s.vb) = pair.dom_b.apply(raw[2], raw[3]);
-        if let Some(clamp) = detect_open_clamp(pair, raw, s) {
+        if let Some(clamp) = detect_open_clamp(pair, raw) {
             last_clamp = Some(clamp);
         }
         if delta.norm() < tol {
@@ -651,21 +651,27 @@ fn correct(
     }
 }
 
-/// Detects which OPEN parametric direction the last Newton update clamped:
-/// compares the raw (pre-domain) parameter values against the applied ones.
-/// Wrapping of closed directions is not a clamp. Returns the parameter index
-/// in the `(ua, va, ub, vb)` layout and the bound that pinned it.
-fn detect_open_clamp(pair: &SurfacePair, raw: [f64; 4], applied: Seed) -> Option<(usize, f64)> {
-    let ap = seed_params(applied);
-    let open = [
-        !pair.dom_a.u_closed,
-        !pair.dom_a.v_closed,
-        !pair.dom_b.u_closed,
-        !pair.dom_b.v_closed,
+/// Detects which OPEN parametric direction the last Newton update escaped:
+/// a raw (pre-domain) parameter value outside its open domain means the clamp
+/// pinned it at the bound it crossed. Wrapping of closed directions is not a
+/// clamp. Returns the parameter index in the `(ua, va, ub, vb)` layout and
+/// the bound that pinned it.
+fn detect_open_clamp(pair: &SurfacePair, raw: [f64; 4]) -> Option<(usize, f64)> {
+    let domains = [
+        (!pair.dom_a.u_closed, pair.dom_a.u0, pair.dom_a.u1),
+        (!pair.dom_a.v_closed, pair.dom_a.v0, pair.dom_a.v1),
+        (!pair.dom_b.u_closed, pair.dom_b.u0, pair.dom_b.u1),
+        (!pair.dom_b.v_closed, pair.dom_b.v0, pair.dom_b.v1),
     ];
-    for param in 0..4 {
-        if open[param] && raw[param] != ap[param] {
-            return Some((param, ap[param]));
+    for (param, &(open, lo, hi)) in domains.iter().enumerate() {
+        if !open {
+            continue;
+        }
+        if raw[param] < lo {
+            return Some((param, lo));
+        }
+        if raw[param] > hi {
+            return Some((param, hi));
         }
     }
     None
