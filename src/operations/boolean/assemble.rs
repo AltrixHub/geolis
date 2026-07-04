@@ -195,9 +195,8 @@ fn create_face_from_polygon(
 
     // Direct path — build outer wire + inner wires + face from the
     // snapped (effective) polygon as-is.
-    let outer_wire = match build_wire_via_merger(store, merger, &effective_boundary)? {
-        Some(w) => w,
-        None => return Ok(Vec::new()),
+    let Some(outer_wire) = build_wire_via_merger(store, merger, &effective_boundary)? else {
+        return Ok(Vec::new());
     };
     let mut inner_wires = Vec::with_capacity(snapped_inners.len());
     for inner in &snapped_inners {
@@ -257,6 +256,8 @@ fn loops_are_simple_on_plane(
 
 /// Detects proper-crossings and collinear-overlap between non-adjacent
 /// edges of a single closed loop projected to UV.
+// Segment-intersection math reads clearest in textbook a/b/c/d notation.
+#[allow(clippy::many_single_char_names)]
 fn loop_uv_is_simple(uv: &[(f64, f64)]) -> bool {
     const CROSS_EPS: f64 = 1e-12;
     const PARAM_EPS: f64 = 1e-9;
@@ -316,7 +317,7 @@ fn loop_uv_is_simple(uv: &[(f64, f64)]) -> bool {
     true
 }
 
-/// Materialises planar arrangement output back into BRep faces. Used
+/// Materialises planar arrangement output back into `BRep` faces. Used
 /// by `create_face_from_polygon` to launder boolean fragments through
 /// the 2D engine so self-intersecting inputs become a set of simple
 /// sub-faces.
@@ -364,9 +365,8 @@ fn build_faces_via_planar_arrangement(
     };
     let inputs = [pwh];
     let oracle = UnionOracle { inputs: &inputs };
-    let arranged = match run_arrangement(&inputs, &oracle) {
-        Ok(r) => r,
-        Err(_) => return Ok(Vec::new()),
+    let Ok(arranged) = run_arrangement(&inputs, &oracle) else {
+        return Ok(Vec::new());
     };
 
     let mut face_ids = Vec::with_capacity(arranged.len());

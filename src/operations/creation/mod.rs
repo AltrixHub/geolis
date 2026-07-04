@@ -4,6 +4,7 @@ mod make_cylinder;
 mod make_face;
 mod make_nurbs_face;
 mod make_nurbs_solid;
+mod make_segmented_prism;
 mod make_solid;
 mod make_sphere;
 mod make_wire;
@@ -16,6 +17,7 @@ pub use make_nurbs_face::MakeNurbsFace;
 pub use make_nurbs_solid::{
     MakeCurvedSlab, MakeCurvedWall, MakeNurbsPrism, MakeNurbsTube, MakeRevolvedSolid,
 };
+pub use make_segmented_prism::{MakeSegmentedPrism, ProfileSegment};
 pub use make_solid::MakeSolid;
 pub use make_sphere::MakeSphere;
 pub use make_wire::MakeWire;

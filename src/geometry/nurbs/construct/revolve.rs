@@ -210,6 +210,8 @@ mod tests {
     }
 
     #[test]
+    // Surface-parameter math reads clearest in u/v/p/r notation.
+    #[allow(clippy::many_single_char_names)]
     fn full_revolve_of_parallel_line_is_cylinder() {
         let r = 1.5;
         let profile = vertical_line(r);
@@ -227,6 +229,8 @@ mod tests {
     }
 
     #[test]
+    // Surface-parameter math reads clearest in u/v/p/h notation.
+    #[allow(clippy::many_single_char_names)]
     fn full_revolve_of_tilted_line_is_cone() {
         // Profile from (1, 0, 0) to (2, 0, 2): radius grows linearly with z.
         let profile = NurbsCurve3D::from_unweighted(

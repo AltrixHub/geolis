@@ -546,6 +546,7 @@ mod tests {
             .iter()
             .find(|f| !f.inner_boundaries.is_empty())
             .unwrap();
+        #[allow(clippy::cast_precision_loss)]
         let centroid_y: f64 = frag_with_hole.inner_boundaries[0]
             .iter()
             .map(|pt| pt.y)
