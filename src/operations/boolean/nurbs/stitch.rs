@@ -19,11 +19,15 @@
 //! open boundary of the target face (a target kink / ring boundary) while
 //! staying strictly inside the tool face's domain — always within the
 //! marcher's own [`BOUNDARY_EPS`], never a new tolerance. A corner endpoint
-//! (pinned on both) is degenerate and rejected. Every endpoint must find
-//! exactly one partner endpoint at the same 3D point; a junction must change
-//! the tool face (kink crossing, same target) or the target face (target
-//! boundary crossing, same tool) — changing both at once is ambiguous. Any
-//! violation keeps the pre-chaining typed errors verbatim.
+//! (pinned on both — a tool kink coinciding with a target boundary, e.g. a
+//! cutter sill flush with the target's cap) is admissible as a
+//! target-boundary terminal (F6 R3): the chain continues through the kink
+//! when a partner branch exists and terminates on the target boundary
+//! otherwise. Every endpoint must find exactly one partner endpoint at the
+//! same 3D point; a junction must change the tool face (kink crossing, same
+//! target) or the target face (target boundary crossing, same tool) —
+//! changing both at once is ambiguous. Any violation keeps the pre-chaining
+//! typed errors verbatim.
 
 use crate::error::Result;
 use crate::geometry::nurbs::{NurbsSurface, SurfaceIntersectionCurve, BOUNDARY_EPS};
@@ -40,13 +44,23 @@ use super::loops::CutLoop;
 /// converges orders of magnitude tighter.
 pub(crate) const JUNCTION_TOLERANCE: f64 = 1e-7;
 
-/// A closed cut loop chained from open SSI branches. `segments[i]` runs on
-/// one (tool face × target face) pair; segment `i`'s last sample coincides
-/// exactly (welded) with segment `i + 1`'s first sample (cyclic).
+/// A cut loop chained from open SSI branches. `segments[i]` runs on one
+/// (tool face × target face) pair; segment `i`'s last sample coincides
+/// exactly (welded) with segment `i + 1`'s first sample (cyclic when
+/// `closed`).
+///
+/// An OPEN chain (`closed == false`) is a cap-touching cut: both terminal
+/// endpoints are pinned exactly on an open boundary of their target face —
+/// the ring edge shared with a planar cap. The cut's circuit is closed by
+/// the cap-plane closure edges the band assembly creates between the entry
+/// and exit chains' matching terminals (F6 R2).
 #[derive(Debug, Clone)]
 pub(crate) struct CutChain {
-    /// The chained per-face-pair segments, in cyclic order.
+    /// The chained per-face-pair segments, in cyclic (closed) or
+    /// terminal-to-terminal (open) order.
     pub segments: Vec<CutLoop>,
+    /// Whether the chain closes back on itself.
+    pub closed: bool,
 }
 
 impl CutChain {
@@ -126,6 +140,13 @@ fn classify_endpoint(
     match (on_tool_kink, on_target) {
         (true, false) => Some(EndpointKind::ToolKink),
         (false, true) if !on_tool_u && !on_tool_v => Some(EndpointKind::TargetBoundary),
+        // A corner endpoint — tool kink coinciding with a target boundary
+        // (e.g. a cutter sill flush with the target's bottom cap, F6 R3).
+        // Admissible as a target-boundary terminal: chain extension still
+        // continues through the kink when a partner branch exists, and
+        // terminates on the target boundary when the flush face's
+        // tangential branches were dropped by the loop extraction.
+        (true, true) => Some(EndpointKind::TargetBoundary),
         _ => None,
     }
 }
@@ -153,19 +174,25 @@ pub(crate) fn open_branch_admissible(
     true
 }
 
-/// Chains accepted open segments into closed [`CutChain`]s.
+/// Chains accepted open segments into [`CutChain`]s.
 ///
 /// Deterministic: chains start at the earliest unused segment in the input
 /// order (the SSI extraction iterates tool faces then target faces, so the
 /// input order is stable) and extend from that segment's natural direction.
+/// A chain that returns to its first sample is CLOSED. A chain whose forward
+/// extension exhausts on a target-boundary endpoint is extended backward
+/// from its head; when both terminals rest on target-boundary crossings the
+/// chain is accepted OPEN (a cap-touching cut), oriented so its
+/// lexicographically smaller terminal comes first, and its terminals are
+/// pinned exactly onto their target boundary bounds.
 ///
 /// # Errors
 ///
-/// Returns the verbatim open-branch typed error when an endpoint finds no
-/// partner (partial cut) or the partner changes neither the tool nor the
-/// target face; a typed error when a junction is ambiguous (multiple
-/// partners, or both faces change at once) or a chain crosses one tool face
-/// in two separate runs.
+/// Returns the verbatim open-branch typed error when an exhausted endpoint
+/// is not a clean target-boundary crossing (partial cut) or a junction
+/// partner changes neither the tool nor the target face; a typed error when
+/// a junction is ambiguous (multiple partners, or both faces change at
+/// once) or a chain crosses one tool face in two separate runs.
 pub(crate) fn chain_open_segments(
     segments: &[CutLoop],
     target_faces: &[(FaceId, NurbsSurface)],
@@ -183,72 +210,30 @@ pub(crate) fn chain_open_segments(
         }
         used[start] = true;
         let mut chain: Vec<CutLoop> = vec![segments[start].clone()];
-        let chain_start = first_point(&chain[0]);
 
-        loop {
-            let tail = chain.last().unwrap_or_else(|| unreachable!());
-            let current_end = last_point(tail);
-
-            // Closure: back at the chain's first sample.
-            if chain.len() >= 2 && (current_end - chain_start).norm() <= JUNCTION_TOLERANCE {
-                break;
-            }
-
-            // Find the unique unused partner endpoint at the current end.
-            let mut candidates: Vec<(usize, bool)> = Vec::new();
-            for (idx, seg) in segments.iter().enumerate() {
-                if used[idx] {
-                    continue;
-                }
-                if (first_point(seg) - current_end).norm() <= JUNCTION_TOLERANCE {
-                    candidates.push((idx, false));
-                }
-                if (last_point(seg) - current_end).norm() <= JUNCTION_TOLERANCE {
-                    candidates.push((idx, true));
+        let closed = extend_chain_forward(&mut chain, segments, &mut used)?;
+        if !closed {
+            extend_chain_backward(&mut chain, segments, &mut used)?;
+            // Both exhausted terminals must be clean target-boundary
+            // crossings (the ring shared with a planar cap); anything else
+            // keeps the verbatim partial-cut error.
+            for (uv_b, uv_a, target, tool) in [
+                terminal(&chain, false, target_faces, tool_faces)?,
+                terminal(&chain, true, target_faces, tool_faces)?,
+            ] {
+                if classify_endpoint(uv_b, uv_a, &target, &tool)
+                    != Some(EndpointKind::TargetBoundary)
+                {
+                    return Err(open_branch_error());
                 }
             }
-            match candidates.as_slice() {
-                [] => return Err(open_branch_error()),
-                [(idx, flip)] => {
-                    let mut next = segments[*idx].clone();
-                    if *flip {
-                        reverse_segment(&mut next);
-                    }
-                    let tool_changes = next.tool_face != tail.tool_face;
-                    let target_changes = next.target_face != tail.target_face;
-                    match (tool_changes, target_changes) {
-                        // A junction crosses a tool kink (adjacent tool
-                        // faces) or a target boundary (adjacent target
-                        // faces) — never neither, never both.
-                        (false, false) => return Err(open_branch_error()),
-                        (true, true) => {
-                            return Err(OperationError::Failed(
-                                "ambiguous chain junction: tool face and target \
-                                 face change at the same crossing point"
-                                    .into(),
-                            )
-                            .into());
-                        }
-                        _ => {}
-                    }
-                    used[*idx] = true;
-                    chain.push(next);
-                }
-                _ => {
-                    return Err(OperationError::Failed(
-                        "ambiguous kink-edge junction: multiple open branch \
-                         endpoints coincide at one tool kink crossing"
-                            .into(),
-                    )
-                    .into());
-                }
-            }
+            normalize_open_chain(&mut chain);
         }
 
-        // Each tool face contributes at most ONE contiguous (cyclic) run of
-        // segments per chained loop: a loop entering the same tool face in
-        // two separate runs is out of scope.
-        if cyclic_run_count_exceeds_one(&chain, |s| s.tool_face) {
+        // Each tool face contributes at most ONE contiguous run of segments
+        // per chained loop (cyclic for closed chains): a loop entering the
+        // same tool face in two separate runs is out of scope.
+        if run_count_exceeds_one(&chain, closed, |s| s.tool_face) {
             return Err(OperationError::Failed(
                 "chained cut loop crosses one tool side face twice \
                  (unsupported)"
@@ -257,25 +242,272 @@ pub(crate) fn chain_open_segments(
             .into());
         }
 
-        let mut cut_chain = CutChain { segments: chain };
+        let mut cut_chain = CutChain {
+            segments: chain,
+            closed,
+        };
         weld_chain(&mut cut_chain, target_faces, tool_faces)?;
+        if !closed {
+            pin_open_terminals(&mut cut_chain, target_faces)?;
+        }
         chains.push(cut_chain);
     }
     Ok(chains)
 }
 
+/// Extends a chain forward from its tail until it closes (`Ok(true)`) or no
+/// partner endpoint exists (`Ok(false)`).
+fn extend_chain_forward(
+    chain: &mut Vec<CutLoop>,
+    segments: &[CutLoop],
+    used: &mut [bool],
+) -> Result<bool> {
+    let chain_start = first_point(&chain[0]);
+    loop {
+        let tail = chain.last().unwrap_or_else(|| unreachable!());
+        let current_end = last_point(tail);
+
+        // Closure: back at the chain's first sample.
+        if chain.len() >= 2 && (current_end - chain_start).norm() <= JUNCTION_TOLERANCE {
+            return Ok(true);
+        }
+
+        match find_partner(segments, used, current_end)? {
+            None => return Ok(false),
+            Some((idx, flip)) => {
+                let mut next = segments[idx].clone();
+                if flip {
+                    reverse_segment(&mut next);
+                }
+                check_junction(tail, &next)?;
+                used[idx] = true;
+                chain.push(next);
+            }
+        }
+    }
+}
+
+/// Extends a chain backward from its head until no partner endpoint exists.
+fn extend_chain_backward(
+    chain: &mut Vec<CutLoop>,
+    segments: &[CutLoop],
+    used: &mut [bool],
+) -> Result<()> {
+    loop {
+        let head = chain.first().unwrap_or_else(|| unreachable!());
+        let current_start = first_point(head);
+        match find_partner(segments, used, current_start)? {
+            None => return Ok(()),
+            Some((idx, flip)) => {
+                let mut prev = segments[idx].clone();
+                // A backward partner matched via its FIRST point must be
+                // flipped so its last sample meets the chain head.
+                if !flip {
+                    reverse_segment(&mut prev);
+                }
+                check_junction(&prev, head)?;
+                used[idx] = true;
+                chain.insert(0, prev);
+            }
+        }
+    }
+}
+
+/// Finds the unique unused partner endpoint at `point`. `Ok(None)` when no
+/// endpoint coincides; the `bool` is `true` when the partner matched via its
+/// LAST sample (it must be reversed for forward extension).
+///
+/// # Errors
+///
+/// A typed error when multiple endpoints coincide (ambiguous junction).
+fn find_partner(
+    segments: &[CutLoop],
+    used: &[bool],
+    point: Point3,
+) -> Result<Option<(usize, bool)>> {
+    use crate::error::OperationError;
+
+    let mut candidates: Vec<(usize, bool)> = Vec::new();
+    for (idx, seg) in segments.iter().enumerate() {
+        if used[idx] {
+            continue;
+        }
+        if (first_point(seg) - point).norm() <= JUNCTION_TOLERANCE {
+            candidates.push((idx, false));
+        }
+        if (last_point(seg) - point).norm() <= JUNCTION_TOLERANCE {
+            candidates.push((idx, true));
+        }
+    }
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [unique] => Ok(Some(*unique)),
+        _ => Err(OperationError::Failed(
+            "ambiguous kink-edge junction: multiple open branch \
+             endpoints coincide at one tool kink crossing"
+                .into(),
+        )
+        .into()),
+    }
+}
+
+/// Validates a chain junction: it must cross a tool kink (adjacent tool
+/// faces) or a target boundary (adjacent target faces) — never neither,
+/// never both.
+fn check_junction(from: &CutLoop, to: &CutLoop) -> Result<()> {
+    use crate::error::OperationError;
+
+    let tool_changes = to.tool_face != from.tool_face;
+    let target_changes = to.target_face != from.target_face;
+    match (tool_changes, target_changes) {
+        (false, false) => Err(open_branch_error()),
+        (true, true) => Err(OperationError::Failed(
+            "ambiguous chain junction: tool face and target \
+             face change at the same crossing point"
+                .into(),
+        )
+        .into()),
+        _ => Ok(()),
+    }
+}
+
+/// The (tool UV, target UV, target surface, tool surface) of an open
+/// chain's head (`tail == false`) or tail terminal.
+fn terminal(
+    chain: &[CutLoop],
+    tail: bool,
+    target_faces: &[(FaceId, NurbsSurface)],
+    tool_faces: &[(FaceId, NurbsSurface)],
+) -> Result<(
+    crate::math::Point2,
+    crate::math::Point2,
+    NurbsSurface,
+    NurbsSurface,
+)> {
+    use crate::error::OperationError;
+
+    let seg = if tail {
+        chain.last().unwrap_or_else(|| unreachable!())
+    } else {
+        &chain[0]
+    };
+    let (uv_b, uv_a) = if tail {
+        (
+            *seg.branch.uv_b.last().unwrap_or_else(|| unreachable!()),
+            *seg.branch.uv_a.last().unwrap_or_else(|| unreachable!()),
+        )
+    } else {
+        (seg.branch.uv_b[0], seg.branch.uv_a[0])
+    };
+    let target = target_faces
+        .iter()
+        .find(|(id, _)| *id == seg.target_face)
+        .map(|(_, s)| s.clone())
+        .ok_or_else(|| {
+            OperationError::Failed("chained cut loop references an unknown target face".into())
+        })?;
+    let tool = tool_faces
+        .iter()
+        .find(|(id, _)| *id == seg.tool_face)
+        .map(|(_, s)| s.clone())
+        .ok_or_else(|| {
+            OperationError::Failed("chained cut loop references an unknown tool face".into())
+        })?;
+    Ok((uv_b, uv_a, target, tool))
+}
+
+/// Orients an open chain deterministically: the lexicographically smaller
+/// 3D terminal comes first, so the entry and exit chains of one
+/// cap-touching cut traverse their shared tool faces in the same direction
+/// and their terminals pair index-to-index.
+///
+/// The comparison treats coordinates within [`JUNCTION_TOLERANCE`] as equal
+/// before moving to the next coordinate: the two terminals of one chain
+/// nominally share coordinates that differ only by evaluation noise (a jamb
+/// chain's terminals share x and y exactly up to the marcher's residual),
+/// and a raw float comparison would flip the orientation on that noise.
+fn normalize_open_chain(chain: &mut [CutLoop]) {
+    let head = first_point(&chain[0]);
+    let tail = last_point(chain.last().unwrap_or_else(|| unreachable!()));
+    if approx_lex_less(tail, head) {
+        chain.reverse();
+        for seg in chain.iter_mut() {
+            reverse_segment(seg);
+        }
+    }
+}
+
+/// Noise-robust lexicographic 3D comparison: coordinates within
+/// [`JUNCTION_TOLERANCE`] compare equal, then the next coordinate decides.
+fn approx_lex_less(a: Point3, b: Point3) -> bool {
+    for (x, y) in [(a.x, b.x), (a.y, b.y), (a.z, b.z)] {
+        if (x - y).abs() > JUNCTION_TOLERANCE {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// Pins an open chain's two terminals exactly onto their target boundary
+/// bounds: the target UV is pinned per [`pin_to_boundary`] and the 3D point
+/// re-evaluated on the target surface at the pinned UV — exactly on the
+/// boundary ring curve shared with the planar cap.
+fn pin_open_terminals(chain: &mut CutChain, target_faces: &[(FaceId, NurbsSurface)]) -> Result<()> {
+    use crate::error::OperationError;
+
+    let surface_of = |face: FaceId| -> Result<NurbsSurface> {
+        target_faces
+            .iter()
+            .find(|(id, _)| *id == face)
+            .map(|(_, s)| s.clone())
+            .ok_or_else(|| {
+                OperationError::Failed("chained cut loop references an unknown target face".into())
+                    .into()
+            })
+    };
+
+    {
+        let seg = &mut chain.segments[0];
+        let surf = surface_of(seg.target_face)?;
+        let pin = pin_to_boundary(&surf, seg.branch.uv_a[0]);
+        seg.branch.points[0] = surf.point_at(pin.x, pin.y)?;
+        seg.branch.uv_a[0] = pin;
+    }
+    {
+        let seg = chain.segments.last_mut().unwrap_or_else(|| unreachable!());
+        let surf = surface_of(seg.target_face)?;
+        let last = seg.branch.points.len() - 1;
+        let pin = pin_to_boundary(&surf, seg.branch.uv_a[last]);
+        seg.branch.points[last] = surf.point_at(pin.x, pin.y)?;
+        seg.branch.uv_a[last] = pin;
+    }
+    Ok(())
+}
+
 /// Whether some key (per-segment face) appears in more than one contiguous
-/// cyclic run of the chain.
-fn cyclic_run_count_exceeds_one(chain: &[CutLoop], key: impl Fn(&CutLoop) -> FaceId) -> bool {
+/// run of the chain (cyclically contiguous for closed chains).
+fn run_count_exceeds_one(
+    chain: &[CutLoop],
+    closed: bool,
+    key: impl Fn(&CutLoop) -> FaceId,
+) -> bool {
     use std::collections::HashMap;
     let n = chain.len();
     let mut runs: HashMap<FaceId, usize> = HashMap::new();
     for i in 0..n {
         let k = key(&chain[i]);
-        let prev = key(&chain[(i + n - 1) % n]);
-        if k != prev || n == 1 {
+        let starts_run = if i == 0 {
+            !closed || n == 1 || k != key(&chain[n - 1])
+        } else {
+            k != key(&chain[i - 1])
+        };
+        if starts_run {
             *runs.entry(k).or_insert(0) += 1;
         }
+    }
+    // A closed single-face chain (n >= 2, all same face) has one cyclic run.
+    if closed && runs.is_empty() {
+        return false;
     }
     runs.values().any(|&c| c > 1)
 }
@@ -311,7 +543,10 @@ fn weld_chain(
     };
 
     let n = chain.segments.len();
-    for j in 0..n {
+    // Open chains have no wrap-around junction: their terminals are pinned
+    // on their target boundary bounds instead ([`pin_open_terminals`]).
+    let first_junction = usize::from(!chain.closed);
+    for j in first_junction..n {
         let prev = (j + n - 1) % n;
         let (prev_tool, prev_target, prev_uv_b, prev_uv_a) = {
             let seg = &chain.segments[prev];

@@ -25,12 +25,27 @@
 
 pub(crate) mod assemble;
 pub(crate) mod band;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cap_cut_tests;
+pub(crate) mod caps;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cascade_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod curved_opening_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod degenerate_tests;
 pub(crate) mod intersect;
 pub(crate) mod loops;
 pub(crate) mod pocket;
 pub(crate) mod punch;
 pub(crate) mod split;
 pub(crate) mod stitch;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use crate::error::{OperationError, Result};
 use crate::topology::{SolidId, TopologyStore};

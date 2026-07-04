@@ -5,16 +5,16 @@
 //! collects everything into a new shell + solid. The tool's caps and the rest
 //! of its body are discarded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{OperationError, Result};
 use crate::math::Point2;
 use crate::topology::{
-    FaceData, FaceId, FaceSurface, OrientedEdge, SolidId, TopologyStore, WireData,
+    EdgeId, FaceData, FaceId, FaceSurface, OrientedEdge, SolidId, TopologyStore, WireData,
 };
 
 use super::band::{build_band_face, BandRingWires};
-use super::loops::{collect_nurbs_faces, extract_cut_loops};
+use super::loops::{collect_nurbs_faces, extract_cut_loops_trimmed};
 use super::punch::{punch_loop, ChainRing};
 use super::split::{self, ChainTopology, Fragment, TraceRun};
 
@@ -50,8 +50,11 @@ pub(crate) fn subtract_through_cut(
     // face the configuration is out of scope.
     assert_no_cap_intersection(store, &target_faces, &tool_faces)?;
 
-    // Extract + validate the through-cut loops on the ORIGINAL faces.
-    let cuts = extract_cut_loops(&target_nurbs, &tool_nurbs)?;
+    // Extract + validate the through-cut loops on the ORIGINAL faces,
+    // filtered per face by its kept trim region (split fragments share one
+    // parent surface; only the containing fragment receives a branch).
+    let target_trims = super::loops::collect_trim_regions(store, &target_faces)?;
+    let cuts = extract_cut_loops_trimmed(&target_nurbs, &tool_nurbs, &target_trims)?;
 
     // ---- F3b: plan the target face splits. -------------------------------
     // Chains that cross target face boundaries do not punch interior holes;
@@ -59,12 +62,16 @@ pub(crate) fn subtract_through_cut(
     // edges are built ONCE here and shared by the fragments and the band.
     let (topos, affected) = plan_face_splits(store, &cuts, &target_faces)?;
 
-    let (id_map, fragments, mut result_faces) =
+    let (id_map, outcome, mut result_faces) =
         prepare_result_faces(store, &target_faces, &affected, op_id)?;
     let lookup = ResultLookup {
         id_map: &id_map,
-        fragments: &fragments,
+        fragments: &outcome.fragments,
     };
+
+    // Cap-plane closure edges of every open (cap-touching) chain, shared
+    // between the band fragments and the notched cap rebuild.
+    let mut closure_edges: Vec<EdgeId> = Vec::new();
 
     // Punch each loop onto its RESULT face (copy or containing fragment),
     // then build the band face that shares those exact hole-ring wires.
@@ -118,6 +125,7 @@ pub(crate) fn subtract_through_cut(
                     &exit_ring,
                     &lookup,
                     &mut result_faces,
+                    &mut closure_edges,
                     op_id,
                 )?;
             }
@@ -134,31 +142,74 @@ pub(crate) fn subtract_through_cut(
         }
     }
 
-    name_fragment_rims(store, &affected, &fragments, op_id);
+    // Rebuild the notched caps of every cap-touching cut: wire surgery on
+    // the kept sub-edges plus the band's cap-plane closure edges (the SAME
+    // EdgeIds — watertight by construction).
+    rebuild_caps_into_result(store, &outcome, &closure_edges, op_id, &mut result_faces)?;
+
+    name_fragment_rims(store, &affected, &outcome.fragments, op_id);
 
     Ok(finish_solid(store, result_faces))
 }
 
-/// Copies every UNAFFECTED target face (preserving the input solid and
-/// carrying names over unchanged) and rebuilds the affected faces as split
-/// fragments. Returns the copy map, the fragment map, and the result face
-/// list seeded with the copies + fragments.
+/// Rebuilds the pending notched caps (if any) and appends their fragments
+/// to the result face list. The kept-edge set is collected from the split
+/// wall fragments' outer wires — a sub-edge absent from it was removed
+/// doorway material and drops out of the rebuilt cap wires.
+fn rebuild_caps_into_result(
+    store: &mut TopologyStore,
+    outcome: &split::SplitOutcome,
+    closure_edges: &[EdgeId],
+    op_id: Option<&crate::topology::OpId>,
+    result_faces: &mut Vec<FaceId>,
+) -> Result<()> {
+    if outcome.planar_pending.is_empty() && closure_edges.is_empty() {
+        return Ok(());
+    }
+    let mut kept_edges: HashSet<EdgeId> = HashSet::new();
+    for frags in outcome.fragments.values() {
+        for frag in frags {
+            let wire = store.face(frag.face)?.outer_wire;
+            for oe in &store.wire(wire)?.edges {
+                kept_edges.insert(oe.edge);
+            }
+        }
+    }
+    let cap_fragments = super::caps::rebuild_notched_caps(
+        store,
+        &outcome.planar_pending,
+        &outcome.sub_edges,
+        &kept_edges,
+        closure_edges,
+        op_id,
+    )?;
+    result_faces.extend(cap_fragments);
+    Ok(())
+}
+
+/// Splits the affected target faces, then copies every UNAFFECTED target
+/// face (preserving the input solid and carrying names over unchanged) —
+/// EXCEPT the planar caps a cap-touching cut notched, which are rebuilt
+/// after the band assembly provides their closure edges. Returns the copy
+/// map, the split outcome, and the result face list seeded with the copies
+/// + fragments.
 #[allow(clippy::type_complexity)]
 fn prepare_result_faces(
     store: &mut TopologyStore,
     target_faces: &[FaceId],
     affected: &[(FaceId, Vec<TraceRun>)],
     op_id: Option<&crate::topology::OpId>,
-) -> Result<(
-    HashMap<FaceId, FaceId>,
-    HashMap<FaceId, Vec<Fragment>>,
-    Vec<FaceId>,
-)> {
+) -> Result<(HashMap<FaceId, FaceId>, split::SplitOutcome, Vec<FaceId>)> {
+    let outcome = if affected.is_empty() {
+        split::SplitOutcome::default()
+    } else {
+        split::split_target_faces(store, affected, target_faces, op_id)?
+    };
     let mut id_map: HashMap<FaceId, FaceId> = HashMap::new();
     let mut result_faces: Vec<FaceId> = Vec::with_capacity(target_faces.len());
     let affected_ids: Vec<FaceId> = affected.iter().map(|(f, _)| *f).collect();
     for &fid in target_faces {
-        if affected_ids.contains(&fid) {
+        if affected_ids.contains(&fid) || outcome.planar_pending.contains(&fid) {
             continue;
         }
         let copy = copy_face(store, fid)?;
@@ -169,17 +220,12 @@ fn prepare_result_faces(
         id_map.insert(fid, copy);
         result_faces.push(copy);
     }
-    let fragments: HashMap<FaceId, Vec<Fragment>> = if affected.is_empty() {
-        HashMap::new()
-    } else {
-        split::split_target_faces(store, affected, target_faces, op_id)?
-    };
     for (fid, _) in affected {
-        if let Some(frags) = fragments.get(fid) {
+        if let Some(frags) = outcome.fragments.get(fid) {
             result_faces.extend(frags.iter().map(|f| f.face));
         }
     }
-    Ok((id_map, fragments, result_faces))
+    Ok((id_map, outcome, result_faces))
 }
 
 /// Plans the F3b face splits: chain trace topologies per (cut, chain) and
@@ -239,7 +285,11 @@ fn plan_face_splits(
                             .into());
                         }
                     }
-                    if chain.crosses_target_faces() {
+                    // Target-crossing chains split the faces they cross;
+                    // OPEN (cap-touching) chains always split — even on a
+                    // single target face their trace is a boundary notch,
+                    // never an interior hole.
+                    if chain.crosses_target_faces() || !chain.closed {
                         let topo = split::build_chain_topology(store, chain)?;
                         #[allow(clippy::cast_possible_truncation)]
                         let runs = split::trace_runs(chain, &topo, li as u32)?;
@@ -436,12 +486,16 @@ fn ring_for_chain(
                 .iter()
                 .map(|&e| OrientedEdge::new(e, true))
                 .collect(),
-            is_closed: true,
+            // An open (cap-touching) chain's trace is terminal-to-terminal;
+            // the cap-plane closure edges complete the circuit in the band
+            // fragments and the notched caps.
+            is_closed: chain.closed,
         });
         return Ok(ChainRing {
             wire,
             edges: topo.edges.clone(),
             junctions: topo.junctions.clone(),
+            tool_pcurves: topo.tool_pcurves.clone(),
         });
     }
     let mut remapped = chain.clone();
@@ -454,7 +508,10 @@ fn ring_for_chain(
 
 /// Assembles one multi-face through cut: the two hole rings (punched or
 /// split-shared) are joined by one band fragment per tool side face, sharing
-/// the ring edges and the new kink edges.
+/// the ring edges and the new kink edges. Open (cap-touching) chains also
+/// produce two cap-plane closure edges, appended to `closure_edges` for the
+/// notched cap rebuild.
+#[allow(clippy::too_many_arguments)]
 fn assemble_multiface_through(
     store: &mut TopologyStore,
     chains: &[super::stitch::CutChain; 2],
@@ -462,10 +519,18 @@ fn assemble_multiface_through(
     exit_ring: &ChainRing,
     lookup: &ResultLookup<'_>,
     result_faces: &mut Vec<FaceId>,
+    closure_edges: &mut Vec<EdgeId>,
     op_id: Option<&crate::topology::OpId>,
 ) -> Result<()> {
-    let fragments =
-        super::band::build_band_fragments(store, &chains[0], &chains[1], entry_ring, exit_ring)?;
+    let fragments = if chains[0].closed {
+        super::band::build_band_fragments(store, &chains[0], &chains[1], entry_ring, exit_ring)?
+    } else {
+        let (fragments, closures) = super::band::build_open_band_fragments(
+            store, &chains[0], &chains[1], entry_ring, exit_ring,
+        )?;
+        closure_edges.extend(closures);
+        fragments
+    };
     for fragment in &fragments {
         result_faces.push(fragment.face);
     }
@@ -473,9 +538,13 @@ fn assemble_multiface_through(
         for fragment in &fragments {
             name_band(store, op, fragment.tool_face, fragment.face);
         }
-        // Rims for interior (single-target) chains bind here; rims of
-        // target-crossing chains bind per fragment after the cut loop.
+        // Rims for interior (single-target) CLOSED chains bind here; rims
+        // of split faces (target-crossing or open chains) bind per fragment
+        // after the cut loop.
         for (li, chain) in chains.iter().enumerate() {
+            if !chain.closed {
+                continue;
+            }
             if let Some(face) = chain.single_target_face() {
                 let ring = if li == 0 { entry_ring } else { exit_ring };
                 let resolved = lookup.resolve(face, uv_centroid(&chain.segments[0].branch.uv_a))?;
@@ -1460,68 +1529,7 @@ mod tests {
         (store, result)
     }
 
-    /// Position-welded boundary-edge count of a solid's tessellation (edges
-    /// used != 2 after vertex welding).
-    ///
-    /// Welding is proximity-based (each vertex joins an existing
-    /// representative within `1e-6`, probing the neighboring quantization
-    /// cells) rather than raw grid bucketing: adjacent faces emit rim
-    /// vertices agreeing to ~1e-9, and axis-aligned fixtures land those
-    /// exactly on `1e-6` grid-cell boundaries where single-cell bucketing
-    /// splits coincident points spuriously.
-    fn welded_boundary_edges(store: &TopologyStore, solid: SolidId) -> usize {
-        const WELD: f64 = 1e-6;
-        #[allow(clippy::cast_possible_truncation)]
-        fn cell(p: &Point3) -> (i64, i64, i64) {
-            (
-                (p.x / WELD).round() as i64,
-                (p.y / WELD).round() as i64,
-                (p.z / WELD).round() as i64,
-            )
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        fn canon_id(
-            cells: &mut HashMap<(i64, i64, i64), Vec<u32>>,
-            reps: &mut Vec<Point3>,
-            p: &Point3,
-        ) -> u32 {
-            let (cx, cy, cz) = cell(p);
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        if let Some(ids) = cells.get(&(cx + dx, cy + dy, cz + dz)) {
-                            for &id in ids {
-                                if (reps[id as usize] - p).norm() <= WELD {
-                                    return id;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            let id = reps.len() as u32;
-            reps.push(*p);
-            cells.entry((cx, cy, cz)).or_default().push(id);
-            id
-        }
-        let mesh = TessellateSolid::new(solid, TessellationParams::default())
-            .execute(store)
-            .unwrap();
-        assert!(!mesh.indices.is_empty(), "empty mesh");
-        let mut cells: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-        let mut reps: Vec<Point3> = Vec::new();
-        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
-        for tri in &mesh.indices {
-            let a = canon_id(&mut cells, &mut reps, &mesh.vertices[tri[0] as usize]);
-            let b = canon_id(&mut cells, &mut reps, &mesh.vertices[tri[1] as usize]);
-            let c = canon_id(&mut cells, &mut reps, &mesh.vertices[tri[2] as usize]);
-            for &(x, y) in &[(a, b), (b, c), (c, a)] {
-                let key = if x < y { (x, y) } else { (y, x) };
-                *counts.entry(key).or_insert(0) += 1;
-            }
-        }
-        counts.values().filter(|&&c| c != 2).count()
-    }
+    use super::super::test_support::welded_boundary_edges;
 
     /// Acceptance B1: segmented-prism wall − genuine 4-face box cutter → a
     /// through window. The result is position-weld watertight, the hole is

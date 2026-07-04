@@ -48,7 +48,7 @@ use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::math::Point2;
 use crate::topology::{
-    EdgeCurve, EdgeData, EdgeId, FaceData, FaceId, FaceSurface, FaceTrim, OrientedEdge,
+    EdgeCurve, EdgeData, EdgeId, FaceData, FaceId, FacePcurve, FaceSurface, FaceTrim, OrientedEdge,
     TopologyStore, TrimLoop, VertexId, WireData, WireId,
 };
 
@@ -245,6 +245,27 @@ fn tool_runs(chain: &CutChain) -> Result<Vec<ToolRun>> {
     Ok(runs)
 }
 
+/// Groups an OPEN chain's segments into linear contiguous runs per tool
+/// face, from the chain head (a single-face open chain yields one run).
+fn open_tool_runs(chain: &CutChain) -> Vec<ToolRun> {
+    let n = chain.segments.len();
+    let mut runs: Vec<ToolRun> = Vec::new();
+    let mut start = 0usize;
+    while start < n {
+        let face = chain.segments[start].tool_face;
+        let mut len = 1usize;
+        while start + len < n && chain.segments[start + len].tool_face == face {
+            len += 1;
+        }
+        runs.push(ToolRun {
+            face,
+            indices: (start..start + len).collect(),
+        });
+        start += len;
+    }
+    runs
+}
+
 /// Builds the band fragments of a multi-face through cut: ONE face per tool
 /// side face crossed by the chained loops, each trimmed to that face's chain
 /// segments (possibly several, when the loop crosses target face boundaries
@@ -355,6 +376,15 @@ pub(crate) fn build_band_fragments(
             is_closed: true,
         });
 
+        let pcurves = fragment_pcurves(
+            store,
+            entry_ring,
+            exit_ring,
+            run,
+            exit_run,
+            &[kink_start, kink_end],
+        )?;
+
         // Subtract: band normals point INTO the hole (`same_sense = false`).
         let face = store.add_face(FaceData {
             surface: FaceSurface::Nurbs(surface),
@@ -362,11 +392,163 @@ pub(crate) fn build_band_fragments(
             inner_wires: Vec::new(),
             same_sense: false,
             trim: Some(trim),
-            pcurves: Vec::new(),
+            pcurves,
         });
         fragments.push(BandFragment { tool_face, face });
     }
     Ok(fragments)
+}
+
+/// Builds the band fragments of an OPEN (cap-touching) through cut: one
+/// face per tool-face run, sharing the entry / exit trace edges with the
+/// split target-face fragments and NEW kink-crossing edges with adjacent
+/// band fragments — plus TWO cap-plane closure edges joining the entry and
+/// exit chains' matching terminals. The closure edges are returned so the
+/// cap-notch rebuild can share them (the notched cap gains exactly these
+/// edges — watertight by construction).
+///
+/// The entry and exit chains are normalized to the same geometric direction
+/// (their lexicographically smaller terminals come first), so their
+/// tool-face runs align index-to-index and their terminals pair start-to-
+/// start / end-to-end.
+///
+/// # Errors
+///
+/// Returns an error when the chains' tool-face runs disagree, a tool face
+/// is not NURBS, or a fragment polygon degenerates.
+pub(crate) fn build_open_band_fragments(
+    store: &mut TopologyStore,
+    entry: &CutChain,
+    exit: &CutChain,
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+) -> Result<(Vec<BandFragment>, [EdgeId; 2])> {
+    let entry_runs = open_tool_runs(entry);
+    let exit_runs = open_tool_runs(exit);
+    let n_runs = entry_runs.len();
+    if n_runs == 0 || exit_runs.len() != n_runs {
+        return Err(OperationError::Failed(
+            "cap-touching through cut requires entry and exit chains \
+             crossing the same tool side faces"
+                .into(),
+        )
+        .into());
+    }
+    for (a, b) in entry_runs.iter().zip(&exit_runs) {
+        if a.face != b.face {
+            return Err(OperationError::Failed(
+                "entry and exit chained loops cross different tool side \
+                 faces"
+                    .into(),
+            )
+            .into());
+        }
+    }
+
+    // Terminal closure edges (start / end), lying in the cap planes.
+    let start_closure = closure_edge(store, entry, exit, entry_ring, exit_ring, false)?;
+    let end_closure = closure_edge(store, entry, exit, entry_ring, exit_ring, true)?;
+
+    // One interior kink-crossing edge per run junction (i | i + 1).
+    let mut kinks: Vec<EdgeId> = Vec::with_capacity(n_runs.saturating_sub(1));
+    for i in 0..n_runs.saturating_sub(1) {
+        let entry_idx = entry_runs[i + 1].first();
+        let exit_idx = exit_runs[i + 1].first();
+        kinks.push(straight_edge(
+            store,
+            entry_ring.junctions[entry_idx],
+            exit_ring.junctions[exit_idx],
+            entry.segments[entry_idx].branch.points[0],
+            exit.segments[exit_idx].branch.points[0],
+        )?);
+    }
+
+    let mut fragments = Vec::with_capacity(n_runs);
+    for (i, run) in entry_runs.iter().enumerate() {
+        let tool_face = run.face;
+        let surface = match &store.face(tool_face)?.surface {
+            FaceSurface::Nurbs(s) => s.clone(),
+            _ => {
+                return Err(OperationError::Failed(
+                    "through-cut band requires a NURBS tool side face".into(),
+                )
+                .into())
+            }
+        };
+        let exit_run = &exit_runs[i];
+
+        // Trim ribbon between the two concatenated tool-UV traces.
+        let mut entry_uv: Vec<Point2> = Vec::new();
+        for &k in &run.indices {
+            entry_uv.extend_from_slice(&entry.segments[k].branch.uv_b);
+        }
+        let mut exit_uv: Vec<Point2> = Vec::new();
+        for &k in &exit_run.indices {
+            exit_uv.extend_from_slice(&exit.segments[k].branch.uv_b);
+        }
+        let entry_trace = clamp_trace(&entry_uv, &surface);
+        let exit_trace = clamp_trace(&exit_uv, &surface);
+        let outer = stitch_band_loop(&entry_trace, &exit_trace)?;
+        let trim = FaceTrim::new(outer, Vec::new());
+
+        let left = if i == 0 { start_closure } else { kinks[i - 1] };
+        let right = if i == n_runs - 1 {
+            end_closure
+        } else {
+            kinks[i]
+        };
+        let mut cycle: Vec<EdgeId> = run.indices.iter().map(|&k| entry_ring.edges[k]).collect();
+        cycle.push(right);
+        cycle.extend(exit_run.indices.iter().rev().map(|&k| exit_ring.edges[k]));
+        cycle.push(left);
+        let wire_edges = orient_cycle(store, &cycle)?;
+        let wire = store.add_wire(WireData {
+            edges: wire_edges,
+            is_closed: true,
+        });
+
+        let pcurves =
+            fragment_pcurves(store, entry_ring, exit_ring, run, exit_run, &[left, right])?;
+
+        // Subtract: band normals point INTO the doorway (`same_sense = false`).
+        let face = store.add_face(FaceData {
+            surface: FaceSurface::Nurbs(surface),
+            outer_wire: wire,
+            inner_wires: Vec::new(),
+            same_sense: false,
+            trim: Some(trim),
+            pcurves,
+        });
+        fragments.push(BandFragment { tool_face, face });
+    }
+    Ok((fragments, [start_closure, end_closure]))
+}
+
+/// Builds one terminal closure edge between the entry and exit chains'
+/// matching terminals (`tail == false`: chain heads; `true`: chain tails).
+/// The edge is a straight segment in the cap plane, exact for extruded
+/// tools whose section at the cap is a straight line across the target
+/// thickness.
+fn closure_edge(
+    store: &mut TopologyStore,
+    entry: &CutChain,
+    exit: &CutChain,
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+    tail: bool,
+) -> Result<EdgeId> {
+    let terminal = |chain: &CutChain, ring: &ChainRing| -> (VertexId, crate::math::Point3) {
+        if tail {
+            let seg = chain.segments.last().unwrap_or_else(|| unreachable!());
+            let p = *seg.branch.points.last().unwrap_or_else(|| unreachable!());
+            (*ring.junctions.last().unwrap_or_else(|| unreachable!()), p)
+        } else {
+            (ring.junctions[0], chain.segments[0].branch.points[0])
+        }
+    };
+    let (entry_v, entry_p) = terminal(entry, entry_ring);
+    let (exit_v, exit_p) = terminal(exit, exit_ring);
+    straight_edge(store, entry_v, exit_v, entry_p, exit_p)
 }
 
 /// Builds the pocket band fragments of a multi-face blind cut: ONE face per
@@ -453,6 +635,98 @@ pub(crate) fn build_pocket_band_fragments(
         fragments.push(BandFragment { tool_face, face });
     }
     Ok(fragments)
+}
+
+/// Builds one band fragment's pcurve table: the ring edges' tool-UV pcurves
+/// (entry + exit runs, knot-compatible with the shared trace edges) plus one
+/// straight connector pcurve per kink / cap-plane closure edge. With every
+/// outer-wire edge covered, the fragment tessellates edge-driven and pins
+/// its rim vertices to the canonical per-edge 3D samples — exactly the
+/// vertices the punched / split target faces emit (F6 R3 rim weld).
+fn fragment_pcurves(
+    store: &TopologyStore,
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+    run: &ToolRun,
+    exit_run: &ToolRun,
+    connectors: &[EdgeId],
+) -> Result<Vec<FacePcurve>> {
+    let mut pcurves: Vec<FacePcurve> = Vec::new();
+    for &k in &run.indices {
+        pcurves.push(FacePcurve {
+            edge: entry_ring.edges[k],
+            curve: entry_ring.tool_pcurves[k].clone(),
+        });
+    }
+    for &k in &exit_run.indices {
+        pcurves.push(FacePcurve {
+            edge: exit_ring.edges[k],
+            curve: exit_ring.tool_pcurves[k].clone(),
+        });
+    }
+    // Connector edges run from an ENTRY junction (edge start) to an EXIT
+    // junction (edge end) by construction; their UV endpoints are the
+    // matching ring pcurve terminals, so the assembled UV loop closes
+    // bit-exactly at the junctions.
+    for &conn in connectors {
+        let edge = store.edge(conn)?;
+        let (start_vertex, end_vertex) = (edge.start, edge.end);
+        let start_uv = ring_terminal_uv(entry_ring, run, start_vertex)?;
+        let end_uv = ring_terminal_uv(exit_ring, exit_run, end_vertex)?;
+        pcurves.push(FacePcurve {
+            edge: conn,
+            curve: connector_pcurve(store, conn, start_uv, end_uv)?,
+        });
+    }
+    Ok(pcurves)
+}
+
+/// The tool-UV image of a run terminal junction: the matching terminal
+/// control point of the run's first / last ring pcurve (bit-exact with the
+/// ring chain ends, so junction UV values coincide across wire edges).
+fn ring_terminal_uv(ring: &ChainRing, run: &ToolRun, vertex: VertexId) -> Result<Point2> {
+    // Closed rings have one junction per edge (cyclic); open rings carry one
+    // extra tail terminal vertex.
+    let closed = ring.junctions.len() == ring.edges.len();
+    let first_vertex = ring.junctions[run.first()];
+    let end_index = if closed {
+        (run.last() + 1) % ring.edges.len()
+    } else {
+        run.last() + 1
+    };
+    let last_vertex = ring.junctions[end_index];
+    let terminal = if vertex == first_vertex {
+        ring.tool_pcurves[run.first()].control_points().first()
+    } else if vertex == last_vertex {
+        ring.tool_pcurves[run.last()].control_points().last()
+    } else {
+        return Err(OperationError::Failed(
+            "band connector edge does not land on the run's terminal junctions".into(),
+        )
+        .into());
+    };
+    terminal
+        .copied()
+        .ok_or_else(|| OperationError::Failed("ring pcurve without control points".into()).into())
+}
+
+/// A degree-1 UV pcurve for a straight connector edge (kink crossing or
+/// cap-plane closure), knot-compatible with the edge's 3D polyline:
+/// `t_start` maps to `start_uv`, `t_end` to `end_uv`.
+fn connector_pcurve(
+    store: &TopologyStore,
+    edge: EdgeId,
+    start_uv: Point2,
+    end_uv: Point2,
+) -> Result<NurbsCurve2D> {
+    let data = store.edge(edge)?;
+    let EdgeCurve::Nurbs(curve) = &data.curve else {
+        return Err(
+            OperationError::Failed("band connector edge must be a NURBS polyline".into()).into(),
+        );
+    };
+    let knots = KnotVector::new(curve.knots().as_slice().to_vec())?;
+    NurbsCurve2D::from_unweighted(vec![start_uv, end_uv], knots, 1)
 }
 
 /// The vertex shared by two edges (a tool ring corner).

@@ -56,14 +56,25 @@ const UV_EXACT: f64 = 1e-9;
 /// chain segment through the exact SSI samples, shared junction vertices,
 /// and a target-UV pcurve per edge (knot-compatible with the 3D edge, so
 /// edge-driven tessellation reproduces exactly the SSI sample points).
+///
+/// A CLOSED chain has one junction per segment (`junctions[i]` at segment
+/// `i`'s start, cyclic). An OPEN chain (cap-touching cut) has one extra
+/// terminal vertex: `junctions.len() == edges.len() + 1`, with the first
+/// and last junctions at the chain's pinned target-boundary terminals.
 #[derive(Debug, Clone)]
 pub(crate) struct ChainTopology {
     /// One edge per chain segment, in chain order.
     pub edges: Vec<EdgeId>,
-    /// `junctions[i]` is the shared vertex at segment `i`'s START.
+    /// `junctions[i]` is the shared vertex at segment `i`'s START (plus the
+    /// tail terminal vertex for open chains).
     pub junctions: Vec<VertexId>,
     /// Target-UV pcurve of `edges[i]`, parameterized identically.
     pub pcurves: Vec<NurbsCurve2D>,
+    /// Tool-UV pcurve of `edges[i]` (in `segments[i].tool_face`'s parameter
+    /// space), parameterized identically — the band fragments register these
+    /// so edge-driven tessellation pins their rim vertices to the same
+    /// canonical edge samples as the target side.
+    pub tool_pcurves: Vec<NurbsCurve2D>,
 }
 
 /// Builds the shared trace topology of a chained loop (see
@@ -78,7 +89,7 @@ pub(crate) fn build_chain_topology(
     chain: &CutChain,
 ) -> Result<ChainTopology> {
     let n = chain.segments.len();
-    let mut junctions = Vec::with_capacity(n);
+    let mut junctions = Vec::with_capacity(n + 1);
     for seg in &chain.segments {
         let start = *seg
             .branch
@@ -87,47 +98,71 @@ pub(crate) fn build_chain_topology(
             .ok_or_else(|| OperationError::Failed("empty chain segment trace".into()))?;
         junctions.push(store.add_vertex(VertexData::new(start)));
     }
+    if !chain.closed {
+        // The open chain's tail terminal is its own vertex (pinned on the
+        // target boundary), shared with the boundary-edge split and the
+        // cap-plane closure edge.
+        let end = *chain
+            .segments
+            .last()
+            .and_then(|seg| seg.branch.points.last())
+            .ok_or_else(|| OperationError::Failed("empty chain segment trace".into()))?;
+        junctions.push(store.add_vertex(VertexData::new(end)));
+    }
     let mut edges = Vec::with_capacity(n);
     let mut pcurves = Vec::with_capacity(n);
+    let mut tool_pcurves = Vec::with_capacity(n);
     for (i, seg) in chain.segments.iter().enumerate() {
-        let (edge, pcurve) = trace_edge(
+        let end_junction = if chain.closed {
+            junctions[(i + 1) % n]
+        } else {
+            junctions[i + 1]
+        };
+        let (edge, pcurve, tool_pcurve) = trace_edge(
             store,
             &seg.branch.points,
             &seg.branch.uv_a,
+            &seg.branch.uv_b,
             junctions[i],
-            junctions[(i + 1) % n],
+            end_junction,
         )?;
         edges.push(edge);
         pcurves.push(pcurve);
+        tool_pcurves.push(tool_pcurve);
     }
     Ok(ChainTopology {
         edges,
         junctions,
         pcurves,
+        tool_pcurves,
     })
 }
 
 /// Builds one trace edge: a degree-1 3D polyline through the SSI samples
-/// plus its target-UV pcurve on the SAME knot vector, so the edge sample
-/// cache (degree-1 breakpoint rule) reproduces exactly the SSI sample
-/// points on both sides of the shared edge.
-fn trace_edge(
+/// plus its target-UV and tool-UV pcurves on the SAME knot vector, so the
+/// edge sample cache (degree-1 breakpoint rule) reproduces exactly the SSI
+/// sample points on both sides of the shared edge.
+pub(crate) fn trace_edge(
     store: &mut TopologyStore,
     points: &[Point3],
     uv: &[Point2],
+    uv_tool: &[Point2],
     start: VertexId,
     end: VertexId,
-) -> Result<(EdgeId, NurbsCurve2D)> {
-    // Deduplicate 3D and UV in lockstep so the pcurve stays synchronized.
+) -> Result<(EdgeId, NurbsCurve2D, NurbsCurve2D)> {
+    // Deduplicate 3D and both UV traces in lockstep so the pcurves stay
+    // knot-synchronized with the 3D polyline.
     let mut pts: Vec<Point3> = Vec::with_capacity(points.len());
-    let mut uvs: Vec<Point2> = Vec::with_capacity(uv.len());
-    for (p, q) in points.iter().zip(uv) {
+    let mut target_uvs: Vec<Point2> = Vec::with_capacity(uv.len());
+    let mut tool_uvs: Vec<Point2> = Vec::with_capacity(uv_tool.len());
+    for ((p, q), r) in points.iter().zip(uv).zip(uv_tool) {
         if pts
             .last()
             .is_none_or(|last| (*p - *last).norm() > TOLERANCE)
         {
             pts.push(*p);
-            uvs.push(*q);
+            target_uvs.push(*q);
+            tool_uvs.push(*r);
         }
     }
     if pts.len() < 2 {
@@ -138,7 +173,8 @@ fn trace_edge(
     }
     let curve = NurbsCurve3D::polyline(&pts)?;
     let knots = KnotVector::new(curve.knots().as_slice().to_vec())?;
-    let pcurve = NurbsCurve2D::from_unweighted(uvs, knots, 1)?;
+    let pcurve = NurbsCurve2D::from_unweighted(target_uvs, knots.clone(), 1)?;
+    let tool_pcurve = NurbsCurve2D::from_unweighted(tool_uvs, knots, 1)?;
     let (t0, t1) = curve.parameter_domain();
     let edge = store.add_edge(EdgeData {
         start,
@@ -147,7 +183,7 @@ fn trace_edge(
         t_start: t0,
         t_end: t1,
     });
-    Ok((edge, pcurve))
+    Ok((edge, pcurve, tool_pcurve))
 }
 
 /// One contiguous run of chain segments on a single target face — an open
@@ -202,21 +238,50 @@ impl TraceRun {
     }
 }
 
-/// Extracts the per-target-face contiguous runs of a target-crossing chain.
+/// Extracts the per-target-face contiguous runs of a target-crossing or
+/// open (cap-touching) chain.
 ///
-/// The chain is rotated so it starts at a target-face change, then cut at
-/// every change; each maximal cyclic run becomes one [`TraceRun`].
+/// A closed chain is rotated so it starts at a target-face change, then cut
+/// at every change; each maximal cyclic run becomes one [`TraceRun`]. An
+/// open chain is cut at every change from its head; a single-target open
+/// chain yields exactly one boundary-to-boundary run.
 ///
 /// # Errors
 ///
-/// Returns an error when the chain does not cross target faces (callers use
-/// the interior-punch path for those).
+/// Returns an error when a CLOSED chain does not cross target faces
+/// (callers use the interior-punch path for those).
 pub(crate) fn trace_runs(
     chain: &CutChain,
     topo: &ChainTopology,
     loop_index: u32,
 ) -> Result<Vec<TraceRun>> {
     let n = chain.segments.len();
+    if !chain.closed {
+        // Open chain: linear runs from the head; junction indexing does not
+        // wrap (`topo.junctions` carries n + 1 vertices).
+        let mut runs: Vec<TraceRun> = Vec::new();
+        let mut start = 0usize;
+        while start < n {
+            let face = chain.segments[start].target_face;
+            let mut len = 1usize;
+            while start + len < n && chain.segments[start + len].target_face == face {
+                len += 1;
+            }
+            let indices: Vec<usize> = (start..start + len).collect();
+            runs.push(TraceRun {
+                target_face: face,
+                segments: indices.iter().map(|&k| chain.segments[k].clone()).collect(),
+                edges: indices.iter().map(|&k| topo.edges[k]).collect(),
+                pcurves: indices.iter().map(|&k| topo.pcurves[k].clone()).collect(),
+                loop_index,
+                start_vertex: topo.junctions[start],
+                end_vertex: topo.junctions[start + len],
+            });
+            start += len;
+        }
+        return Ok(runs);
+    }
+
     let Some(first_change) = (0..n)
         .find(|&i| chain.segments[i].target_face != chain.segments[(i + n - 1) % n].target_face)
     else {
@@ -312,8 +377,38 @@ pub(crate) fn split_seam_loop(
 
     // Segments between consecutive crossings (cyclic): segment k runs from
     // the far sample of crossing k to the near sample of crossing k + 1.
+    let (topo, segments) = seam_segments(store, cut, &crossings, &junctions)?;
+    let runs = segments
+        .iter()
+        .enumerate()
+        .map(|(k, seg)| TraceRun {
+            target_face: cut.target_face,
+            segments: vec![seg.clone()],
+            edges: vec![topo.edges[k]],
+            pcurves: vec![topo.pcurves[k].clone()],
+            loop_index,
+            start_vertex: junctions[k],
+            end_vertex: junctions[(k + 1) % m],
+        })
+        .collect();
+    Ok((topo, runs))
+}
+
+/// Builds the per-segment trace edges of a seam-split loop: segment `k` runs
+/// from the far sample of crossing `k` to the near sample of crossing
+/// `k + 1`, with its ends pinned exactly onto the shared junction points.
+fn seam_segments(
+    store: &mut TopologyStore,
+    cut: &CutLoop,
+    crossings: &[usize],
+    junctions: &[VertexId],
+) -> Result<(ChainTopology, Vec<CutLoop>)> {
+    let branch = &cut.branch;
+    let n = branch.points.len();
+    let m = crossings.len();
     let mut edges = Vec::with_capacity(m);
     let mut pcurves = Vec::with_capacity(m);
+    let mut tool_pcurves = Vec::with_capacity(m);
     let mut segments: Vec<CutLoop> = Vec::with_capacity(m);
     for k in 0..m {
         let start = (crossings[k] + 1) % n;
@@ -339,9 +434,17 @@ pub(crate) fn split_seam_loop(
         if let Some(last) = pts.last_mut() {
             *last = last_junction;
         }
-        let (edge, pcurve) = trace_edge(store, &pts, &uva, junctions[k], junctions[(k + 1) % m])?;
+        let (edge, pcurve, tool_pcurve) = trace_edge(
+            store,
+            &pts,
+            &uva,
+            &uvb,
+            junctions[k],
+            junctions[(k + 1) % m],
+        )?;
         edges.push(edge);
         pcurves.push(pcurve);
+        tool_pcurves.push(tool_pcurve);
         segments.push(CutLoop {
             target_face: cut.target_face,
             tool_face: cut.tool_face,
@@ -353,26 +456,13 @@ pub(crate) fn split_seam_loop(
             },
         });
     }
-
     let topo = ChainTopology {
-        edges: edges.clone(),
-        junctions: junctions.clone(),
-        pcurves: pcurves.clone(),
+        edges,
+        junctions: junctions.to_vec(),
+        pcurves,
+        tool_pcurves,
     };
-    let runs = segments
-        .iter()
-        .enumerate()
-        .map(|(k, seg)| TraceRun {
-            target_face: cut.target_face,
-            segments: vec![seg.clone()],
-            edges: vec![edges[k]],
-            pcurves: vec![pcurves[k].clone()],
-            loop_index,
-            start_vertex: junctions[k],
-            end_vertex: junctions[(k + 1) % m],
-        })
-        .collect();
-    Ok((topo, runs))
+    Ok((topo, segments))
 }
 
 /// One kept fragment of a split target face.
@@ -388,26 +478,43 @@ pub(crate) struct Fragment {
     pub first_loop_index: u32,
 }
 
+/// The result of splitting the affected target faces: the kept fragments
+/// per original face, plus the bookkeeping the cap-notch rebuild consumes.
+#[derive(Debug, Default)]
+pub(crate) struct SplitOutcome {
+    /// Kept fragments per original (split) face.
+    pub fragments: HashMap<FaceId, Vec<Fragment>>,
+    /// Planar target faces (caps) whose boundary edges were split by a
+    /// cap-touching cut. Their wires must be rebuilt from the kept
+    /// sub-edges plus the band's cap-plane closure edges.
+    pub planar_pending: Vec<FaceId>,
+    /// Split parent edge → its materialized sub-edges, in the parent's
+    /// parameter direction.
+    pub sub_edges: HashMap<EdgeId, Vec<EdgeId>>,
+}
+
 /// Splits every affected target face along its trace runs and returns the
 /// kept fragments per original face. Persistent names transfer (one kept
 /// fragment) or split (two kept fragments) per the module-level rules.
 ///
 /// `all_target_faces` is the full target face list, used to guard edge
 /// splits: an edge cut by a run endpoint must only be referenced by faces
-/// that are themselves being split.
+/// that are themselves being split — or by PLANAR cap faces, which are
+/// reported in [`SplitOutcome::planar_pending`] for the cap-notch rebuild
+/// (F6 R2).
 ///
 /// # Errors
 ///
 /// Returns typed errors for every unsupported configuration: missing
-/// pcurves, non-rectangular trim boundaries, cuts landing on existing
+/// pcurves, non-UV-continuous trim boundaries, cuts landing on existing
 /// vertices, ambiguous or tangential classifications, more than two kept
-/// fragments, or a split edge shared with an unaffected face.
+/// fragments, or a split edge shared with an unaffected NURBS face.
 pub(crate) fn split_target_faces(
     store: &mut TopologyStore,
     affected: &[(FaceId, Vec<TraceRun>)],
     all_target_faces: &[FaceId],
     op_id: Option<&OpId>,
-) -> Result<HashMap<FaceId, Vec<Fragment>>> {
+) -> Result<SplitOutcome> {
     // Phase A: per-face planning (perimeter model, regions, classification,
     // boundary cut registration).
     let mut splitter = EdgeSplitter::default();
@@ -416,181 +523,411 @@ pub(crate) fn split_target_faces(
         plans.push(plan_face(store, *face_id, runs, &mut splitter)?);
     }
 
-    // Guard: every split edge is referenced only by affected faces.
+    // Guard: every split edge is referenced only by affected faces or by
+    // planar caps (collected for the notch rebuild).
     let affected_ids: Vec<FaceId> = affected.iter().map(|(f, _)| *f).collect();
-    splitter.assert_only_affected_faces(store, all_target_faces, &affected_ids)?;
+    let planar_pending = splitter.collect_shared_faces(store, all_target_faces, &affected_ids)?;
 
     // Phase B: materialize sub-edges.
     splitter.materialize(store)?;
 
     // Phase C: build fragment faces and evolve names.
-    let mut out: HashMap<FaceId, Vec<Fragment>> = HashMap::new();
+    let mut fragments_out: HashMap<FaceId, Vec<Fragment>> = HashMap::new();
     for plan in plans {
         let fragments = build_fragments(store, &plan, &splitter)?;
         apply_names(store, plan.face, &fragments, &plan.runs, op_id)?;
-        out.insert(plan.face, fragments);
+        fragments_out.insert(plan.face, fragments);
     }
-    Ok(out)
+    let sub_edges = splitter.sub_edge_ids();
+    Ok(SplitOutcome {
+        fragments: fragments_out,
+        planar_pending,
+        sub_edges,
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Perimeter model
 // ---------------------------------------------------------------------------
 
-/// One outer-wire edge mapped onto a domain-rectangle side.
+/// One item of a face's outer-boundary UV cycle: a wire edge with its
+/// pcurve, or a virtual seam connector — an edge-less axis-aligned gap along
+/// a closed direction's domain bound, as revolved faces have at their seam.
 #[derive(Debug, Clone)]
-struct SideSpan {
-    edge: EdgeId,
-    /// Side coordinate at the edge's `t_start` / `t_end`.
-    c0: f64,
-    c1: f64,
-    /// Edge parameter range.
+struct PerimeterItem {
+    /// The wire edge and the face's pcurve for it (`None`: virtual seam
+    /// connector).
+    edge: Option<(EdgeId, NurbsCurve2D)>,
+    /// Edge parameter at the traversal start / end (`t0 > t1` when the wire
+    /// traverses the edge against its parameterization).
     t0: f64,
     t1: f64,
-    /// The face's pcurve for this edge (edge-parameterized UV image).
-    pcurve: NurbsCurve2D,
-    /// Which UV coordinate is the side coordinate (0 = u, 1 = v).
+    /// UV at the traversal start / end.
+    uv0: Point2,
+    uv1: Point2,
+    /// The dominant varying UV coordinate along the chord (0 = u, 1 = v).
     coord: usize,
 }
 
-impl SideSpan {
-    fn c_min(&self) -> f64 {
-        self.c0.min(self.c1)
+impl PerimeterItem {
+    /// The item coordinate (dominant varying UV coordinate) of a UV point.
+    fn c_of(&self, uv: Point2) -> f64 {
+        if self.coord == 0 {
+            uv.x
+        } else {
+            uv.y
+        }
     }
-    fn c_max(&self) -> f64 {
-        self.c0.max(self.c1)
+
+    fn c0(&self) -> f64 {
+        self.c_of(self.uv0)
+    }
+
+    fn c1(&self) -> f64 {
+        self.c_of(self.uv1)
+    }
+
+    /// Chord-interpolated UV at traversal fraction `f ∈ [0, 1]`.
+    fn uv_at(&self, f: f64) -> Point2 {
+        Point2::new(
+            self.uv0.x + f * (self.uv1.x - self.uv0.x),
+            self.uv0.y + f * (self.uv1.y - self.uv0.y),
+        )
+    }
+
+    /// The traversal fraction of a UV point on the item's chord, or `None`
+    /// when the point is off the chord (beyond `eps`).
+    fn chord_fraction(&self, uv: Point2, eps: f64) -> Option<f64> {
+        let d = self.uv1 - self.uv0;
+        let r = uv - self.uv0;
+        let len = d.norm();
+        if len <= eps {
+            return None;
+        }
+        if (d.x * r.y - d.y * r.x).abs() / len > eps {
+            return None;
+        }
+        let f = (d.x * r.x + d.y * r.y) / (len * len);
+        let f_eps = eps / len;
+        if !(-f_eps..=1.0 + f_eps).contains(&f) {
+            return None;
+        }
+        Some(f.clamp(0.0, 1.0))
+    }
+
+    /// Whether the item's UV image is a straight chord (a degree-1 two-point
+    /// pcurve, an iso boundary edge, or a virtual seam connector).
+    fn is_straight(&self) -> bool {
+        match &self.edge {
+            None => true,
+            Some((_, pcurve)) => pcurve.degree() == 1 && pcurve.control_points().len() == 2,
+        }
     }
 }
 
-/// The UV domain rectangle of a face with its outer-wire edges assigned to
-/// the four sides. Sides may be edge-less (a closed direction's seam), in
-/// which case fragments leave a UV gap that the edge-driven tessellation
-/// closes with its axis-aligned seam connectors.
+/// The UV outer-boundary cycle of a face: the outer-wire edges in
+/// counter-clockwise traversal order (plus virtual seam connectors at
+/// closed-direction gaps). Generalizes the F5 domain-rectangle model to
+/// trimmed / notched outer boundaries: earlier cuts' trace edges are
+/// ordinary (non-splittable) items, so cascades keep working after a
+/// cap-touching door (F6 R2).
+///
+/// The perimeter coordinate `s ∈ [0, N)` is `item index + traversal
+/// fraction`, counter-clockwise.
 #[derive(Debug)]
 struct PerimeterModel {
     u0: f64,
     u1: f64,
     v0: f64,
     v1: f64,
-    /// Per side (0: v=v0, 1: u=u1, 2: v=v1, 3: u=u0), the edges on it.
-    sides: [Vec<SideSpan>; 4],
+    items: Vec<PerimeterItem>,
 }
 
 impl PerimeterModel {
     /// Builds the model from the face's outer wire and pcurves.
     fn build(store: &TopologyStore, face: &FaceData, surface: &NurbsSurface) -> Result<Self> {
         let ((u0, u1), (v0, v1)) = surface.parameter_domain();
-        let mut sides: [Vec<SideSpan>; 4] = Default::default();
-        let wire = store.wire(face.outer_wire)?;
-        for oe in &wire.edges {
-            let Some(pcurve) = face.pcurve_for(oe.edge) else {
-                return Err(OperationError::Failed(
-                    "face splitting requires per-edge pcurves on the target \
-                     face's outer wire"
-                        .into(),
-                )
-                .into());
-            };
-            let edge = store.edge(oe.edge)?;
-            let (t0, t1) = (edge.t_start, edge.t_end);
-            let ps = pcurve.point_at(t0)?;
-            let pe = pcurve.point_at(t1)?;
-            let eps_u = UV_EXACT * (u1 - u0).abs().max(1.0);
-            let eps_v = UV_EXACT * (v1 - v0).abs().max(1.0);
-            let side = if (ps.y - v0).abs() < eps_v && (pe.y - v0).abs() < eps_v {
-                0
-            } else if (ps.x - u1).abs() < eps_u && (pe.x - u1).abs() < eps_u {
-                1
-            } else if (ps.y - v1).abs() < eps_v && (pe.y - v1).abs() < eps_v {
-                2
-            } else if (ps.x - u0).abs() < eps_u && (pe.x - u0).abs() < eps_u {
-                3
-            } else {
-                return Err(OperationError::Failed(
-                    "face splitting requires a rectangular outer boundary \
-                     (an outer-wire edge does not lie on a UV domain side)"
-                        .into(),
-                )
-                .into());
-            };
-            let (c0, c1, coord) = match side {
-                0 | 2 => (ps.x, pe.x, 0),
-                _ => (ps.y, pe.y, 1),
-            };
-            sides[side].push(SideSpan {
-                edge: oe.edge,
-                c0,
-                c1,
-                t0,
-                t1,
-                pcurve: pcurve.clone(),
-                coord,
-            });
+        let eps = UV_EXACT * (u1 - u0).abs().max((v1 - v0).abs()).max(1.0);
+        let raw = collect_wire_items(store, face)?;
+        let mut items = close_seam_gaps(&raw, surface, eps)?;
+
+        // The perimeter coordinate runs counter-clockwise (the trim outer /
+        // F5 fragment-wire convention). A wire stored clockwise in UV (the
+        // revolved wall puts its profile in u and winds the rings clockwise)
+        // is normalized by reversing the traversal — the per-item `t0 / t1`
+        // pairs swap with it, so edge orientations stay consistent.
+        let poly: Vec<Point2> = items.iter().map(|item| item.uv0).collect();
+        let mut area2 = 0.0;
+        for i in 0..poly.len() {
+            let p = poly[i];
+            let q = poly[(i + 1) % poly.len()];
+            area2 += p.x * q.y - q.x * p.y;
         }
-        for side in &mut sides {
-            side.sort_by(|a, b| {
-                a.c_min()
-                    .partial_cmp(&b.c_min())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        if area2.abs() <= UV_EXACT * UV_EXACT {
+            return Err(OperationError::Failed(
+                "face splitting requires a non-degenerate outer boundary in \
+                 UV"
+                .into(),
+            )
+            .into());
         }
+        if area2 < 0.0 {
+            items.reverse();
+            for item in &mut items {
+                std::mem::swap(&mut item.t0, &mut item.t1);
+                std::mem::swap(&mut item.uv0, &mut item.uv1);
+            }
+        }
+
         Ok(Self {
             u0,
             u1,
             v0,
             v1,
-            sides,
+            items,
         })
     }
 
-    /// The perimeter coordinate `s ∈ [0, 4)` of a UV point pinned on the
-    /// rectangle boundary (side + normalized position, counter-clockwise).
+    /// The perimeter length in `s` units (one unit per item).
+    #[allow(clippy::cast_precision_loss)]
+    fn total_s(&self) -> f64 {
+        self.items.len() as f64
+    }
+
+    /// The UV bookkeeping bound scaled to the face's domain extent.
+    fn eps(&self) -> f64 {
+        UV_EXACT
+            * (self.u1 - self.u0)
+                .abs()
+                .max((self.v1 - self.v0).abs())
+                .max(1.0)
+    }
+
+    /// The item index and traversal fraction of a perimeter coordinate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn locate(&self, s: f64) -> (usize, f64) {
+        let s = s.rem_euclid(self.total_s());
+        let idx = (s.floor() as usize).min(self.items.len() - 1);
+        #[allow(clippy::cast_precision_loss)]
+        let f = s - idx as f64;
+        (idx, f)
+    }
+
+    /// The perimeter coordinate of a UV point pinned on the outer boundary.
+    ///
+    /// # Errors
+    ///
+    /// Typed errors when the point lies on no boundary item, lands exactly
+    /// on a boundary vertex (item junction), or matches several items
+    /// ambiguously.
     fn s_of(&self, uv: Point2) -> Result<f64> {
-        let eps_u = UV_EXACT * (self.u1 - self.u0).abs().max(1.0);
-        let eps_v = UV_EXACT * (self.v1 - self.v0).abs().max(1.0);
-        let on_west = (uv.x - self.u0).abs() < eps_u;
-        let on_east = (self.u1 - uv.x).abs() < eps_u;
-        let on_south = (uv.y - self.v0).abs() < eps_v;
-        let on_north = (self.v1 - uv.y).abs() < eps_v;
-        let du = (self.u1 - self.u0).abs();
-        let dv = (self.v1 - self.v0).abs();
-        match (on_west, on_east, on_south, on_north) {
-            (false, false, true, false) => Ok((uv.x - self.u0) / du),
-            (false, true, false, false) => Ok(1.0 + (uv.y - self.v0) / dv),
-            (false, false, false, true) => Ok(2.0 + (self.u1 - uv.x) / du),
-            (true, false, false, false) => Ok(3.0 + (self.v1 - uv.y) / dv),
-            _ => Err(OperationError::Failed(
-                "trace endpoint lands on a UV domain corner (degenerate, \
-                 unsupported)"
+        let eps = self.eps();
+        let mut interior: Vec<(usize, f64)> = Vec::new();
+        let mut touched = false;
+        for (i, item) in self.items.iter().enumerate() {
+            let Some(f) = item.chord_fraction(uv, eps) else {
+                continue;
+            };
+            touched = true;
+            let span = (item.c1() - item.c0()).abs().max(eps);
+            let f_eps = eps / span;
+            if f > f_eps && f < 1.0 - f_eps {
+                interior.push((i, f));
+            }
+        }
+        let (idx, f) = match interior.as_slice() {
+            [] if touched => {
+                return Err(OperationError::Failed(
+                    "cut trace lands exactly on a target boundary vertex \
+                     (unsupported)"
+                        .into(),
+                )
+                .into());
+            }
+            [] => {
+                return Err(OperationError::Failed(
+                    "trace endpoint does not lie on any outer-wire edge of \
+                     the target face"
+                        .into(),
+                )
+                .into());
+            }
+            [unique] => *unique,
+            multiple => {
+                // Prefer the item lying on a UV domain bound (run endpoints
+                // are pinned there); earlier cuts' trace chords may
+                // coincidentally pass through the same point.
+                let on_side: Vec<&(usize, f64)> = multiple
+                    .iter()
+                    .filter(|(i, _)| self.on_domain_side(&self.items[*i]))
+                    .collect();
+                match on_side.as_slice() {
+                    [unique] => **unique,
+                    _ => {
+                        return Err(OperationError::Failed(
+                            "trace endpoint matches several outer-boundary \
+                             edges ambiguously"
+                                .into(),
+                        )
+                        .into());
+                    }
+                }
+            }
+        };
+        #[allow(clippy::cast_precision_loss)]
+        Ok(idx as f64 + f)
+    }
+
+    /// Whether an item's chord lies on one UV domain bound.
+    fn on_domain_side(&self, item: &PerimeterItem) -> bool {
+        let eps = self.eps();
+        let (a, b) = (item.uv0, item.uv1);
+        ((a.x - self.u0).abs() <= eps && (b.x - self.u0).abs() <= eps)
+            || ((a.x - self.u1).abs() <= eps && (b.x - self.u1).abs() <= eps)
+            || ((a.y - self.v0).abs() <= eps && (b.y - self.v0).abs() <= eps)
+            || ((a.y - self.v1).abs() <= eps && (b.y - self.v1).abs() <= eps)
+    }
+
+    /// The UV polyline of item `idx` over traversal fractions
+    /// `[f_lo, f_hi]`, in traversal order.
+    ///
+    /// Full coverage samples the pcurve at its distinct knot breakpoints
+    /// (exact for the degree-1 polylines every boundary and trace edge
+    /// uses). Partial coverage interpolates the chord and therefore
+    /// requires a straight item.
+    ///
+    /// # Errors
+    ///
+    /// A typed error when a cut endpoint lands mid-way on a curved
+    /// (non-chord) boundary item.
+    fn item_polyline(&self, idx: usize, f_lo: f64, f_hi: f64) -> Result<Vec<Point2>> {
+        const F_FULL: f64 = 1e-12;
+        let item = &self.items[idx];
+        let full = f_lo <= F_FULL && f_hi >= 1.0 - F_FULL;
+        if !full && !item.is_straight() {
+            return Err(OperationError::Failed(
+                "cut trace endpoint lands mid-way on a curved outer-boundary \
+                 edge (overlapping cuts are unsupported)"
                     .into(),
             )
-            .into()),
+            .into());
         }
+        if let (true, Some((_, pcurve))) = (full, &item.edge) {
+            if !item.is_straight() {
+                // Emit the exact polyline breakpoints in traversal order.
+                let (lo, hi) = (item.t0.min(item.t1), item.t0.max(item.t1));
+                let mut ts: Vec<f64> = pcurve
+                    .knots()
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .filter(|t| *t >= lo && *t <= hi)
+                    .collect();
+                ts.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+                if item.t0 > item.t1 {
+                    ts.reverse();
+                }
+                let mut pts = Vec::with_capacity(ts.len());
+                for t in ts {
+                    pts.push(pcurve.point_at(t)?);
+                }
+                return Ok(pts);
+            }
+        }
+        Ok(vec![item.uv_at(f_lo), item.uv_at(f_hi)])
     }
+}
 
-    /// The UV point of a perimeter coordinate.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn uv_of(&self, s: f64) -> Point2 {
-        let s = s.rem_euclid(4.0);
-        let side = (s.floor() as usize).min(3);
-        let f = s - s.floor();
-        match side {
-            0 => Point2::new(self.u0 + f * (self.u1 - self.u0), self.v0),
-            1 => Point2::new(self.u1, self.v0 + f * (self.v1 - self.v0)),
-            2 => Point2::new(self.u1 - f * (self.u1 - self.u0), self.v1),
-            _ => Point2::new(self.u0, self.v1 - f * (self.v1 - self.v0)),
+/// Collects the face's outer-wire edges as perimeter items in traversal
+/// order, with their pcurves and traversal-ordered parameters.
+fn collect_wire_items(store: &TopologyStore, face: &FaceData) -> Result<Vec<PerimeterItem>> {
+    let wire = store.wire(face.outer_wire)?;
+    let mut raw: Vec<PerimeterItem> = Vec::with_capacity(wire.edges.len());
+    for oe in &wire.edges {
+        let Some(pcurve) = face.pcurve_for(oe.edge) else {
+            return Err(OperationError::Failed(
+                "face splitting requires per-edge pcurves on the target \
+                 face's outer wire"
+                    .into(),
+            )
+            .into());
+        };
+        let edge = store.edge(oe.edge)?;
+        let (mut t0, mut t1) = (edge.t_start, edge.t_end);
+        if !oe.forward {
+            std::mem::swap(&mut t0, &mut t1);
         }
+        let uv0 = pcurve.point_at(t0)?;
+        let uv1 = pcurve.point_at(t1)?;
+        let coord = usize::from((uv1.y - uv0.y).abs() > (uv1.x - uv0.x).abs());
+        raw.push(PerimeterItem {
+            edge: Some((oe.edge, pcurve.clone())),
+            t0,
+            t1,
+            uv0,
+            uv1,
+            coord,
+        });
     }
+    if raw.is_empty() {
+        return Err(OperationError::Failed(
+            "face splitting requires a non-empty outer wire".into(),
+        )
+        .into());
+    }
+    Ok(raw)
+}
 
-    /// The side coordinate (`u` for horizontal sides, `v` for vertical) of a
-    /// perimeter coordinate on side `side`.
-    fn side_coord(&self, side: usize, s: f64) -> f64 {
-        let uv = self.uv_of(s);
-        match side {
-            0 | 2 => uv.x,
-            _ => uv.y,
+/// Closes UV gaps between consecutive items with virtual seam connectors —
+/// only along a closed direction's domain bound (a revolved face's seam).
+fn close_seam_gaps(
+    raw: &[PerimeterItem],
+    surface: &NurbsSurface,
+    eps: f64,
+) -> Result<Vec<PerimeterItem>> {
+    let ((u0, u1), (v0, v1)) = surface.parameter_domain();
+    let n = raw.len();
+    let mut items: Vec<PerimeterItem> = Vec::with_capacity(n + 2);
+    for i in 0..n {
+        let a = raw[i].uv1;
+        let b = raw[(i + 1) % n].uv0;
+        items.push(raw[i].clone());
+        if (b - a).norm() <= eps {
+            continue;
         }
+        // The gap's varying coordinate: v when the gap runs along a
+        // closed-u seam bound, u when it runs along a closed-v bound.
+        let seam_coord = if (a.x - b.x).abs() <= eps
+            && surface.is_closed_in_u()
+            && ((a.x - u0).abs() <= eps || (a.x - u1).abs() <= eps)
+        {
+            Some(1)
+        } else if (a.y - b.y).abs() <= eps
+            && surface.is_closed_in_v()
+            && ((a.y - v0).abs() <= eps || (a.y - v1).abs() <= eps)
+        {
+            Some(0)
+        } else {
+            None
+        };
+        let Some(coord) = seam_coord else {
+            return Err(OperationError::Failed(
+                "face splitting requires a UV-continuous outer boundary \
+                 (an outer-wire gap is not a closed-direction seam)"
+                    .into(),
+            )
+            .into());
+        };
+        items.push(PerimeterItem {
+            edge: None,
+            t0: 0.0,
+            t1: 1.0,
+            uv0: a,
+            uv1: b,
+            coord,
+        });
     }
+    Ok(items)
 }
 
 // ---------------------------------------------------------------------------
@@ -630,14 +967,17 @@ impl EdgeSplitter {
         }
     }
 
-    /// Errors when a cut edge is referenced by a target face that is not
-    /// itself being split (its wire would dangle on the removed edge).
-    fn assert_only_affected_faces(
+    /// Collects the unaffected faces referencing a cut edge. PLANAR faces
+    /// (caps) are returned for the cap-notch rebuild; a NURBS face sharing a
+    /// cut edge without being split itself stays a typed error (its wire
+    /// would dangle on the removed edge).
+    fn collect_shared_faces(
         &self,
         store: &TopologyStore,
         all_target_faces: &[FaceId],
         affected: &[FaceId],
-    ) -> Result<()> {
+    ) -> Result<Vec<FaceId>> {
+        let mut planar_pending = Vec::new();
         for &fid in all_target_faces {
             if affected.contains(&fid) {
                 continue;
@@ -645,20 +985,38 @@ impl EdgeSplitter {
             let face = store.face(fid)?;
             let mut wires = vec![face.outer_wire];
             wires.extend(face.inner_wires.iter().copied());
+            let mut shares_cut = false;
             for w in wires {
                 for oe in &store.wire(w)?.edges {
                     if self.cuts.contains_key(&oe.edge) {
-                        return Err(OperationError::Failed(
-                            "cut trace splits a boundary edge shared with a \
-                             face the cut does not cross (unsupported)"
-                                .into(),
-                        )
-                        .into());
+                        shares_cut = true;
                     }
                 }
             }
+            if !shares_cut {
+                continue;
+            }
+            if matches!(face.surface, crate::topology::FaceSurface::Plane(_)) {
+                planar_pending.push(fid);
+            } else {
+                return Err(OperationError::Failed(
+                    "cut trace splits a boundary edge shared with a \
+                     face the cut does not cross (unsupported)"
+                        .into(),
+                )
+                .into());
+            }
         }
-        Ok(())
+        Ok(planar_pending)
+    }
+
+    /// The materialized sub-edge ids per split parent edge, in the parent's
+    /// parameter direction (call after [`Self::materialize`]).
+    fn sub_edge_ids(&self) -> HashMap<EdgeId, Vec<EdgeId>> {
+        self.subs
+            .iter()
+            .map(|(&parent, subs)| (parent, subs.iter().map(|s| s.id).collect()))
+            .collect()
     }
 
     /// Materializes the sub-edges of every registered parent edge: the cuts
@@ -726,29 +1084,38 @@ impl EdgeSplitter {
         Ok(())
     }
 
-    /// The sub-edges of `span`'s parent edge covering the side-coordinate
-    /// interval `[c_lo, c_hi]`, in ascending-coordinate order.
-    fn sub_edges_between(&self, span: &SideSpan, c_lo: f64, c_hi: f64) -> Result<Vec<SubEdge>> {
-        let subs = self.subs.get(&span.edge).ok_or_else(|| {
+    /// The sub-edges of a split parent edge covering the item-coordinate
+    /// interval `[c_lo, c_hi]`, in ascending-coordinate order. `t_ends` /
+    /// `c_ends` are the parent's traversal-end parameters and coordinates
+    /// (from the perimeter item).
+    fn sub_edges_between(
+        &self,
+        edge: EdgeId,
+        t_ends: (f64, f64),
+        c_ends: (f64, f64),
+        c_lo: f64,
+        c_hi: f64,
+    ) -> Result<Vec<SubEdge>> {
+        let subs = self.subs.get(&edge).ok_or_else(|| {
             OperationError::Failed("sub-edge lookup on an unsplit boundary edge".into())
         })?;
-        // Resolve the parent-end placeholder coordinates from the span.
+        // Resolve the parent-end placeholder coordinates from the ends.
         let resolved: Vec<SubEdge> = subs
             .iter()
             .map(|s| {
                 let mut r = s.clone();
                 if r.c0.is_nan() {
-                    r.c0 = if (r.t0 - span.t0).abs() <= (r.t0 - span.t1).abs() {
-                        span.c0
+                    r.c0 = if (r.t0 - t_ends.0).abs() <= (r.t0 - t_ends.1).abs() {
+                        c_ends.0
                     } else {
-                        span.c1
+                        c_ends.1
                     };
                 }
                 if r.c1.is_nan() {
-                    r.c1 = if (r.t1 - span.t1).abs() <= (r.t1 - span.t0).abs() {
-                        span.c1
+                    r.c1 = if (r.t1 - t_ends.1).abs() <= (r.t1 - t_ends.0).abs() {
+                        c_ends.1
                     } else {
-                        span.c0
+                        c_ends.0
                     };
                 }
                 r
@@ -830,7 +1197,10 @@ fn plan_face(
     let perimeter = PerimeterModel::build(store, face, &surface)?;
 
     // Subdivide: one region initially, split once per run.
-    let mut regions: Vec<Vec<Piece>> = vec![vec![Piece::Boundary { s0: 0.0, s1: 4.0 }]];
+    let mut regions: Vec<Vec<Piece>> = vec![vec![Piece::Boundary {
+        s0: 0.0,
+        s1: perimeter.total_s(),
+    }]];
     for (run_idx, run) in runs.iter().enumerate() {
         let s_a = perimeter.s_of(run.uv_start())?;
         let s_b = perimeter.s_of(run.uv_end())?;
@@ -1091,8 +1461,8 @@ fn segment_at_sample(run: &TraceRun, idx: usize) -> Result<(FaceId, Point2)> {
 }
 
 /// Registers the boundary-edge cut of one run endpoint, when the endpoint
-/// lands on a side that carries real edges (edge-less seam sides need no
-/// cut).
+/// lands on an item that carries a real edge (virtual seam connectors need
+/// no cut).
 fn register_endpoint_cut(
     perimeter: &PerimeterModel,
     uv: Point2,
@@ -1100,46 +1470,22 @@ fn register_endpoint_cut(
     splitter: &mut EdgeSplitter,
 ) -> Result<()> {
     let s = perimeter.s_of(uv)?;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let side = (s.rem_euclid(4.0).floor() as usize).min(3);
-    let c = perimeter.side_coord(side, s);
-    let spans = &perimeter.sides[side];
-    if spans.is_empty() {
-        return Ok(()); // Edge-less side (parametric seam): nothing to split.
-    }
-    let eps = UV_EXACT
-        * match side {
-            0 | 2 => (perimeter.u1 - perimeter.u0).abs().max(1.0),
-            _ => (perimeter.v1 - perimeter.v0).abs().max(1.0),
-        };
-    for span in spans {
-        if c > span.c_min() + eps && c < span.c_max() - eps {
-            let t = solve_edge_param(span, c)?;
-            splitter.register(span.edge, t, c, vertex);
-            return Ok(());
-        }
-        if (c - span.c_min()).abs() <= eps || (c - span.c_max()).abs() <= eps {
-            return Err(OperationError::Failed(
-                "cut trace lands exactly on a target boundary vertex \
-                 (unsupported)"
-                    .into(),
-            )
-            .into());
-        }
-    }
-    Err(OperationError::Failed(
-        "trace endpoint does not lie on any outer-wire edge of the target \
-         face"
-            .into(),
-    )
-    .into())
+    let (idx, _) = perimeter.locate(s);
+    let item = &perimeter.items[idx];
+    let Some((edge, pcurve)) = &item.edge else {
+        return Ok(()); // Virtual seam connector: nothing to split.
+    };
+    let c = item.c_of(uv);
+    let t = solve_edge_param(pcurve, item, c)?;
+    splitter.register(*edge, t, c, vertex);
+    Ok(())
 }
 
-/// Solves the edge parameter whose side coordinate equals `c` by monotone
-/// bisection on the span's ACTUAL pcurve coordinate (deterministic,
+/// Solves the edge parameter whose item coordinate equals `c` by monotone
+/// bisection on the item's ACTUAL pcurve coordinate (deterministic,
 /// converges to f64 precision; no tolerance knob).
-fn solve_edge_param(span: &SideSpan, c: f64) -> Result<f64> {
-    let (mut t_lo, mut c_lo, mut t_hi, mut c_hi) = (span.t0, span.c0, span.t1, span.c1);
+fn solve_edge_param(pcurve: &NurbsCurve2D, item: &PerimeterItem, c: f64) -> Result<f64> {
+    let (mut t_lo, mut c_lo, mut t_hi, mut c_hi) = (item.t0, item.c0(), item.t1, item.c1());
     if c_lo > c_hi {
         std::mem::swap(&mut t_lo, &mut t_hi);
         std::mem::swap(&mut c_lo, &mut c_hi);
@@ -1150,8 +1496,8 @@ fn solve_edge_param(span: &SideSpan, c: f64) -> Result<f64> {
         );
     }
     let coord_at = |t: f64| -> Result<f64> {
-        let p = span.pcurve.point_at(t)?;
-        Ok(if span.coord == 0 { p.x } else { p.y })
+        let p = pcurve.point_at(t)?;
+        Ok(if item.coord == 0 { p.x } else { p.y })
     };
     let (mut lo, mut hi) = (t_lo, t_hi);
     for _ in 0..128 {
@@ -1173,7 +1519,10 @@ fn solve_edge_param(span: &SideSpan, c: f64) -> Result<f64> {
 // Fragment construction
 // ---------------------------------------------------------------------------
 
-/// Builds the kept fragment faces of one planned split.
+/// Builds the kept fragment faces of one planned split. The parent's
+/// existing interior holes (earlier cuts' punched openings) transfer to the
+/// fragment whose kept region contains them — both the trim hole loop and
+/// the matching 3D inner wire.
 fn build_fragments(
     store: &mut TopologyStore,
     plan: &FacePlan,
@@ -1189,7 +1538,7 @@ fn build_fragments(
 
     let mut fragments = Vec::with_capacity(plan.kept.len());
     for cycle in &plan.kept {
-        let polygon = cycle_polygon(&plan.perimeter, cycle, &plan.runs);
+        let polygon = cycle_polygon(&plan.perimeter, cycle, &plan.runs)?;
         let build = cycle_wire(&plan.perimeter, cycle, &plan.runs, splitter)?;
         let (first_trace_edge, first_loop_index) = build
             .first_trace
@@ -1215,11 +1564,104 @@ fn build_fragments(
             first_loop_index,
         });
     }
+    transfer_parent_holes(store, &parent, &fragments)?;
     Ok(fragments)
 }
 
+/// Transfers a split parent's interior holes (trim hole loops + matching 3D
+/// inner wires, in punch lockstep order) onto the kept fragments containing
+/// them.
+fn transfer_parent_holes(
+    store: &mut TopologyStore,
+    parent: &FaceData,
+    fragments: &[Fragment],
+) -> Result<()> {
+    let Some(parent_trim) = &parent.trim else {
+        if parent.inner_wires.is_empty() {
+            return Ok(());
+        }
+        return Err(OperationError::Failed(
+            "split parent face carries inner wires without trim holes \
+             (inconsistent punch bookkeeping)"
+                .into(),
+        )
+        .into());
+    };
+    if parent_trim.holes.len() != parent.inner_wires.len() {
+        return Err(OperationError::Failed(
+            "split parent face's trim holes and inner wires disagree \
+             (inconsistent punch bookkeeping)"
+                .into(),
+        )
+        .into());
+    }
+    for (hole, &wire) in parent_trim.holes.iter().zip(&parent.inner_wires) {
+        let centroid = trim_loop_centroid(hole)?;
+        let fragment = fragments
+            .iter()
+            .find(|f| polygon_contains(&f.polygon, centroid))
+            .ok_or_else(|| {
+                OperationError::Failed(
+                    "an earlier cut's hole lies on a removed fragment of a \
+                     split target face (overlapping cuts are unsupported)"
+                        .into(),
+                )
+            })?;
+        // The parent's pcurves for the hole ring edges transfer with the
+        // wire, so edge-driven tessellation keeps pinning the transferred
+        // rim to the shared edge samples.
+        let ring_pcurves: Vec<FacePcurve> = store
+            .wire(wire)?
+            .edges
+            .iter()
+            .filter_map(|oe| {
+                parent.pcurve_for(oe.edge).map(|curve| FacePcurve {
+                    edge: oe.edge,
+                    curve: curve.clone(),
+                })
+            })
+            .collect();
+        let face = store.face_mut(fragment.face)?;
+        let trim = face
+            .trim
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("fragments are built with trim"));
+        trim.holes.push(hole.clone());
+        face.inner_wires.push(wire);
+        for pcurve in ring_pcurves {
+            if face.pcurve_for(pcurve.edge).is_none() {
+                face.pcurves.push(pcurve);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The vertex-average UV centroid of a trim loop (sampled at each curve's
+/// start point).
+fn trim_loop_centroid(hole: &TrimLoop) -> Result<Point2> {
+    if hole.curves.is_empty() {
+        return Err(OperationError::Failed("empty trim hole loop".into()).into());
+    }
+    let mut sum = Point2::new(0.0, 0.0);
+    for curve in &hole.curves {
+        let (t0, _) = curve.parameter_domain();
+        let p = curve.point_at(t0)?;
+        sum = Point2::new(sum.x + p.x, sum.y + p.y);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let inv = 1.0 / hole.curves.len() as f64;
+    Ok(Point2::new(sum.x * inv, sum.y * inv))
+}
+
 /// The UV polygon of a region cycle (counter-clockwise, deduplicated).
-fn cycle_polygon(perimeter: &PerimeterModel, cycle: &[Piece], runs: &[TraceRun]) -> Vec<Point2> {
+/// Boundary pieces emit the exact per-item UV polylines (including earlier
+/// cuts' trace detours), so the trim stays faithful on notched outers.
+fn cycle_polygon(
+    perimeter: &PerimeterModel,
+    cycle: &[Piece],
+    runs: &[TraceRun],
+) -> Result<Vec<Point2>> {
     let mut poly: Vec<Point2> = Vec::new();
     let push = |p: Point2, poly: &mut Vec<Point2>| {
         if poly.last().is_none_or(|q| (p - *q).norm() > UV_EXACT) {
@@ -1229,16 +1671,11 @@ fn cycle_polygon(perimeter: &PerimeterModel, cycle: &[Piece], runs: &[TraceRun])
     for piece in cycle {
         match piece {
             Piece::Boundary { s0, s1 } => {
-                push(perimeter.uv_of(*s0), &mut poly);
-                // Interior rectangle corners.
-                let mut k = s0.floor() + 1.0;
-                while k < *s1 - f64::EPSILON {
-                    if k > *s0 + f64::EPSILON {
-                        push(perimeter.uv_of(k), &mut poly);
+                for (idx, f_lo, f_hi) in covered_items(perimeter, *s0, *s1) {
+                    for p in perimeter.item_polyline(idx, f_lo, f_hi)? {
+                        push(p, &mut poly);
                     }
-                    k += 1.0;
                 }
-                push(perimeter.uv_of(*s1), &mut poly);
             }
             Piece::Trace { run, forward } => {
                 let mut pts = runs[*run].uv_points();
@@ -1254,7 +1691,27 @@ fn cycle_polygon(perimeter: &PerimeterModel, cycle: &[Piece], runs: &[TraceRun])
     while poly.len() >= 2 && (poly[0] - poly[poly.len() - 1]).norm() < UV_EXACT {
         poly.pop();
     }
-    poly
+    Ok(poly)
+}
+
+/// The items covered by the perimeter arc `[s0, s1]`, each with its covered
+/// traversal-fraction range, in counter-clockwise order.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn covered_items(perimeter: &PerimeterModel, s0: f64, s1: f64) -> Vec<(usize, f64, f64)> {
+    let n = perimeter.items.len();
+    let first = (s0.floor() as usize).min(n - 1);
+    let last = (((s1 - 1e-12).floor()) as usize).min(n - 1);
+    let mut out = Vec::with_capacity(last.saturating_sub(first) + 1);
+    for idx in first..=last {
+        #[allow(clippy::cast_precision_loss)]
+        let base = idx as f64;
+        let f_lo = (s0 - base).clamp(0.0, 1.0);
+        let f_hi = (s1 - base).clamp(0.0, 1.0);
+        if f_hi - f_lo > 1e-12 {
+            out.push((idx, f_lo, f_hi));
+        }
+    }
+    out
 }
 
 /// Converts a UV polygon into a degree-1 trim loop.
@@ -1370,60 +1827,42 @@ fn append_boundary_edges(
     pcurves: &mut Vec<FacePcurve>,
     seen: &mut Vec<EdgeId>,
 ) -> Result<()> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let first_side = (s0.floor() as usize).min(3);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let last_side = ((s1 - 1e-12).floor() as usize).min(3);
-
-    for side in first_side..=last_side {
-        #[allow(clippy::cast_precision_loss)]
-        let side_f = side as f64;
-        let seg_s0 = s0.max(side_f);
-        let seg_s1 = s1.min(side_f + 1.0);
-        if seg_s1 - seg_s0 <= 1e-12 {
+    const F_FULL: f64 = 1e-12;
+    for (idx, f_lo, f_hi) in covered_items(perimeter, s0, s1) {
+        let item = &perimeter.items[idx];
+        let Some((edge, pcurve)) = &item.edge else {
+            continue; // Virtual seam connector: UV gap, closed by seam connectors.
+        };
+        let full = f_lo <= F_FULL && f_hi >= 1.0 - F_FULL;
+        // The wire traverses the edge forward when the traversal parameter
+        // ascends (item.t0 < item.t1).
+        let traversal_forward = item.t1 > item.t0;
+        if full && !splitter.is_split(*edge) {
+            wire.push(OrientedEdge::new(*edge, traversal_forward));
+            add_pcurve(pcurves, seen, *edge, pcurve.clone());
             continue;
         }
-        let c_from = perimeter.side_coord(side, seg_s0);
-        let c_to = perimeter.side_coord(side, seg_s1);
-        let spans = &perimeter.sides[side];
-        if spans.is_empty() {
-            continue; // Edge-less seam side: UV gap, closed by seam connectors.
-        }
+        // Split (or partially covered) item: emit the covered sub-edges in
+        // traversal order. Cut endpoints only land on straight items, so the
+        // chord coordinate interpolation is exact.
+        let c_from = item.c_of(item.uv_at(f_lo));
+        let c_to = item.c_of(item.uv_at(f_hi));
         let (lo, hi) = (c_from.min(c_to), c_from.max(c_to));
         let ascending = c_to > c_from;
-
-        // Collect (c_min, edge, natural ascending, pcurve) per span overlap.
-        let mut collected: Vec<(f64, EdgeId, bool, NurbsCurve2D)> = Vec::new();
-        let eps = UV_EXACT * (hi - lo).abs().max(1.0);
-        for span in spans {
-            let o_lo = span.c_min().max(lo);
-            let o_hi = span.c_max().min(hi);
-            if o_hi - o_lo <= eps {
-                continue;
-            }
-            let natural_ascending = span.c1 > span.c0;
-            let full = (o_lo - span.c_min()).abs() <= eps && (o_hi - span.c_max()).abs() <= eps;
-            if full && !splitter.is_split(span.edge) {
-                collected.push((o_lo, span.edge, natural_ascending, span.pcurve.clone()));
-            } else {
-                for sub in splitter.sub_edges_between(span, o_lo, o_hi)? {
-                    let sub_ascending = sub.c1 > sub.c0;
-                    collected.push((
-                        sub.c0.min(sub.c1),
-                        sub.id,
-                        sub_ascending,
-                        span.pcurve.clone(),
-                    ));
-                }
-            }
-        }
-        collected.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut subs = splitter.sub_edges_between(
+            *edge,
+            (item.t0, item.t1),
+            (item.c0(), item.c1()),
+            lo,
+            hi,
+        )?;
         if !ascending {
-            collected.reverse();
+            subs.reverse();
         }
-        for (_, edge, natural_ascending, pcurve) in collected {
-            wire.push(OrientedEdge::new(edge, natural_ascending == ascending));
-            add_pcurve(pcurves, seen, edge, pcurve);
+        for sub in subs {
+            let sub_ascending = sub.c1 > sub.c0;
+            wire.push(OrientedEdge::new(sub.id, sub_ascending == ascending));
+            add_pcurve(pcurves, seen, sub.id, pcurve.clone());
         }
     }
     Ok(())
