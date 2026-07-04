@@ -3,6 +3,16 @@ use crate::geometry::surface::Plane;
 use crate::math::{Point3, Vector3, TOLERANCE};
 use crate::topology::{FaceData, FaceId, FaceSurface, TopologyStore, WireId};
 
+/// Coplanarity tolerance for `MakeFace`. The global `TOLERANCE = 1e-10`
+/// is geometric-equality precision (≈1 ångström); applying it to face
+/// construction rejects perfectly-good fragments produced by cascaded
+/// boolean operations whose intersection math accumulates ~1e-9 of
+/// floating-point noise per iteration. `1e-6` (1 micron) is the
+/// industry-standard "engineering coplanarity" tolerance — generous
+/// enough to absorb cascade noise, tight enough that genuinely off-
+/// plane input still fails.
+const COPLANAR_TOLERANCE: f64 = 1e-6;
+
 /// Creates a face from a wire boundary and a surface.
 pub struct MakeFace {
     outer_wire: WireId,
@@ -55,6 +65,8 @@ impl MakeFace {
             outer_wire: self.outer_wire,
             inner_wires: self.inner_wires.clone(),
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         });
 
         Ok(face_id)
@@ -70,16 +82,50 @@ fn validate_wire_closed(store: &TopologyStore, wire_id: WireId) -> Result<()> {
     Ok(())
 }
 
-/// Collects vertex positions from a wire in traversal order.
+/// Collects boundary positions from a wire in traversal order, for plane
+/// fitting and coplanarity validation.
+///
+/// Straight edges contribute their start vertex; curved edges contribute a
+/// handful of interior samples too, so a wire made of a single closed curve
+/// (e.g. a shared ring edge) still yields enough points to define its plane.
 fn collect_wire_points(store: &TopologyStore, wire_id: WireId) -> Result<Vec<Point3>> {
+    use crate::geometry::curve::Curve;
+    use crate::topology::EdgeCurve;
+
+    /// Interior samples per curved edge (plane fitting needs only a few).
+    const CURVED_EDGE_SAMPLES: usize = 8;
+
     let edges = store.wire(wire_id)?.edges.clone();
     let mut points = Vec::with_capacity(edges.len());
 
     for oe in &edges {
         let edge = store.edge(oe.edge)?;
-        let vertex_id = if oe.forward { edge.start } else { edge.end };
-        let vertex = store.vertex(vertex_id)?;
-        points.push(vertex.point);
+        let (t_start, t_end) = if oe.forward {
+            (edge.t_start, edge.t_end)
+        } else {
+            (edge.t_end, edge.t_start)
+        };
+        match &edge.curve {
+            EdgeCurve::Line(_) => {
+                let vertex_id = if oe.forward { edge.start } else { edge.end };
+                points.push(store.vertex(vertex_id)?.point);
+            }
+            curve => {
+                for i in 0..CURVED_EDGE_SAMPLES {
+                    #[allow(clippy::cast_precision_loss)]
+                    let frac = i as f64 / CURVED_EDGE_SAMPLES as f64;
+                    let t = t_start + (t_end - t_start) * frac;
+                    let p = match curve {
+                        EdgeCurve::Line(c) => c.evaluate(t)?,
+                        EdgeCurve::Arc(c) => c.evaluate(t)?,
+                        EdgeCurve::Circle(c) => c.evaluate(t)?,
+                        EdgeCurve::Ellipse(c) => c.evaluate(t)?,
+                        EdgeCurve::Nurbs(c) => c.point_at(t)?,
+                    };
+                    points.push(p);
+                }
+            }
+        }
     }
 
     Ok(points)
@@ -107,10 +153,10 @@ fn compute_plane_from_points(points: &[Point3]) -> Result<Plane> {
 
     let len = normal.norm();
     if len < TOLERANCE {
-        return Err(
-            OperationError::Failed("all points are collinear, cannot define a plane".into())
-                .into(),
-        );
+        return Err(OperationError::Failed(
+            "all points are collinear, cannot define a plane".into(),
+        )
+        .into());
     }
 
     // Centroid as origin
@@ -125,13 +171,15 @@ fn compute_plane_from_points(points: &[Point3]) -> Result<Plane> {
     Plane::from_normal(centroid, normal)
 }
 
-/// Validates that all points lie within `TOLERANCE` of the plane.
+/// Validates that all points lie within `COPLANAR_TOLERANCE` of the
+/// plane. See the constant's doc comment for why this is laxer than
+/// the global geometric `TOLERANCE`.
 fn validate_coplanarity(plane: &Plane, points: &[Point3]) -> Result<()> {
     let origin = plane.origin();
     let normal = plane.plane_normal();
     for (i, p) in points.iter().enumerate() {
         let dist = (p - origin).dot(normal).abs();
-        if dist > TOLERANCE {
+        if dist > COPLANAR_TOLERANCE {
             return Err(OperationError::InvalidInput(format!(
                 "point {i} is not coplanar (distance = {dist})"
             ))
@@ -158,7 +206,12 @@ mod tests {
     #[test]
     fn square_xy_plane_normal_is_z() {
         let mut store = TopologyStore::new();
-        let pts = vec![p(0.0, 0.0, 0.0), p(4.0, 0.0, 0.0), p(4.0, 4.0, 0.0), p(0.0, 4.0, 0.0)];
+        let pts = vec![
+            p(0.0, 0.0, 0.0),
+            p(4.0, 0.0, 0.0),
+            p(4.0, 4.0, 0.0),
+            p(0.0, 4.0, 0.0),
+        ];
         let wire = make_closed_wire(&mut store, pts);
         let face_id = MakeFace::new(wire, vec![]).execute(&mut store).unwrap();
         let face = store.face(face_id).unwrap();
@@ -184,12 +237,16 @@ mod tests {
     fn face_with_inner_wire() {
         let mut store = TopologyStore::new();
         let outer = vec![
-            p(0.0, 0.0, 0.0), p(10.0, 0.0, 0.0),
-            p(10.0, 10.0, 0.0), p(0.0, 10.0, 0.0),
+            p(0.0, 0.0, 0.0),
+            p(10.0, 0.0, 0.0),
+            p(10.0, 10.0, 0.0),
+            p(0.0, 10.0, 0.0),
         ];
         let inner = vec![
-            p(2.0, 2.0, 0.0), p(8.0, 2.0, 0.0),
-            p(8.0, 8.0, 0.0), p(2.0, 8.0, 0.0),
+            p(2.0, 2.0, 0.0),
+            p(8.0, 2.0, 0.0),
+            p(8.0, 8.0, 0.0),
+            p(2.0, 8.0, 0.0),
         ];
         let outer_wire = make_closed_wire(&mut store, outer);
         let inner_wire = make_closed_wire(&mut store, inner);
@@ -222,8 +279,10 @@ mod tests {
     fn non_coplanar_points_fail() {
         let mut store = TopologyStore::new();
         let pts = vec![
-            p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0),
-            p(1.0, 1.0, 0.0), p(0.0, 1.0, 1.0),
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(0.0, 1.0, 1.0),
         ];
         let wire = make_closed_wire(&mut store, pts);
         let result = MakeFace::new(wire, vec![]).execute(&mut store);

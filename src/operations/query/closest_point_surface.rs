@@ -45,8 +45,23 @@ impl ClosestPointOnSurface {
             FaceSurface::Sphere(sph) => closest_on_sphere(sph, &self.query),
             FaceSurface::Cone(cone) => closest_on_cone(cone, &self.query),
             FaceSurface::Torus(torus) => closest_on_torus(torus, &self.query),
+            FaceSurface::Nurbs(nurbs) => closest_on_nurbs(nurbs, &self.query),
         }
     }
+}
+
+fn closest_on_nurbs(
+    nurbs: &crate::geometry::nurbs::NurbsSurface,
+    query: &Point3,
+) -> Result<SurfacePoint> {
+    let inversion =
+        nurbs.closest_point(query, &crate::geometry::nurbs::InversionOptions::default())?;
+    Ok(SurfacePoint {
+        u: inversion.u,
+        v: inversion.v,
+        point: inversion.point,
+        distance: inversion.distance,
+    })
 }
 
 fn closest_on_plane(
@@ -117,10 +132,7 @@ fn closest_on_sphere(
     })
 }
 
-fn closest_on_cone(
-    cone: &crate::geometry::surface::Cone,
-    query: &Point3,
-) -> Result<SurfacePoint> {
+fn closest_on_cone(cone: &crate::geometry::surface::Cone, query: &Point3) -> Result<SurfacePoint> {
     let dp = query - cone.apex();
     let axis_proj = dp.dot(cone.axis());
     let radial = dp - *cone.axis() * axis_proj;
@@ -194,6 +206,8 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -208,6 +222,8 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -222,6 +238,8 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -279,5 +297,65 @@ mod tests {
 
         assert!((result.point.x - 5.0).abs() < 1e-6);
         assert!((result.distance - 5.0).abs() < 1e-6);
+    }
+
+    fn make_nurbs_plane_face(store: &mut TopologyStore) -> FaceId {
+        use crate::geometry::nurbs::{KnotVector, NurbsSurface};
+        // Bilinear planar patch over [0,4] x [0,4] in the z=0 plane.
+        let patch = NurbsSurface::from_unweighted(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, 4.0, 0.0),
+                Point3::new(4.0, 0.0, 0.0),
+                Point3::new(4.0, 4.0, 0.0),
+            ],
+            2,
+            2,
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0]).unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+        let wire = store.add_wire(WireData {
+            edges: vec![],
+            is_closed: true,
+        });
+        store.add_face(FaceData {
+            surface: FaceSurface::Nurbs(patch),
+            outer_wire: wire,
+            inner_wires: vec![],
+            same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn nurbs_face_closest_point_round_trips() {
+        let mut store = TopologyStore::new();
+        let face = make_nurbs_plane_face(&mut store);
+
+        // A point above the patch interior: closest point is the foot on z=0.
+        let result = ClosestPointOnSurface::new(face, Point3::new(2.0, 2.0, 5.0))
+            .execute(&store)
+            .unwrap();
+
+        assert!(
+            (result.point.x - 2.0).abs() < 1e-6,
+            "x = {}",
+            result.point.x
+        );
+        assert!(
+            (result.point.y - 2.0).abs() < 1e-6,
+            "y = {}",
+            result.point.y
+        );
+        assert!(result.point.z.abs() < 1e-6, "z = {}", result.point.z);
+        assert!(
+            (result.distance - 5.0).abs() < 1e-6,
+            "d = {}",
+            result.distance
+        );
     }
 }

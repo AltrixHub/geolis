@@ -82,6 +82,22 @@ impl GeneralTransform {
                 EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                     todo!("GeneralTransform for Circle/Ellipse edges")
                 }
+                EdgeCurve::Nurbs(nurbs) => {
+                    // Affine transform applies directly to control points; weights,
+                    // knots, and degree (hence the parameter domain) are invariant.
+                    let new_points = nurbs
+                        .control_points()
+                        .iter()
+                        .map(|p| transform_point(&self.matrix, p))
+                        .collect();
+                    let new_nurbs = crate::geometry::nurbs::NurbsCurve3D::new(
+                        new_points,
+                        nurbs.weights().to_vec(),
+                        nurbs.knots().clone(),
+                        nurbs.degree(),
+                    )?;
+                    (EdgeCurve::Nurbs(new_nurbs), edge.t_start, edge.t_end)
+                }
             };
 
             let edge = store.edge_mut(edge_id)?;
@@ -129,10 +145,7 @@ fn transform_direction(matrix: &Matrix4, dir: &Vector3) -> Vector3 {
 }
 
 /// Collects all unique vertex IDs referenced by a solid.
-fn collect_solid_vertices(
-    store: &TopologyStore,
-    solid_id: SolidId,
-) -> Result<HashSet<VertexId>> {
+fn collect_solid_vertices(store: &TopologyStore, solid_id: SolidId) -> Result<HashSet<VertexId>> {
     let mut vertices = HashSet::new();
     let edge_ids = collect_solid_edges(store, solid_id)?;
     for edge_id in edge_ids {
@@ -233,7 +246,12 @@ mod tests {
 
     fn make_unit_cube(store: &mut TopologyStore) -> SolidId {
         let wire = MakeWire::new(
-            vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)],
+            vec![
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+            ],
             true,
         )
         .execute(store)

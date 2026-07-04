@@ -61,7 +61,12 @@ mod tests {
     fn scale_from_origin_doubles() {
         let mut store = TopologyStore::new();
         let wire = MakeWire::new(
-            vec![p(1.0, 1.0, 0.0), p(2.0, 1.0, 0.0), p(2.0, 2.0, 0.0), p(1.0, 2.0, 0.0)],
+            vec![
+                p(1.0, 1.0, 0.0),
+                p(2.0, 1.0, 0.0),
+                p(2.0, 2.0, 0.0),
+                p(1.0, 2.0, 0.0),
+            ],
             true,
         )
         .execute(&mut store)

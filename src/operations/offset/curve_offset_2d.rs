@@ -36,6 +36,10 @@ impl CurveOffset2D {
             EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                 todo!("CurveOffset2D for Circle/Ellipse")
             }
+            EdgeCurve::Nurbs(_) => Err(OperationError::Failed(
+                "offsetting NURBS edges is not yet supported".into(),
+            )
+            .into()),
         }
     }
 }
@@ -122,9 +126,7 @@ fn offset_arc(
                 t_end,
             }))
         }
-        None => Err(
-            OperationError::Failed("arc offset collapsed (radius <= 0)".into()).into(),
-        ),
+        None => Err(OperationError::Failed("arc offset collapsed (radius <= 0)".into()).into()),
     }
 }
 

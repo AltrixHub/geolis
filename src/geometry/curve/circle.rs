@@ -33,16 +33,9 @@ impl Circle {
     ///
     /// Returns an error if the radius is non-positive, the normal is zero-length,
     /// or the reference direction is not perpendicular to the normal.
-    pub fn new(
-        center: Point3,
-        radius: f64,
-        normal: Vector3,
-        ref_dir: Vector3,
-    ) -> Result<Self> {
+    pub fn new(center: Point3, radius: f64, normal: Vector3, ref_dir: Vector3) -> Result<Self> {
         if radius < TOLERANCE {
-            return Err(
-                GeometryError::Degenerate("circle radius must be positive".into()).into(),
-            );
+            return Err(GeometryError::Degenerate("circle radius must be positive".into()).into());
         }
 
         let normal_len = normal.norm();
@@ -138,13 +131,7 @@ mod tests {
     use std::f64::consts::{FRAC_PI_2, TAU};
 
     fn xy_circle(radius: f64) -> Circle {
-        Circle::new(
-            Point3::origin(),
-            radius,
-            Vector3::z(),
-            Vector3::x(),
-        )
-        .unwrap()
+        Circle::new(Point3::origin(), radius, Vector3::z(), Vector3::x()).unwrap()
     }
 
     #[test]
@@ -185,13 +172,7 @@ mod tests {
 
     #[test]
     fn offset_center() {
-        let c = Circle::new(
-            Point3::new(1.0, 2.0, 3.0),
-            1.0,
-            Vector3::z(),
-            Vector3::x(),
-        )
-        .unwrap();
+        let c = Circle::new(Point3::new(1.0, 2.0, 3.0), 1.0, Vector3::z(), Vector3::x()).unwrap();
         let p = c.evaluate(0.0).unwrap();
         assert!((p - Point3::new(2.0, 2.0, 3.0)).norm() < TOLERANCE);
     }

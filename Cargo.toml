@@ -15,8 +15,9 @@ thiserror = "2.0.18"
 approx = "0.5.1"
 revion_app = { path = "../revion/crates/revion_app" }
 revion_core = { path = "../revion/crates/revion_core" }
+revion_design_system = { path = "../revion/crates/revion_design_system" }
 revion_ui = { path = "../revion/crates/revion_ui" }
-revion_macro = { path = "../revion/crates/revion_macro" }
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]

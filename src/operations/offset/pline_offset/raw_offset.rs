@@ -65,10 +65,9 @@ pub fn build(pline: &Pline, distance: f64) -> Result<Pline> {
             });
         } else {
             // Arc segment: change radius, preserve sweep.
-            let seg = offset_arc_segment(v0.x, v0.y, v1.x, v1.y, v0.bulge, distance)
-                .ok_or_else(|| {
-                    OperationError::Failed("arc segment collapsed during offset".to_owned())
-                })?;
+            let seg = offset_arc_segment(v0.x, v0.y, v1.x, v1.y, v0.bulge, distance).ok_or_else(
+                || OperationError::Failed("arc segment collapsed during offset".to_owned()),
+            )?;
 
             let (ox0, oy0, ox1, oy1, ob) = seg;
             let (_, _, _, sa, sw) = arc_from_bulge(ox0, oy0, ox1, oy1, ob);

@@ -12,7 +12,7 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.0;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -40,8 +40,10 @@ fn min_distance_to_centerlines(px: f64, py: f64, centerlines: &[Pline]) -> f64 {
 }
 
 fn find_clip_point(
-    inside_x: f64, inside_y: f64,
-    outside_x: f64, outside_y: f64,
+    inside_x: f64,
+    inside_y: f64,
+    outside_x: f64,
+    outside_y: f64,
     centerlines: &[Pline],
     threshold: f64,
 ) -> (f64, f64) {
@@ -65,11 +67,7 @@ fn find_clip_point(
     )
 }
 
-fn clip_miter_vertices(
-    verts: &mut Vec<PlineVertex>,
-    centerlines: &[Pline],
-    max_allowed: f64,
-) {
+fn clip_miter_vertices(verts: &mut Vec<PlineVertex>, centerlines: &[Pline], max_allowed: f64) {
     let n = verts.len();
     if n < 3 {
         return;
@@ -81,14 +79,20 @@ fn clip_miter_vertices(
             let prev = if i > 0 { i - 1 } else { n - 1 };
             let next = (i + 1) % n;
             let (cx1, cy1) = find_clip_point(
-                verts[prev].x, verts[prev].y,
-                verts[i].x, verts[i].y,
-                centerlines, max_allowed,
+                verts[prev].x,
+                verts[prev].y,
+                verts[i].x,
+                verts[i].y,
+                centerlines,
+                max_allowed,
             );
             let (cx2, cy2) = find_clip_point(
-                verts[next].x, verts[next].y,
-                verts[i].x, verts[i].y,
-                centerlines, max_allowed,
+                verts[next].x,
+                verts[next].y,
+                verts[i].x,
+                verts[i].y,
+                centerlines,
+                max_allowed,
             );
             result.push(PlineVertex::line(cx1, cy1));
             result.push(PlineVertex::line(cx2, cy2));
@@ -100,8 +104,14 @@ fn clip_miter_vertices(
 }
 
 fn segment_segment_intersection(
-    ax: f64, ay: f64, bx: f64, by: f64,
-    cx: f64, cy: f64, dx: f64, dy: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    cx: f64,
+    cy: f64,
+    dx: f64,
+    dy: f64,
 ) -> Option<(f64, f64)> {
     let d1x = bx - ax;
     let d1y = by - ay;
@@ -144,83 +154,9 @@ fn find_self_intersection(vertices: &[PlineVertex]) -> Option<(usize, usize, f64
     None
 }
 
-fn polygon_area_pv(vertices: &[PlineVertex]) -> f64 {
-    let n = vertices.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut area = 0.0;
-    for i in 0..n {
-        let j = (i + 1) % n;
-        area += vertices[i].x * vertices[j].y;
-        area -= vertices[j].x * vertices[i].y;
-    }
-    area / 2.0
-}
-
-/// Resolve to a single outer-contour polygon per boundary (ground truth).
-/// Miter clip → split at self-intersection → keep largest area loop.
-fn resolve_outer_contour(
-    boundaries: &mut Vec<Pline>,
-    centerlines: &[Pline],
-    half_thickness: f64,
-) {
-    let max_allowed = half_thickness * 4.0;
-    let mut result: Vec<Pline> = Vec::new();
-
-    for boundary in boundaries.drain(..) {
-        if !boundary.closed || boundary.vertices.len() < 4 {
-            result.push(boundary);
-            continue;
-        }
-
-        let mut verts = boundary.vertices.clone();
-        clip_miter_vertices(&mut verts, centerlines, max_allowed);
-        if verts.len() < 3 {
-            continue;
-        }
-
-        for _iter in 0..100 {
-            if verts.len() < 4 {
-                break;
-            }
-            match find_self_intersection(&verts) {
-                Some((edge_i, edge_j, ix, iy)) => {
-                    let n = verts.len();
-                    let mut loop_a = vec![PlineVertex::line(ix, iy)];
-                    for k in (edge_i + 1)..=edge_j {
-                        loop_a.push(PlineVertex::line(verts[k].x, verts[k].y));
-                    }
-                    let mut loop_b = vec![PlineVertex::line(ix, iy)];
-                    for k in (edge_j + 1)..n {
-                        loop_b.push(PlineVertex::line(verts[k].x, verts[k].y));
-                    }
-                    for k in 0..=edge_i {
-                        loop_b.push(PlineVertex::line(verts[k].x, verts[k].y));
-                    }
-                    let area_a = polygon_area_pv(&loop_a).abs();
-                    let area_b = polygon_area_pv(&loop_b).abs();
-                    verts = if area_a >= area_b { loop_a } else { loop_b };
-                }
-                None => break,
-            }
-        }
-
-        if verts.len() >= 3 {
-            result.push(Pline { vertices: verts, closed: true });
-        }
-    }
-
-    *boundaries = result;
-}
-
 /// Resolve keeping both loops (algorithm output for wall_group.rs).
 /// Miter clip → split at self-intersection → keep both loops.
-fn resolve_keep_both(
-    boundaries: &mut Vec<Pline>,
-    centerlines: &[Pline],
-    half_thickness: f64,
-) {
+fn resolve_keep_both(boundaries: &mut Vec<Pline>, centerlines: &[Pline], half_thickness: f64) {
     let max_allowed = half_thickness * 4.0;
     let mut result: Vec<Pline> = Vec::new();
 
@@ -245,7 +181,10 @@ fn resolve_keep_both(
             for verts in pending.drain(..) {
                 if verts.len() < 4 {
                     if verts.len() >= 3 {
-                        result.push(Pline { vertices: verts, closed: true });
+                        result.push(Pline {
+                            vertices: verts,
+                            closed: true,
+                        });
                     }
                     continue;
                 }
@@ -274,7 +213,10 @@ fn resolve_keep_both(
                         made_progress = true;
                     }
                     None => {
-                        result.push(Pline { vertices: verts, closed: true });
+                        result.push(Pline {
+                            vertices: verts,
+                            closed: true,
+                        });
                     }
                 }
             }
@@ -287,7 +229,10 @@ fn resolve_keep_both(
 
         for verts in pending {
             if verts.len() >= 3 {
-                result.push(Pline { vertices: verts, closed: true });
+                result.push(Pline {
+                    vertices: verts,
+                    closed: true,
+                });
             }
         }
     }
@@ -321,18 +266,14 @@ fn near_reversal() -> Vec<(f64, f64)> {
 
 /// 4-point zigzag: 4th point's wall slightly crosses 1st segment's wall.
 fn zigzag_4_overlap() -> Vec<(f64, f64)> {
-    vec![
-        (0.0, 0.0),
-        (3.0, 4.0),
-        (0.0, 3.0),
-        (0.1, 0.5),
-    ]
+    vec![(0.0, 0.0), (3.0, 4.0), (0.0, 3.0), (0.1, 0.5)]
 }
 
 // ── Drawing helper ──────────────────────────────────────────────────
 
 fn draw_case(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     pts: &[(f64, f64)],
     half_w: f64,
     bx: f64,
@@ -348,8 +289,20 @@ fn draw_case(
     };
     let centerlines = vec![pline.clone()];
 
-    let raw_boundaries = WallOutline2D::new(vec![pline], half_w)
-        .execute()
+    // `execute_faces` returns validated, union-assembled footprints. Flatten
+    // every footprint's outer ring and holes into a single boundary list so
+    // the example's own miter-clip / split pass can run over them.
+    let raw_boundaries: Vec<Pline> = WallOutline2D::new(vec![pline], half_w)
+        .execute_faces()
+        .map(|footprints| {
+            footprints
+                .into_iter()
+                .flat_map(|fp| {
+                    let (outer, holes) = fp.into_parts();
+                    std::iter::once(outer).chain(holes)
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     // LEFT: RED = raw WallOutline2D output (BEFORE any processing)
@@ -360,7 +313,7 @@ fn draw_case(
         .iter()
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
-    register_stroke(storage, &center, thin, false, GRAY);
+    register_stroke(storage, bounds, &center, thin, false, GRAY);
 
     for ol in &raw_boundaries {
         let p: Vec<Point3> = ol
@@ -368,7 +321,7 @@ fn draw_case(
             .iter()
             .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
             .collect();
-        register_stroke(storage, &p, medium, ol.closed, RED);
+        register_stroke(storage, bounds, &p, medium, ol.closed, RED);
     }
 
     // RIGHT: GREEN = algorithm output (keep both loops)
@@ -380,7 +333,7 @@ fn draw_case(
         .iter()
         .map(|&(x, y)| Point3::new(x + rx, y + by, 0.0))
         .collect();
-    register_stroke(storage, &center2, thin, false, GRAY);
+    register_stroke(storage, bounds, &center2, thin, false, GRAY);
 
     for ol in &resolved {
         let p: Vec<Point3> = ol
@@ -388,7 +341,7 @@ fn draw_case(
             .iter()
             .map(|v| Point3::new(v.x + rx, v.y + by, 0.0))
             .collect();
-        register_stroke(storage, &p, medium, ol.closed, GREEN);
+        register_stroke(storage, bounds, &p, medium, ol.closed, GREEN);
     }
 
     // Labels
@@ -402,21 +355,21 @@ fn draw_case(
 ///
 /// Left column: RED = raw WallOutline2D output (BEFORE, may self-intersect)
 /// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Labels for columns
-    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED);      // BEFORE
-    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN);   // AFTER
+    register_label(storage, 0.0, 5.0, "0", LABEL_SIZE * 1.5, RED); // BEFORE
+    register_label(storage, 15.0, 5.0, "0", LABEL_SIZE * 1.5, GREEN); // AFTER
 
     let cases: Vec<(&str, Vec<(f64, f64)>, f64)> = vec![
-        ("1", v_slight_overlap(), 0.15),       // 3pt V, slight overlap, thin
-        ("2", v_clear_overlap(), 0.15),        // 3pt V, clear overlap, thin
-        ("3", v_thick_overlap(), 0.3),         // 3pt V, thicker wall
-        ("4", near_reversal(), 0.3),           // 3pt near-reversal
-        ("5", zigzag_4_overlap(), 0.15),       // 4pt, last overlaps 1st seg
+        ("1", v_slight_overlap(), 0.15), // 3pt V, slight overlap, thin
+        ("2", v_clear_overlap(), 0.15),  // 3pt V, clear overlap, thin
+        ("3", v_thick_overlap(), 0.3),   // 3pt V, thicker wall
+        ("4", near_reversal(), 0.3),     // 3pt near-reversal
+        ("5", zigzag_4_overlap(), 0.15), // 4pt, last overlaps 1st seg
     ];
 
     for (i, (label, pts, hw)) in cases.iter().enumerate() {
         let by = -(i as f64) * 12.0;
-        draw_case(storage, pts, *hw, 0.0, by, label);
+        draw_case(storage, bounds, pts, *hw, 0.0, by, label);
     }
 }

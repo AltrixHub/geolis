@@ -201,13 +201,21 @@ mod tests {
     #[test]
     fn point_inside_square() {
         let plane = xy_plane();
-        assert!(point_in_polygon_3d(&p(0.5, 0.5, 0.0), &unit_square(), &plane));
+        assert!(point_in_polygon_3d(
+            &p(0.5, 0.5, 0.0),
+            &unit_square(),
+            &plane
+        ));
     }
 
     #[test]
     fn point_outside_square() {
         let plane = xy_plane();
-        assert!(!point_in_polygon_3d(&p(2.0, 0.5, 0.0), &unit_square(), &plane));
+        assert!(!point_in_polygon_3d(
+            &p(2.0, 0.5, 0.0),
+            &unit_square(),
+            &plane
+        ));
     }
 
     #[test]
@@ -230,12 +238,7 @@ mod tests {
     fn segment_fully_inside() {
         let plane = xy_plane();
         let sq = unit_square();
-        let result = clip_segment_to_polygon(
-            &p(0.2, 0.5, 0.0),
-            &p(0.8, 0.5, 0.0),
-            &sq,
-            &plane,
-        );
+        let result = clip_segment_to_polygon(&p(0.2, 0.5, 0.0), &p(0.8, 0.5, 0.0), &sq, &plane);
         assert_eq!(result.len(), 1);
         assert!((result[0].0).abs() < TOLERANCE);
         assert!((result[0].1 - 1.0).abs() < TOLERANCE);
@@ -245,12 +248,7 @@ mod tests {
     fn segment_fully_outside() {
         let plane = xy_plane();
         let sq = unit_square();
-        let result = clip_segment_to_polygon(
-            &p(2.0, 0.5, 0.0),
-            &p(3.0, 0.5, 0.0),
-            &sq,
-            &plane,
-        );
+        let result = clip_segment_to_polygon(&p(2.0, 0.5, 0.0), &p(3.0, 0.5, 0.0), &sq, &plane);
         assert!(result.is_empty());
     }
 
@@ -259,12 +257,7 @@ mod tests {
         let plane = xy_plane();
         let sq = unit_square();
         // Segment from outside to inside
-        let result = clip_segment_to_polygon(
-            &p(-0.5, 0.5, 0.0),
-            &p(0.5, 0.5, 0.0),
-            &sq,
-            &plane,
-        );
+        let result = clip_segment_to_polygon(&p(-0.5, 0.5, 0.0), &p(0.5, 0.5, 0.0), &sq, &plane);
         assert_eq!(result.len(), 1);
         // t=0.5 is where it enters the square (x=0.0)
         assert!((result[0].0 - 0.5).abs() < 0.01);
@@ -276,12 +269,7 @@ mod tests {
         let plane = xy_plane();
         let sq = unit_square();
         // Segment goes clean through the square from left to right
-        let result = clip_segment_to_polygon(
-            &p(-1.0, 0.5, 0.0),
-            &p(2.0, 0.5, 0.0),
-            &sq,
-            &plane,
-        );
+        let result = clip_segment_to_polygon(&p(-1.0, 0.5, 0.0), &p(2.0, 0.5, 0.0), &sq, &plane);
         assert_eq!(result.len(), 1);
         // Enters at t = 1/3 (x=0), exits at t = 2/3 (x=1)
         let expected_t0 = 1.0 / 3.0;

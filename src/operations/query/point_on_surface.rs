@@ -30,6 +30,7 @@ impl PointOnSurface {
             FaceSurface::Cone(cone) => cone.evaluate(self.u, self.v),
             FaceSurface::Sphere(sphere) => sphere.evaluate(self.u, self.v),
             FaceSurface::Torus(torus) => torus.evaluate(self.u, self.v),
+            FaceSurface::Nurbs(nurbs) => nurbs.evaluate(self.u, self.v),
         }
     }
 }
@@ -58,9 +59,7 @@ mod tests {
         .unwrap();
         let face = MakeFace::new(wire, vec![]).execute(&mut store).unwrap();
 
-        let pt = PointOnSurface::new(face, 1.0, 2.0)
-            .execute(&store)
-            .unwrap();
+        let pt = PointOnSurface::new(face, 1.0, 2.0).execute(&store).unwrap();
         // The plane is constructed from the wire centroid; exact coords depend
         // on the plane's u_dir/v_dir, but z should always be 0
         assert!(pt.z.abs() < 1e-10);

@@ -1,14 +1,19 @@
+pub mod dump;
 pub mod edge;
 pub mod face;
+pub mod name;
 pub mod shell;
 pub mod solid;
+pub mod trim;
 pub mod vertex;
 pub mod wire;
 
 pub use edge::{EdgeCurve, EdgeData, EdgeId};
-pub use face::{FaceData, FaceId, FaceSurface};
+pub use face::{FaceData, FaceId, FacePcurve, FaceSurface};
+pub use name::{EdgeName, EdgeRole, FaceName, FaceRole, NameRegistry, OpId};
 pub use shell::{ShellData, ShellId};
 pub use solid::{SolidData, SolidId};
+pub use trim::{FaceTrim, TrimLoop};
 pub use vertex::{VertexData, VertexId};
 pub use wire::{OrientedEdge, WireData, WireId};
 
@@ -27,6 +32,7 @@ pub struct TopologyStore {
     faces: SlotMap<FaceId, FaceData>,
     shells: SlotMap<ShellId, ShellData>,
     solids: SlotMap<SolidId, SolidData>,
+    names: NameRegistry,
 }
 
 impl TopologyStore {
@@ -34,6 +40,17 @@ impl TopologyStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The persistent-name registry (rebuild-stable name ↔ current id).
+    #[must_use]
+    pub fn names(&self) -> &NameRegistry {
+        &self.names
+    }
+
+    /// Mutable access to the persistent-name registry.
+    pub fn names_mut(&mut self) -> &mut NameRegistry {
+        &mut self.names
     }
 
     // --- Vertex operations ---

@@ -54,19 +54,18 @@ impl Revolve {
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
         let axis_len = self.axis_dir.norm();
         if axis_len < TOLERANCE {
-            return Err(
-                OperationError::InvalidInput("revolve axis direction must be non-zero".into())
-                    .into(),
-            );
+            return Err(OperationError::InvalidInput(
+                "revolve axis direction must be non-zero".into(),
+            )
+            .into());
         }
         let axis = self.axis_dir / axis_len;
 
         // Validate angle
         if self.angle <= 0.0 || self.angle > TAU + TOLERANCE {
-            return Err(OperationError::InvalidInput(
-                "revolve angle must be in (0, 2π]".into(),
-            )
-            .into());
+            return Err(
+                OperationError::InvalidInput("revolve angle must be in (0, 2π]".into()).into(),
+            );
         }
         let is_full = (self.angle - TAU).abs() < TOLERANCE;
 
@@ -123,12 +122,7 @@ impl Revolve {
                 if info.radius < TOLERANCE {
                     None
                 } else {
-                    let circle = make_circle_on_axis(
-                        &info.axis_foot,
-                        info.radius,
-                        axis,
-                        ref_dir,
-                    );
+                    let circle = make_circle_on_axis(&info.axis_foot, info.radius, axis, ref_dir);
                     match circle {
                         Ok(c) => Some(store.add_edge(EdgeData {
                             start: vid,
@@ -147,7 +141,13 @@ impl Revolve {
         let seam_edges: Vec<EdgeId> = (0..n)
             .map(|i| {
                 let j = (i + 1) % n;
-                create_line_edge(store, verts[i], verts[j], profile_points[i], profile_points[j])
+                create_line_edge(
+                    store,
+                    verts[i],
+                    verts[j],
+                    profile_points[i],
+                    profile_points[j],
+                )
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -306,8 +306,7 @@ impl Revolve {
             .map(|i| OrientedEdge::new(start_seam_edges[i], false))
             .collect();
         let start_cap_wire = create_closed_wire(store, start_cap_edges);
-        let start_cap =
-            MakeFace::new(start_cap_wire, vec![]).execute(store)?;
+        let start_cap = MakeFace::new(start_cap_wire, vec![]).execute(store)?;
         all_faces.push(start_cap);
 
         // End cap face: forward winding so normal points outward (+sweep)
@@ -315,8 +314,7 @@ impl Revolve {
             .map(|i| OrientedEdge::new(end_seam_edges[i], true))
             .collect();
         let end_cap_wire = create_closed_wire(store, end_cap_edges);
-        let end_cap =
-            MakeFace::new(end_cap_wire, vec![]).execute(store)?;
+        let end_cap = MakeFace::new(end_cap_wire, vec![]).execute(store)?;
         all_faces.push(end_cap);
 
         let shell_id = store.add_shell(ShellData {
@@ -372,8 +370,10 @@ fn compute_ref_dir(vert_info: &[VertexInfo], _axis: &Vector3) -> Result<Vector3>
         }
     }
     // All vertices on axis: degenerate profile
-    Err(OperationError::InvalidInput("all profile vertices lie on the revolution axis".into())
-        .into())
+    Err(
+        OperationError::InvalidInput("all profile vertices lie on the revolution axis".into())
+            .into(),
+    )
 }
 
 /// Creates a Circle curve on the axis plane at the given foot point.
@@ -441,9 +441,9 @@ fn create_side_face(
         // Both vertices off-axis: normal case
         (false, false, Some(ci), Some(cj)) => {
             vec![
-                OrientedEdge::new(ci, true),    // circle at i (forward)
+                OrientedEdge::new(ci, true),         // circle at i (forward)
                 OrientedEdge::new(seam_edge, false), // seam edge (reverse = return seam)
-                OrientedEdge::new(cj, false),   // circle at j (reverse)
+                OrientedEdge::new(cj, false),        // circle at j (reverse)
                 OrientedEdge::new(seam_edge, true),  // seam edge (forward)
             ]
         }
@@ -465,10 +465,9 @@ fn create_side_face(
         }
         // Both on axis: degenerate (zero-area face), skip
         _ => {
-            return Err(OperationError::Failed(
-                "both vertices on axis: degenerate face".into(),
-            )
-            .into());
+            return Err(
+                OperationError::Failed("both vertices on axis: degenerate face".into()).into(),
+            );
         }
     };
 
@@ -487,6 +486,8 @@ fn create_side_face(
         outer_wire: wire,
         inner_wires: vec![],
         same_sense,
+        trim: None,
+        pcurves: Vec::new(),
     }))
 }
 
@@ -514,34 +515,33 @@ fn create_partial_side_face(
         // Both off-axis: 4-edge face
         (false, false, Some(ai), Some(aj)) => {
             vec![
-                OrientedEdge::new(ai, true),         // arc i: start_i → end_i
+                OrientedEdge::new(ai, true),          // arc i: start_i → end_i
                 OrientedEdge::new(end_seam, true),    // end seam: end_i → end_j
-                OrientedEdge::new(aj, false),          // arc j: end_j → start_j (reverse)
-                OrientedEdge::new(start_seam, false),  // start seam: start_j → start_i (reverse)
+                OrientedEdge::new(aj, false),         // arc j: end_j → start_j (reverse)
+                OrientedEdge::new(start_seam, false), // start seam: start_j → start_i (reverse)
             ]
         }
         // i on axis: 3-edge face (no arc_i)
         (true, false, None, Some(aj)) => {
             vec![
-                OrientedEdge::new(end_seam, true),     // end seam: end_i → end_j
-                OrientedEdge::new(aj, false),           // arc j: end_j → start_j (reverse)
-                OrientedEdge::new(start_seam, false),   // start seam: start_j → start_i (reverse)
+                OrientedEdge::new(end_seam, true),    // end seam: end_i → end_j
+                OrientedEdge::new(aj, false),         // arc j: end_j → start_j (reverse)
+                OrientedEdge::new(start_seam, false), // start seam: start_j → start_i (reverse)
             ]
         }
         // j on axis: 3-edge face (no arc_j)
         (false, true, Some(ai), None) => {
             vec![
-                OrientedEdge::new(ai, true),           // arc i: start_i → end_i
-                OrientedEdge::new(end_seam, true),      // end seam: end_i → end_j
-                OrientedEdge::new(start_seam, false),   // start seam: start_j → start_i (reverse)
+                OrientedEdge::new(ai, true),          // arc i: start_i → end_i
+                OrientedEdge::new(end_seam, true),    // end seam: end_i → end_j
+                OrientedEdge::new(start_seam, false), // start seam: start_j → start_i (reverse)
             ]
         }
         // Both on axis: degenerate
         _ => {
-            return Err(OperationError::Failed(
-                "both vertices on axis: degenerate face".into(),
-            )
-            .into());
+            return Err(
+                OperationError::Failed("both vertices on axis: degenerate face".into()).into(),
+            );
         }
     };
 
@@ -554,6 +554,8 @@ fn create_partial_side_face(
         outer_wire: wire,
         inner_wires: vec![],
         same_sense,
+        trim: None,
+        pcurves: Vec::new(),
     }))
 }
 
@@ -679,10 +681,7 @@ fn determine_same_sense(
 }
 
 /// Collects vertex positions from a wire in traversal order.
-fn collect_wire_points(
-    store: &TopologyStore,
-    wire_id: WireId,
-) -> Result<Vec<Point3>> {
+fn collect_wire_points(store: &TopologyStore, wire_id: WireId) -> Result<Vec<Point3>> {
     let edges = store.wire(wire_id)?.edges.clone();
     let mut points = Vec::with_capacity(edges.len());
     for oe in &edges {
@@ -781,7 +780,7 @@ mod tests {
         let face = make_face(
             &mut store,
             vec![
-                p(0.0, 0.0, 5.0),  // on axis
+                p(0.0, 0.0, 5.0), // on axis
                 p(3.0, 0.0, 0.0),
                 p(3.0, 0.0, 5.0),
             ],
@@ -800,11 +799,7 @@ mod tests {
         let mut store = TopologyStore::new();
         let face = make_face(
             &mut store,
-            vec![
-                p(0.0, 0.0, 5.0),
-                p(3.0, 0.0, 0.0),
-                p(3.0, 0.0, 5.0),
-            ],
+            vec![p(0.0, 0.0, 5.0), p(3.0, 0.0, 0.0), p(3.0, 0.0, 5.0)],
         );
         let solid = Revolve::new(face, Point3::origin(), Vector3::z())
             .execute(&mut store)
@@ -955,8 +950,8 @@ mod tests {
             &mut store,
             vec![p(2.0, 0.0, 0.0), p(4.0, 0.0, 0.0), p(3.0, 0.0, 3.0)],
         );
-        let result = Revolve::new(face, Point3::origin(), Vector3::new(0.0, 0.0, 0.0))
-            .execute(&mut store);
+        let result =
+            Revolve::new(face, Point3::origin(), Vector3::new(0.0, 0.0, 0.0)).execute(&mut store);
         assert!(result.is_err());
     }
 
@@ -1185,8 +1180,7 @@ mod tests {
 
                 // Gap region: atan2 in (-PI/2, 0) exclusive
                 // (i.e., the quadrant between +X and -Y, excluding boundaries)
-                let in_gap = theta > -std::f64::consts::FRAC_PI_2 + 0.01
-                    && theta < -0.01;
+                let in_gap = theta > -std::f64::consts::FRAC_PI_2 + 0.01 && theta < -0.01;
                 assert!(
                     !in_gap,
                     "face {face_idx} vertex {vi} at ({:.3}, {:.3}, {:.3}) is in the gap \

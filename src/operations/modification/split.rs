@@ -85,16 +85,8 @@ fn make_aligned_box(
     // Use MakeBox which creates an AABB. Since the cutting plane may be
     // arbitrarily oriented, we need the box in world coordinates.
     // MakeBox creates an axis-aligned box, so we compute the AABB of our corners.
-    let min_world = Point3::new(
-        min.x.min(max.x),
-        min.y.min(max.y),
-        min.z.min(max.z),
-    );
-    let max_world = Point3::new(
-        min.x.max(max.x),
-        min.y.max(max.y),
-        min.z.max(max.z),
-    );
+    let min_world = Point3::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
+    let max_world = Point3::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
 
     // Ensure non-degenerate box (extend thin dimensions)
     let dx = (max_world.x - min_world.x).max(TOLERANCE * 100.0);
@@ -195,8 +187,8 @@ mod tests {
             .execute(&mut store)
             .unwrap();
 
-        let result = Split::new(solid, p(0.0, 0.0, 2.0), Vector3::new(0.0, 0.0, 0.0))
-            .execute(&mut store);
+        let result =
+            Split::new(solid, p(0.0, 0.0, 2.0), Vector3::new(0.0, 0.0, 0.0)).execute(&mut store);
         assert!(result.is_err());
     }
 }

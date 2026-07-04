@@ -27,16 +27,18 @@ impl ThickenFace {
     /// Returns an error if the thickness is near zero or the face cannot be extruded.
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
         if self.thickness.abs() < TOLERANCE {
-            return Err(
-                OperationError::InvalidInput("thickness must be non-zero".into()).into(),
-            );
+            return Err(OperationError::InvalidInput("thickness must be non-zero".into()).into());
         }
 
         let face = store.face(self.face)?;
         let normal = match &face.surface {
             FaceSurface::Plane(plane) => {
                 let n = *plane.plane_normal();
-                if face.same_sense { n } else { -n }
+                if face.same_sense {
+                    n
+                } else {
+                    -n
+                }
             }
             _ => {
                 todo!("ThickenFace for non-planar surfaces")
@@ -72,9 +74,7 @@ mod tests {
         .unwrap();
         let face = MakeFace::new(wire, vec![]).execute(&mut store).unwrap();
 
-        let solid = ThickenFace::new(face, 2.0)
-            .execute(&mut store)
-            .unwrap();
+        let solid = ThickenFace::new(face, 2.0).execute(&mut store).unwrap();
 
         let aabb = BoundingBox::new(solid).execute(&store).unwrap();
         assert!((aabb.max.z - 2.0).abs() < 1e-10 || (aabb.min.z + 2.0).abs() < 1e-10);
@@ -92,9 +92,7 @@ mod tests {
         .unwrap();
         let face = MakeFace::new(wire, vec![]).execute(&mut store).unwrap();
 
-        let solid = ThickenFace::new(face, -3.0)
-            .execute(&mut store)
-            .unwrap();
+        let solid = ThickenFace::new(face, -3.0).execute(&mut store).unwrap();
 
         let aabb = BoundingBox::new(solid).execute(&store).unwrap();
         // Should extend in negative Z direction
@@ -105,12 +103,9 @@ mod tests {
     #[test]
     fn zero_thickness_returns_error() {
         let mut store = TopologyStore::new();
-        let wire = MakeWire::new(
-            vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)],
-            true,
-        )
-        .execute(&mut store)
-        .unwrap();
+        let wire = MakeWire::new(vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)], true)
+            .execute(&mut store)
+            .unwrap();
         let face = MakeFace::new(wire, vec![]).execute(&mut store).unwrap();
 
         let result = ThickenFace::new(face, 0.0).execute(&mut store);

@@ -35,9 +35,10 @@ impl Mirror {
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
         let len = self.plane_normal.norm();
         if len < TOLERANCE {
-            return Err(
-                OperationError::InvalidInput("mirror plane normal must be non-zero".into()).into(),
-            );
+            return Err(OperationError::InvalidInput(
+                "mirror plane normal must be non-zero".into(),
+            )
+            .into());
         }
         let normal = self.plane_normal / len;
 
@@ -75,14 +76,19 @@ fn mirror_shell(
     let is_closed = shell.is_closed;
 
     // Collect unique vertex and edge IDs from the shell (read-only pass)
-    let (unique_verts, unique_edges) =
-        collect_unique_ids(store, &face_ids)?;
+    let (unique_verts, unique_edges) = collect_unique_ids(store, &face_ids)?;
 
     // Mirror all unique vertices
     let vertex_map = mirror_vertices(store, &unique_verts, plane_origin, plane_normal)?;
 
     // Mirror all unique edges
-    let edge_map = mirror_edges(store, &unique_edges, &vertex_map, plane_origin, plane_normal)?;
+    let edge_map = mirror_edges(
+        store,
+        &unique_edges,
+        &vertex_map,
+        plane_origin,
+        plane_normal,
+    )?;
 
     // Create faces with reversed winding
     build_mirrored_faces(store, &face_ids, &edge_map, is_closed)
@@ -92,10 +98,7 @@ fn mirror_shell(
 fn collect_unique_ids(
     store: &TopologyStore,
     face_ids: &[crate::topology::FaceId],
-) -> Result<(
-    Vec<crate::topology::VertexId>,
-    Vec<crate::topology::EdgeId>,
-)> {
+) -> Result<(Vec<crate::topology::VertexId>, Vec<crate::topology::EdgeId>)> {
     use std::collections::HashSet;
 
     let mut vert_set = HashSet::new();
@@ -205,6 +208,28 @@ fn mirror_edges(
             EdgeCurve::Circle(_) | EdgeCurve::Ellipse(_) => {
                 todo!("Mirror for Circle/Ellipse edges")
             }
+            EdgeCurve::Nurbs(nurbs) => {
+                // Reflecting every control point mirrors the curve; weights,
+                // knots, and degree (hence the parameter domain) are invariant.
+                let new_points = nurbs
+                    .control_points()
+                    .iter()
+                    .map(|p| mirror_point(p, plane_origin, plane_normal))
+                    .collect();
+                let new_nurbs = crate::geometry::nurbs::NurbsCurve3D::new(
+                    new_points,
+                    nurbs.weights().to_vec(),
+                    nurbs.knots().clone(),
+                    nurbs.degree(),
+                )?;
+                EdgeData {
+                    start: new_start,
+                    end: new_end,
+                    curve: EdgeCurve::Nurbs(new_nurbs),
+                    t_start: edge.t_start,
+                    t_end: edge.t_end,
+                }
+            }
         };
         let new_eid = store.add_edge(new_edge_data);
         map.insert(eid, new_eid);
@@ -250,6 +275,8 @@ fn build_mirrored_faces(
             outer_wire: new_outer_wire,
             inner_wires: new_inner_wires,
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         });
         new_faces.push(new_face_id);
     }
@@ -348,7 +375,12 @@ mod tests {
     fn mirror_across_yz_plane() {
         let mut store = TopologyStore::new();
         let wire = MakeWire::new(
-            vec![p(1.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 1.0, 0.0), p(1.0, 1.0, 0.0)],
+            vec![
+                p(1.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(2.0, 1.0, 0.0),
+                p(1.0, 1.0, 0.0),
+            ],
             true,
         )
         .execute(&mut store)
@@ -387,7 +419,12 @@ mod tests {
     fn mirror_preserves_original() {
         let mut store = TopologyStore::new();
         let wire = MakeWire::new(
-            vec![p(1.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 1.0, 0.0), p(1.0, 1.0, 0.0)],
+            vec![
+                p(1.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(2.0, 1.0, 0.0),
+                p(1.0, 1.0, 0.0),
+            ],
             true,
         )
         .execute(&mut store)
@@ -433,8 +470,8 @@ mod tests {
             .execute(&mut store)
             .unwrap();
 
-        let result = Mirror::new(solid, p(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0))
-            .execute(&mut store);
+        let result =
+            Mirror::new(solid, p(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0)).execute(&mut store);
         assert!(result.is_err());
     }
 }

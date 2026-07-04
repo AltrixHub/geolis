@@ -5,7 +5,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label};
+use super::{register_edges, register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -14,21 +14,22 @@ const BLUE: Color = Color::rgb(100, 150, 255);
 
 fn render_solid(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     topo: &TopologyStore,
     solid: geolis::topology::SolidId,
     mesh_color: Color,
     edge_color: Color,
 ) {
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(topo) {
-        register_face(storage, mesh, mesh_color);
+        register_face(storage, bounds, mesh, mesh_color);
     }
     if let Ok(solid_data) = topo.solid(solid) {
-        register_edges(storage, topo, solid_data.outer_shell, edge_color);
+        register_edges(storage, bounds, topo, solid_data.outer_shell, edge_color);
     }
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     let spacing = 12.0;
     let edge_color = Color::rgb(60, 60, 60);
 
@@ -42,7 +43,7 @@ pub fn register(storage: &MeshStorage) {
         if let Ok(solid) =
             MakeCylinder::new(Point3::new(bx, by, 0.0), 3.0, Vector3::z(), 6.0).execute(&mut topo)
         {
-            render_solid(storage, &topo, solid, GREEN, edge_color);
+            render_solid(storage, bounds, &topo, solid, GREEN, edge_color);
         }
     }
 
@@ -54,7 +55,7 @@ pub fn register(storage: &MeshStorage) {
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) = MakeSphere::new(Point3::new(bx, by, 0.0), 3.0).execute(&mut topo) {
-            render_solid(storage, &topo, solid, BLUE, edge_color);
+            render_solid(storage, bounds, &topo, solid, BLUE, edge_color);
         }
     }
 
@@ -66,10 +67,9 @@ pub fn register(storage: &MeshStorage) {
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =
-            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 0.0, Vector3::z(), 6.0)
-                .execute(&mut topo)
+            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 0.0, Vector3::z(), 6.0).execute(&mut topo)
         {
-            render_solid(storage, &topo, solid, GREEN, edge_color);
+            render_solid(storage, bounds, &topo, solid, GREEN, edge_color);
         }
     }
 
@@ -81,10 +81,9 @@ pub fn register(storage: &MeshStorage) {
 
         let mut topo = TopologyStore::new();
         if let Ok(solid) =
-            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 1.5, Vector3::z(), 6.0)
-                .execute(&mut topo)
+            MakeCone::new(Point3::new(bx, by, 0.0), 3.0, 1.5, Vector3::z(), 6.0).execute(&mut topo)
         {
-            render_solid(storage, &topo, solid, BLUE, edge_color);
+            render_solid(storage, bounds, &topo, solid, BLUE, edge_color);
         }
     }
 }

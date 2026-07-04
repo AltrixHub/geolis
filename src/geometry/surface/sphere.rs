@@ -35,16 +35,9 @@ impl Sphere {
     ///
     /// Returns an error if the radius is non-positive, axis is zero-length,
     /// or the reference direction is not perpendicular to the axis.
-    pub fn new(
-        center: Point3,
-        radius: f64,
-        axis: Vector3,
-        ref_dir: Vector3,
-    ) -> Result<Self> {
+    pub fn new(center: Point3, radius: f64, axis: Vector3, ref_dir: Vector3) -> Result<Self> {
         if radius < TOLERANCE {
-            return Err(
-                GeometryError::Degenerate("sphere radius must be positive".into()).into(),
-            );
+            return Err(GeometryError::Degenerate("sphere radius must be positive".into()).into());
         }
 
         let axis_len = axis.norm();
@@ -161,13 +154,7 @@ mod tests {
     use std::f64::consts::{FRAC_PI_2, TAU};
 
     fn unit_sphere() -> Sphere {
-        Sphere::new(
-            Point3::origin(),
-            1.0,
-            Vector3::z(),
-            Vector3::x(),
-        )
-        .unwrap()
+        Sphere::new(Point3::origin(), 1.0, Vector3::z(), Vector3::x()).unwrap()
     }
 
     #[test]
@@ -231,13 +218,7 @@ mod tests {
 
     #[test]
     fn offset_center() {
-        let s = Sphere::new(
-            Point3::new(1.0, 2.0, 3.0),
-            2.0,
-            Vector3::z(),
-            Vector3::x(),
-        )
-        .unwrap();
+        let s = Sphere::new(Point3::new(1.0, 2.0, 3.0), 2.0, Vector3::z(), Vector3::x()).unwrap();
         let p = s.evaluate(0.0, 0.0).unwrap();
         assert!((p - Point3::new(3.0, 2.0, 3.0)).norm() < TOLERANCE);
     }

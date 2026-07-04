@@ -171,12 +171,7 @@ impl Surface for Torus {
     }
 
     fn domain(&self) -> SurfaceDomain {
-        SurfaceDomain::new(
-            0.0,
-            std::f64::consts::TAU,
-            0.0,
-            std::f64::consts::TAU,
-        )
+        SurfaceDomain::new(0.0, std::f64::consts::TAU, 0.0, std::f64::consts::TAU)
     }
 }
 
@@ -187,14 +182,7 @@ mod tests {
     use std::f64::consts::{FRAC_PI_2, TAU};
 
     fn xy_torus() -> Torus {
-        Torus::new(
-            Point3::origin(),
-            3.0,
-            1.0,
-            Vector3::z(),
-            Vector3::x(),
-        )
-        .unwrap()
+        Torus::new(Point3::origin(), 3.0, 1.0, Vector3::z(), Vector3::x()).unwrap()
     }
 
     #[test]

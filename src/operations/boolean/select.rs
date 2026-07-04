@@ -44,9 +44,7 @@ pub fn should_keep_fragment(
         }
 
         (SolidSource::A, PointClassification::Inside, BooleanOp::Union) => KeepDecision::Discard,
-        (SolidSource::A, PointClassification::Inside, BooleanOp::Subtract) => {
-            KeepDecision::Discard
-        }
+        (SolidSource::A, PointClassification::Inside, BooleanOp::Subtract) => KeepDecision::Discard,
         (SolidSource::A, PointClassification::Inside, BooleanOp::Intersect) => KeepDecision::Keep,
 
         // Fragment from B, classified vs A
@@ -83,11 +81,19 @@ mod tests {
     #[test]
     fn union_keeps_outside_fragments() {
         assert_eq!(
-            should_keep_fragment(SolidSource::A, PointClassification::Outside, BooleanOp::Union),
+            should_keep_fragment(
+                SolidSource::A,
+                PointClassification::Outside,
+                BooleanOp::Union
+            ),
             KeepDecision::Keep
         );
         assert_eq!(
-            should_keep_fragment(SolidSource::B, PointClassification::Outside, BooleanOp::Union),
+            should_keep_fragment(
+                SolidSource::B,
+                PointClassification::Outside,
+                BooleanOp::Union
+            ),
             KeepDecision::Keep
         );
     }
@@ -95,11 +101,19 @@ mod tests {
     #[test]
     fn union_discards_inside_fragments() {
         assert_eq!(
-            should_keep_fragment(SolidSource::A, PointClassification::Inside, BooleanOp::Union),
+            should_keep_fragment(
+                SolidSource::A,
+                PointClassification::Inside,
+                BooleanOp::Union
+            ),
             KeepDecision::Discard
         );
         assert_eq!(
-            should_keep_fragment(SolidSource::B, PointClassification::Inside, BooleanOp::Union),
+            should_keep_fragment(
+                SolidSource::B,
+                PointClassification::Inside,
+                BooleanOp::Union
+            ),
             KeepDecision::Discard
         );
     }

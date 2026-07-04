@@ -7,7 +7,7 @@ use geolis::topology::TopologyStore;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label};
+use super::{register_edges, register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -39,22 +39,21 @@ fn make_box(
 
 fn render_solid(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     store: &TopologyStore,
     solid: geolis::topology::SolidId,
     mesh_color: Color,
     edge_color: Color,
 ) {
-    if let Ok(mesh) =
-        TessellateSolid::new(solid, TessellationParams::default()).execute(store)
-    {
-        register_face(storage, mesh, mesh_color);
+    if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(store) {
+        register_face(storage, bounds, mesh, mesh_color);
     }
     if let Ok(solid_data) = store.solid(solid) {
-        register_edges(storage, store, solid_data.outer_shell, edge_color);
+        register_edges(storage, bounds, store, solid_data.outer_shell, edge_color);
     }
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // Case 1: Subtract — window hole in wall
     // Window extends beyond wall in z to avoid coplanar faces
     let bx = -14.0;
@@ -67,7 +66,7 @@ pub fn register(storage: &MeshStorage) {
         if let (Some(a), Some(b)) = (wall, window) {
             if let Ok(result) = Subtract::new(a, b).execute(&mut store) {
                 let edge_color = Color::rgb(60, 60, 60);
-                render_solid(storage, &store, result, GREEN, edge_color);
+                render_solid(storage, bounds, &store, result, GREEN, edge_color);
             }
         }
     }
@@ -83,7 +82,7 @@ pub fn register(storage: &MeshStorage) {
         if let (Some(a), Some(b)) = (a, b) {
             if let Ok(result) = Union::new(a, b).execute(&mut store) {
                 let edge_color = Color::rgb(60, 60, 60);
-                render_solid(storage, &store, result, BLUE, edge_color);
+                render_solid(storage, bounds, &store, result, BLUE, edge_color);
             }
         }
     }
@@ -99,7 +98,7 @@ pub fn register(storage: &MeshStorage) {
         if let (Some(a), Some(b)) = (a, b) {
             if let Ok(result) = Intersect::new(a, b).execute(&mut store) {
                 let edge_color = Color::rgb(60, 60, 60);
-                render_solid(storage, &store, result, RED, edge_color);
+                render_solid(storage, bounds, &store, result, RED, edge_color);
             }
         }
     }

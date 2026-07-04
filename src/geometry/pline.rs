@@ -1,6 +1,14 @@
 use crate::math::arc_2d::{arc_from_bulge, arc_point_at};
 use crate::math::Point3;
 
+/// Self-intersection detection primitives. `find_self_intersection` is
+/// reused by the `WallOutline2D` test oracle (P3.1 S2) and by the
+/// figure-8 / multi-self-crossing fixture assertions; consequently the
+/// module is test-only — `polygon_union` no longer relies on it for
+/// production output.
+#[cfg(test)]
+pub(crate) mod self_intersection;
+
 /// Bulge-encoded polyline vertex for mixed line/arc segments.
 ///
 /// `bulge = tan(sweep_angle / 4)`:
@@ -44,10 +52,7 @@ impl Pline {
     /// Creates a `Pline` from `Point3` vertices with all-zero bulges (line segments only).
     #[must_use]
     pub fn from_points(points: &[Point3], closed: bool) -> Self {
-        let vertices = points
-            .iter()
-            .map(|p| PlineVertex::line(p.x, p.y))
-            .collect();
+        let vertices = points.iter().map(|p| PlineVertex::line(p.x, p.y)).collect();
         Self { vertices, closed }
     }
 
@@ -224,7 +229,11 @@ mod tests {
         };
         let pts = pline.to_points(0.01);
         // Should have start, some intermediate points, and end.
-        assert!(pts.len() > 2, "expected more than 2 points, got {}", pts.len());
+        assert!(
+            pts.len() > 2,
+            "expected more than 2 points, got {}",
+            pts.len()
+        );
         // First and last points should match vertices.
         assert!((pts[0].x).abs() < 1e-10);
         assert!((pts[0].y).abs() < 1e-10);

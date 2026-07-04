@@ -32,7 +32,8 @@ pub fn build(network: &Network, left_width: f64, right_width: f64) -> Vec<Offset
         .collect();
 
     // Resolve endpoint positions at junctions.
-    let resolved = resolve_all_endpoints(network, &offset_data);
+    let max_width = left_width.max(right_width);
+    let resolved = resolve_all_endpoints(network, &offset_data, max_width);
 
     let mut result: Vec<OffsetEdge> = Vec::new();
 
@@ -112,18 +113,12 @@ fn compute_offset_lines(ss: &SubSegment, left_width: f64, right_width: f64) -> O
         ss.start.0 + left_width * ln.0,
         ss.start.1 + left_width * ln.1,
     );
-    let left_end = (
-        ss.end.0 + left_width * ln.0,
-        ss.end.1 + left_width * ln.1,
-    );
+    let left_end = (ss.end.0 + left_width * ln.0, ss.end.1 + left_width * ln.1);
     let right_start = (
         ss.start.0 - right_width * ln.0,
         ss.start.1 - right_width * ln.1,
     );
-    let right_end = (
-        ss.end.0 - right_width * ln.0,
-        ss.end.1 - right_width * ln.1,
-    );
+    let right_end = (ss.end.0 - right_width * ln.0, ss.end.1 - right_width * ln.1);
 
     OffsetLineData {
         dir: (nx, ny),
@@ -138,17 +133,23 @@ fn neg_dir(dir: (f64, f64)) -> (f64, f64) {
     (-dir.0, -dir.1)
 }
 
-/// Resolves all offset edge endpoints by computing junction corner intersections.
+/// Minimum absolute sine of the angle between two arm directions below
+/// which they are considered parallel and merged into one group.
+/// sin(10°) ≈ 0.174. Generous threshold to catch nearly-collinear segments
+/// from different polylines sharing an endpoint.
+const PARALLEL_SIN: f64 = 0.174;
+
+/// Resolves all offset edge endpoints by computing junction corner
+/// intersections.
 ///
-/// At each junction, arms are sorted by angle (CCW). For each adjacent pair,
-/// we compute the intersection of:
-/// - LEFT offset line of the current arm (viewed from junction outward)
-/// - RIGHT offset line of the next arm (viewed from junction outward)
-///
-/// This produces the correct corner points for the outer boundary.
+/// Nearly-parallel arms are merged into groups before computing corners.
+/// For each pair of adjacent groups in CCW order, we compute the
+/// intersection of the representative LEFT and RIGHT offset lines.
+/// All arms within a group receive the same resolved corner.
 fn resolve_all_endpoints(
     network: &Network,
     offset_data: &[OffsetLineData],
+    _max_width: f64,
 ) -> Vec<ResolvedEndpoints> {
     let sub_segs = &network.sub_segments;
     let mut resolved: Vec<ResolvedEndpoints> = offset_data
@@ -185,37 +186,51 @@ fn resolve_all_endpoints(
             continue;
         }
 
-        for k in 0..n {
-            let (_, seg_i, out_i) = arms[k];
-            let (_, seg_j, out_j) = arms[(k + 1) % n];
+        // Group nearly-parallel adjacent arms. Each group is represented
+        // by its first arm for LEFT and last arm for RIGHT offset lines.
+        let groups = merge_parallel_arms(&arms, offset_data);
+        let gn = groups.len();
 
-            // LEFT of arm_k intersects RIGHT of arm_{k+1}.
-            let od_i = &offset_data[seg_i];
-            let od_j = &offset_data[seg_j];
+        if gn < 2 {
+            continue;
+        }
 
-            let (left_base, left_dir) = offset_line_at_node(od_i, out_i, true);
-            let (right_base, right_dir) = offset_line_at_node(od_j, out_j, false);
+        for k in 0..gn {
+            let group_k = &groups[k];
+            let group_next = &groups[(k + 1) % gn];
+
+            // LEFT of the last arm in group_k
+            let (_, seg_left, out_left) = group_k.last;
+            let od_left = &offset_data[seg_left];
+            let (left_base, left_dir) = offset_line_at_node(od_left, out_left, true);
+
+            // RIGHT of the first arm in group_next
+            let (_, seg_right, out_right) = group_next.first;
+            let od_right = &offset_data[seg_right];
+            let (right_base, right_dir) = offset_line_at_node(od_right, out_right, false);
 
             let p1 = Point3::new(left_base.0, left_base.1, 0.0);
             let d1 = Vector3::new(left_dir.0, left_dir.1, 0.0);
             let p2 = Point3::new(right_base.0, right_base.1, 0.0);
             let d2 = Vector3::new(right_dir.0, right_dir.1, 0.0);
 
-            if let Some((t, _u)) = line_line_intersect_2d(&p1, &d1, &p2, &d2) {
-                let corner = (p1.x + d1.x * t, p1.y + d1.y * t);
+            let corner = if let Some((t, _u)) = line_line_intersect_2d(&p1, &d1, &p2, &d2) {
+                (p1.x + d1.x * t, p1.y + d1.y * t)
+            } else {
+                ((left_base.0 + right_base.0) * 0.5, (left_base.1 + right_base.1) * 0.5)
+            };
 
-                // Update LEFT endpoint of arm_i in its original segment's frame.
-                // For outgoing arm: left at start.
-                // For incoming arm: left of reversed = right of original, at end.
+            // Assign LEFT corner to ALL arms in group_k
+            for &(_, seg_i, out_i) in &group_k.members {
                 if out_i {
                     resolved[seg_i].left_start = corner;
                 } else {
                     resolved[seg_i].right_end = corner;
                 }
+            }
 
-                // Update RIGHT endpoint of arm_j in its original segment's frame.
-                // For outgoing arm: right at start.
-                // For incoming arm: right of reversed = left of original, at end.
+            // Assign RIGHT corner to ALL arms in group_next
+            for &(_, seg_j, out_j) in &group_next.members {
                 if out_j {
                     resolved[seg_j].right_start = corner;
                 } else {
@@ -226,6 +241,73 @@ fn resolve_all_endpoints(
     }
 
     resolved
+}
+
+struct ArmGroup {
+    first: (f64, usize, bool),
+    last: (f64, usize, bool),
+    members: Vec<(f64, usize, bool)>,
+}
+
+fn merge_parallel_arms(
+    arms: &[(f64, usize, bool)],
+    offset_data: &[OffsetLineData],
+) -> Vec<ArmGroup> {
+    let n = arms.len();
+    let mut groups: Vec<ArmGroup> = Vec::new();
+    let mut i = 0;
+
+    while i < n {
+        let mut members = vec![arms[i]];
+        let mut j = i + 1;
+
+        while j < n {
+            let dir_a = arm_direction(arms[j - 1], offset_data);
+            let dir_b = arm_direction(arms[j], offset_data);
+            let cross = dir_a.0 * dir_b.1 - dir_a.1 * dir_b.0;
+            let dot = dir_a.0 * dir_b.0 + dir_a.1 * dir_b.1;
+            if cross.abs() < PARALLEL_SIN && dot > 0.0 {
+                members.push(arms[j]);
+                j += 1;
+            } else {
+                break;
+            }
+        }
+
+        groups.push(ArmGroup {
+            first: members[0],
+            last: *members.last().unwrap_or(&members[0]),
+            members,
+        });
+        i = j;
+    }
+
+    // Check wrap-around: if the last group and first group are parallel,
+    // merge them.
+    if groups.len() >= 2 {
+        let last_dir = arm_direction(groups.last().unwrap().last, offset_data);
+        let first_dir = arm_direction(groups[0].first, offset_data);
+        let cross = last_dir.0 * first_dir.1 - last_dir.1 * first_dir.0;
+        let dot = last_dir.0 * first_dir.0 + last_dir.1 * first_dir.1;
+        if cross.abs() < PARALLEL_SIN && dot > 0.0 {
+            let mut last_group = groups.pop().unwrap();
+            last_group.members.extend_from_slice(&groups[0].members);
+            let new_first = groups[0].first;
+            groups[0] = ArmGroup {
+                first: last_group.first,
+                last: new_first,
+                members: last_group.members,
+            };
+        }
+    }
+
+    groups
+}
+
+fn arm_direction(arm: (f64, usize, bool), offset_data: &[OffsetLineData]) -> (f64, f64) {
+    let (_, seg_idx, outgoing) = arm;
+    let od = &offset_data[seg_idx];
+    if outgoing { od.dir } else { neg_dir(od.dir) }
 }
 
 /// Returns the base point and direction for an offset line at a junction node.
@@ -299,15 +381,32 @@ mod tests {
     fn closed_square_no_caps() {
         // 4-segment closed square: all corners are junctions, no dead ends.
         let segments = vec![
-            UniqueSegment { start: (0.0, 0.0), end: (10.0, 0.0) },
-            UniqueSegment { start: (10.0, 0.0), end: (10.0, 10.0) },
-            UniqueSegment { start: (10.0, 10.0), end: (0.0, 10.0) },
-            UniqueSegment { start: (0.0, 10.0), end: (0.0, 0.0) },
+            UniqueSegment {
+                start: (0.0, 0.0),
+                end: (10.0, 0.0),
+            },
+            UniqueSegment {
+                start: (10.0, 0.0),
+                end: (10.0, 10.0),
+            },
+            UniqueSegment {
+                start: (10.0, 10.0),
+                end: (0.0, 10.0),
+            },
+            UniqueSegment {
+                start: (0.0, 10.0),
+                end: (0.0, 0.0),
+            },
         ];
         let net = junction::build_network(&segments);
         let edges = build(&net, 0.3, 0.3);
         // 4 sub-segments × 2 side edges = 8. No cap edges (no dead ends).
-        assert_eq!(edges.len(), 8, "expected 8 edges (no caps), got {}", edges.len());
+        assert_eq!(
+            edges.len(),
+            8,
+            "expected 8 edges (no caps), got {}",
+            edges.len()
+        );
     }
 
     #[test]

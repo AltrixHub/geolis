@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{OperationError, Result};
 use crate::math::intersect_3d::{plane_plane_intersect, PlanePairRelation};
 use crate::math::polygon_3d::clip_segment_to_polygon;
 use crate::math::{Point3, TOLERANCE};
@@ -30,9 +30,21 @@ pub fn intersect_face_face(
     let fb = store.face(face_b)?;
 
     let FaceSurface::Plane(ref plane_a) = fa.surface else {
+        if matches!(fa.surface, FaceSurface::Nurbs(_)) {
+            return Err(OperationError::Failed(
+                "boolean operations on NURBS faces are not yet supported".into(),
+            )
+            .into());
+        }
         todo!("Face intersection for non-planar faces")
     };
     let FaceSurface::Plane(ref plane_b) = fb.surface else {
+        if matches!(fb.surface, FaceSurface::Nurbs(_)) {
+            return Err(OperationError::Failed(
+                "boolean operations on NURBS faces are not yet supported".into(),
+            )
+            .into());
+        }
         todo!("Face intersection for non-planar faces")
     };
 
@@ -61,11 +73,19 @@ pub fn intersect_face_face(
     let seg_start = line_origin + line_dir * (t_min - margin);
     let seg_end = line_origin + line_dir * (t_max + margin);
 
-    // Step 4: clip segment to face A polygon
-    let intervals_a = clip_segment_to_polygon(&seg_start, &seg_end, &poly_a, plane_a);
+    // Step 4: clip segment to face A outer polygon, then subtract hole intervals
+    let mut intervals_a = clip_segment_to_polygon(&seg_start, &seg_end, &poly_a, plane_a);
+    for inner in &collect_inner_wire_polygons(store, face_a)? {
+        let hole = clip_segment_to_polygon(&seg_start, &seg_end, inner, plane_a);
+        intervals_a = subtract_intervals(&intervals_a, &hole);
+    }
 
-    // Step 5: clip segment to face B polygon
-    let intervals_b = clip_segment_to_polygon(&seg_start, &seg_end, &poly_b, plane_b);
+    // Step 5: clip segment to face B outer polygon, then subtract hole intervals
+    let mut intervals_b = clip_segment_to_polygon(&seg_start, &seg_end, &poly_b, plane_b);
+    for inner in &collect_inner_wire_polygons(store, face_b)? {
+        let hole = clip_segment_to_polygon(&seg_start, &seg_end, inner, plane_b);
+        intervals_b = subtract_intervals(&intervals_b, &hole);
+    }
 
     // Step 6: find overlap of 1D intervals
     let mut results = Vec::new();
@@ -91,10 +111,7 @@ pub fn intersect_face_face(
 }
 
 /// Collects the outer polygon vertices of a face.
-pub(crate) fn collect_face_polygon(
-    store: &TopologyStore,
-    face_id: FaceId,
-) -> Result<Vec<Point3>> {
+pub(crate) fn collect_face_polygon(store: &TopologyStore, face_id: FaceId) -> Result<Vec<Point3>> {
     let face = store.face(face_id)?;
     let wire = store.wire(face.outer_wire)?;
     let mut polygon = Vec::with_capacity(wire.edges.len());
@@ -125,6 +142,33 @@ pub(crate) fn collect_inner_wire_polygons(
         result.push(polygon);
     }
     Ok(result)
+}
+
+/// Subtracts a list of 1D intervals from a base list of intervals.
+///
+/// For each interval `[sub_s, sub_e]` in `to_subtract`, removes the overlapping
+/// portion from every interval in `base`. Returns the remaining intervals.
+fn subtract_intervals(base: &[(f64, f64)], to_subtract: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut result = base.to_vec();
+    for &(sub_s, sub_e) in to_subtract {
+        let mut next = Vec::with_capacity(result.len() + 1);
+        for &(a, b) in &result {
+            if sub_e <= a || sub_s >= b {
+                // No overlap — keep unchanged
+                next.push((a, b));
+            } else {
+                // Clip away [sub_s, sub_e] from [a, b]
+                if a < sub_s {
+                    next.push((a, sub_s));
+                }
+                if b > sub_e {
+                    next.push((sub_e, b));
+                }
+            }
+        }
+        result = next;
+    }
+    result
 }
 
 /// Computes the min/max projection of a set of points onto a line.

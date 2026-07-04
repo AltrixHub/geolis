@@ -342,9 +342,13 @@ mod tests {
 
     #[test]
     fn line_through_cone_gives_2_hits() {
-        let cone =
-            Cone::new(Point3::origin(), Vector3::z(), std::f64::consts::FRAC_PI_4, Vector3::x())
-                .unwrap();
+        let cone = Cone::new(
+            Point3::origin(),
+            Vector3::z(),
+            std::f64::consts::FRAC_PI_4,
+            Vector3::x(),
+        )
+        .unwrap();
         let line = Line::new(Point3::new(-10.0, 0.0, 5.0), Vector3::x()).unwrap();
 
         let hits = LineSurfaceIntersect::new(line, 0.0, 20.0)

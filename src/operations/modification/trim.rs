@@ -110,6 +110,14 @@ impl Trim {
                     t_end: self.t_end,
                 }
             }
+            EdgeCurve::Nurbs(_) => {
+                // Trimming a NURBS edge to an arbitrary sub-interval requires two
+                // knot-insertion splits; not yet supported.
+                return Err(OperationError::Failed(
+                    "trimming NURBS edges is not yet supported".into(),
+                )
+                .into());
+            }
         };
 
         Ok(store.add_edge(new_edge_data))
@@ -123,6 +131,7 @@ fn evaluate_curve(curve: &EdgeCurve, t: f64) -> Result<Point3> {
         EdgeCurve::Arc(arc) => arc.evaluate(t),
         EdgeCurve::Circle(circle) => circle.evaluate(t),
         EdgeCurve::Ellipse(ellipse) => ellipse.evaluate(t),
+        EdgeCurve::Nurbs(nurbs) => nurbs.point_at(t),
     }
 }
 
@@ -146,9 +155,7 @@ mod tests {
         let edge_id = store.wire(wire).unwrap().edges[0].edge;
 
         // Trim to the middle third [3.333, 6.666]
-        let trimmed = Trim::new(edge_id, 3.0, 7.0)
-            .execute(&mut store)
-            .unwrap();
+        let trimmed = Trim::new(edge_id, 3.0, 7.0).execute(&mut store).unwrap();
 
         let edge = store.edge(trimmed).unwrap();
         let start = store.vertex(edge.start).unwrap().point;

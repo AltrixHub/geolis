@@ -7,7 +7,7 @@ use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_label, register_stroke};
+use super::{register_label, register_stroke, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -35,8 +35,17 @@ fn cross_shape() -> Vec<(f64, f64)> {
 
 fn double_cross() -> Vec<(f64, f64)> {
     vec![
-        (3.0, 0.0), (3.0, 10.0), (3.0, 7.0), (0.0, 7.0), (10.0, 7.0),
-        (7.0, 7.0), (7.0, 10.0), (7.0, 0.0), (7.0, 3.0), (10.0, 3.0), (0.0, 3.0),
+        (3.0, 0.0),
+        (3.0, 10.0),
+        (3.0, 7.0),
+        (0.0, 7.0),
+        (10.0, 7.0),
+        (7.0, 7.0),
+        (7.0, 10.0),
+        (7.0, 0.0),
+        (7.0, 3.0),
+        (10.0, 3.0),
+        (0.0, 3.0),
     ]
 }
 
@@ -55,18 +64,27 @@ fn y_fork() -> Vec<(f64, f64)> {
 
 fn h_shape() -> Vec<(f64, f64)> {
     vec![
-        (3.0, 0.0), (3.0, 10.0),
-        (3.0, 5.0), (7.0, 5.0),
-        (7.0, 0.0), (7.0, 10.0),
+        (3.0, 0.0),
+        (3.0, 10.0),
+        (3.0, 5.0),
+        (7.0, 5.0),
+        (7.0, 0.0),
+        (7.0, 10.0),
     ]
 }
 
 fn e_shape() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 3.0), (12.0, 3.0),
-        (2.0, 3.0), (2.0, 8.0),
-        (2.0, 3.0), (6.0, 3.0), (6.0, 8.0),
-        (6.0, 3.0), (10.0, 3.0), (10.0, 8.0),
+        (0.0, 3.0),
+        (12.0, 3.0),
+        (2.0, 3.0),
+        (2.0, 8.0),
+        (2.0, 3.0),
+        (6.0, 3.0),
+        (6.0, 8.0),
+        (6.0, 3.0),
+        (10.0, 3.0),
+        (10.0, 8.0),
     ]
 }
 
@@ -74,9 +92,12 @@ fn angled_cross() -> Vec<(f64, f64)> {
     let sin60 = std::f64::consts::FRAC_PI_3.sin();
     let (cx, cy, arm) = (5.0, 5.0, 5.0);
     vec![
-        (0.0, 5.0), (10.0, 5.0),
-        (cx, cy), (cx - arm * 0.5, cy - arm * sin60),
-        (cx, cy), (cx + arm * 0.5, cy + arm * sin60),
+        (0.0, 5.0),
+        (10.0, 5.0),
+        (cx, cy),
+        (cx - arm * 0.5, cy - arm * sin60),
+        (cx, cy),
+        (cx + arm * 0.5, cy + arm * sin60),
     ]
 }
 
@@ -90,44 +111,72 @@ fn rectangle_room() -> Vec<(f64, f64)> {
 
 fn l_room() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (5.0, 0.0), (5.0, 3.0),
-        (3.0, 3.0), (3.0, 5.0), (0.0, 5.0),
+        (0.0, 0.0),
+        (5.0, 0.0),
+        (5.0, 3.0),
+        (3.0, 3.0),
+        (3.0, 5.0),
+        (0.0, 5.0),
     ]
 }
 
 /// Closed square room with corridor extending from bottom at x=5.
 fn room_with_corridor() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (5.0, 0.0), (5.0, -5.0), (5.0, 0.0),
-        (10.0, 0.0), (10.0, 10.0), (0.0, 10.0),
+        (0.0, 0.0),
+        (5.0, 0.0),
+        (5.0, -5.0),
+        (5.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 10.0),
+        (0.0, 10.0),
     ]
 }
 
 /// Closed square room divided by horizontal partition at y=5.
 fn room_with_partition() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0),
-        (10.0, 5.0), (10.0, 10.0), (0.0, 10.0),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 5.0),
+        (0.0, 5.0),
+        (10.0, 5.0),
+        (10.0, 10.0),
+        (0.0, 10.0),
     ]
 }
 
 /// Closed room with a diagonal wall from (-5,0) to (15,10) as a single line.
 fn room_with_diagonal_wall() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (10.0, 0.0), (10.0, 7.5),
-        (15.0, 10.0), (-5.0, 0.0),
-        (0.0, 2.5), (0.0, 10.0), (10.0, 10.0),
-        (10.0, 7.5), (0.0, 2.5),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 7.5),
+        (15.0, 10.0),
+        (-5.0, 0.0),
+        (0.0, 2.5),
+        (0.0, 10.0),
+        (10.0, 10.0),
+        (10.0, 7.5),
+        (0.0, 2.5),
     ]
 }
 
 /// Closed room with a wall penetrating through both sides at y=5.
 fn room_with_penetrating_wall() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (13.0, 5.0),
-        (10.0, 5.0), (0.0, 5.0), (10.0, 5.0),
-        (10.0, 10.0), (0.0, 10.0), (0.0, 5.0),
-        (-3.0, 5.0), (0.0, 5.0),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 5.0),
+        (13.0, 5.0),
+        (10.0, 5.0),
+        (0.0, 5.0),
+        (10.0, 5.0),
+        (10.0, 10.0),
+        (0.0, 10.0),
+        (0.0, 5.0),
+        (-3.0, 5.0),
+        (0.0, 5.0),
     ]
 }
 
@@ -165,31 +214,52 @@ fn y_mixed_junction() -> Vec<(f64, f64)> {
 
 fn room_with_corner_stub() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (-3.0, -3.0), (0.0, 0.0),
-        (8.0, 0.0), (8.0, 8.0), (0.0, 8.0),
+        (0.0, 0.0),
+        (-3.0, -3.0),
+        (0.0, 0.0),
+        (8.0, 0.0),
+        (8.0, 8.0),
+        (0.0, 8.0),
     ]
 }
 
 fn room_with_corner_diagonal() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (8.0, 8.0),
-        (11.0, 11.0), (-3.0, -3.0),
-        (0.0, 0.0), (0.0, 8.0), (8.0, 8.0),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 8.0),
+        (8.0, 8.0),
+        (11.0, 11.0),
+        (-3.0, -3.0),
+        (0.0, 0.0),
+        (0.0, 8.0),
+        (8.0, 8.0),
     ]
 }
 
 fn room_with_near_corner_stub() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.5), (-3.0, -2.5), (0.0, 0.5),
-        (0.0, 8.0), (8.0, 8.0), (8.0, 0.0), (0.0, 0.0),
+        (0.0, 0.5),
+        (-3.0, -2.5),
+        (0.0, 0.5),
+        (0.0, 8.0),
+        (8.0, 8.0),
+        (8.0, 0.0),
+        (0.0, 0.0),
     ]
 }
 
 fn room_with_near_corner_diagonal() -> Vec<(f64, f64)> {
     vec![
-        (0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (7.5, 8.0),
-        (10.5, 11.0), (-3.0, -2.5),
-        (0.0, 0.5), (0.0, 8.0), (7.5, 8.0),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 8.0),
+        (7.5, 8.0),
+        (10.5, 11.0),
+        (-3.0, -2.5),
+        (0.0, 0.5),
+        (0.0, 8.0),
+        (7.5, 8.0),
         (0.0, 0.5),
     ]
 }
@@ -198,6 +268,7 @@ fn room_with_near_corner_diagonal() -> Vec<(f64, f64)> {
 
 fn draw_case(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     pts: &[(f64, f64)],
     half_w: f64,
     closed: bool,
@@ -210,7 +281,7 @@ fn draw_case(
         .map(|&(x, y)| Point3::new(x + bx, y + by, 0.0))
         .collect();
     if let Ok(s) = StrokeStyle::new(0.05) {
-        register_stroke(storage, &center, s, closed, GRAY);
+        register_stroke(storage, bounds, &center, s, closed, GRAY);
     }
 
     // Algorithm output.
@@ -219,16 +290,19 @@ fn draw_case(
         closed,
     };
     let wall = WallOutline2D::new(vec![pline], half_w);
-    if let Ok(outlines) = wall.execute() {
-        for (i, ol) in outlines.iter().enumerate() {
-            let p: Vec<Point3> = ol
+    if let Ok(footprints) = wall.execute_faces() {
+        // Render every footprint ring: outer in green, holes in blue.
+        let rings = footprints.iter().flat_map(|fp| {
+            std::iter::once((fp.outer(), GREEN)).chain(fp.holes().iter().map(|h| (h, BLUE)))
+        });
+        for (ring, color) in rings {
+            let p: Vec<Point3> = ring
                 .vertices
                 .iter()
                 .map(|v| Point3::new(v.x + bx, v.y + by, 0.0))
                 .collect();
-            let color = if i == 0 { GREEN } else { BLUE };
             if let Ok(s) = StrokeStyle::new(0.08) {
-                register_stroke(storage, &p, s, ol.closed, color);
+                register_stroke(storage, bounds, &p, s, ring.closed, color);
             }
         }
     }
@@ -238,7 +312,7 @@ fn draw_case(
 
 /// Register `wall_offset` pattern meshes.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     // (centerline, half_width, closed, base_x, base_y, label_x, label_y)
     let cases: Vec<(Vec<(f64, f64)>, f64, bool, f64, f64, f64, f64)> = vec![
         (single_line(), 0.3, false, 0.0, 0.0, -1.5, 1.5),
@@ -256,8 +330,24 @@ pub fn register(storage: &MeshStorage) {
         (l_room(), 0.3, true, 32.0, -48.0, 30.5, -41.5),
         (room_with_corridor(), 0.3, true, 0.0, -64.0, -1.5, -52.5),
         (room_with_partition(), 0.3, true, 16.0, -64.0, 14.5, -52.5),
-        (room_with_penetrating_wall(), 0.3, true, 32.0, -64.0, 30.5, -52.5),
-        (room_with_diagonal_wall(), 0.3, true, 48.0, -64.0, 46.5, -52.5),
+        (
+            room_with_penetrating_wall(),
+            0.3,
+            true,
+            32.0,
+            -64.0,
+            30.5,
+            -52.5,
+        ),
+        (
+            room_with_diagonal_wall(),
+            0.3,
+            true,
+            48.0,
+            -64.0,
+            46.5,
+            -52.5,
+        ),
         (t_very_short_arm(), 1.0, false, 0.0, -80.0, -1.5, -74.5),
         (t_arm_2d(), 1.0, false, 16.0, -80.0, 14.5, -73.5),
         (cross_short(), 2.0, false, 32.0, -80.0, 30.5, -72.5),
@@ -267,9 +357,33 @@ pub fn register(storage: &MeshStorage) {
         (t_diagonal_branch(), 0.3, false, 16.0, -96.0, 14.5, -90.0),
         (y_mixed_junction(), 0.3, false, 32.0, -96.0, 30.5, -90.0),
         (room_with_corner_stub(), 0.3, true, 48.0, -96.0, 46.5, -85.0),
-        (room_with_corner_diagonal(), 0.3, true, 68.0, -96.0, 66.5, -82.0),
-        (room_with_near_corner_stub(), 0.3, true, 0.0, -112.0, -1.5, -100.5),
-        (room_with_near_corner_diagonal(), 0.3, true, 20.0, -112.0, 18.5, -98.0),
+        (
+            room_with_corner_diagonal(),
+            0.3,
+            true,
+            68.0,
+            -96.0,
+            66.5,
+            -82.0,
+        ),
+        (
+            room_with_near_corner_stub(),
+            0.3,
+            true,
+            0.0,
+            -112.0,
+            -1.5,
+            -100.5,
+        ),
+        (
+            room_with_near_corner_diagonal(),
+            0.3,
+            true,
+            20.0,
+            -112.0,
+            18.5,
+            -98.0,
+        ),
     ];
 
     for (i, (pts, hw, closed, bx, by, lx, ly)) in cases.iter().enumerate() {
@@ -281,6 +395,6 @@ pub fn register(storage: &MeshStorage) {
             LABEL_SIZE,
             LABEL_COLOR,
         );
-        draw_case(storage, pts, *hw, *closed, *bx, *by);
+        draw_case(storage, bounds, pts, *hw, *closed, *bx, *by);
     }
 }

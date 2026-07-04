@@ -34,12 +34,7 @@ impl Cylinder {
     ///
     /// Returns an error if the radius is non-positive, axis is zero-length,
     /// or the reference direction is not perpendicular to the axis.
-    pub fn new(
-        center: Point3,
-        radius: f64,
-        axis: Vector3,
-        ref_dir: Vector3,
-    ) -> Result<Self> {
+    pub fn new(center: Point3, radius: f64, axis: Vector3, ref_dir: Vector3) -> Result<Self> {
         if radius < TOLERANCE {
             return Err(
                 GeometryError::Degenerate("cylinder radius must be positive".into()).into(),
@@ -146,13 +141,7 @@ mod tests {
     use std::f64::consts::{FRAC_PI_2, TAU};
 
     fn z_cylinder(radius: f64) -> Cylinder {
-        Cylinder::new(
-            Point3::origin(),
-            radius,
-            Vector3::z(),
-            Vector3::x(),
-        )
-        .unwrap()
+        Cylinder::new(Point3::origin(), radius, Vector3::z(), Vector3::x()).unwrap()
     }
 
     #[test]

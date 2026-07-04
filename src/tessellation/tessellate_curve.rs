@@ -36,12 +36,30 @@ impl TessellateCurve {
                 })
             }
             EdgeCurve::Arc(arc) => tessellate_arc(arc, edge.t_start, edge.t_end, &self.params),
-            EdgeCurve::Circle(circle) => {
-                tessellate_circular(circle.radius(), circle, edge.t_start, edge.t_end, &self.params)
-            }
+            EdgeCurve::Circle(circle) => tessellate_circular(
+                circle.radius(),
+                circle,
+                edge.t_start,
+                edge.t_end,
+                &self.params,
+            ),
             EdgeCurve::Ellipse(ellipse) => {
                 // Approximate with the semi-major axis for chord error calculation
-                tessellate_circular(ellipse.semi_major(), ellipse, edge.t_start, edge.t_end, &self.params)
+                tessellate_circular(
+                    ellipse.semi_major(),
+                    ellipse,
+                    edge.t_start,
+                    edge.t_end,
+                    &self.params,
+                )
+            }
+            EdgeCurve::Nurbs(nurbs) => {
+                let options = super::CurveTessellationOptions {
+                    chord_tolerance: self.params.tolerance,
+                    ..super::CurveTessellationOptions::default()
+                };
+                let points = super::tessellate_nurbs_curve(nurbs, &options)?;
+                Ok(Polyline { points })
             }
         }
     }
@@ -155,7 +173,7 @@ mod tests {
             .unwrap();
 
         assert!(polyline.points.len() >= 5); // At least min_segments + 1
-        // First point should be (1, 0, 0)
+                                             // First point should be (1, 0, 0)
         assert!((polyline.points[0].x - 1.0).abs() < 1e-10);
         // Last point should be (-1, 0, 0)
         assert!((polyline.points.last().unwrap().x + 1.0).abs() < 1e-10);

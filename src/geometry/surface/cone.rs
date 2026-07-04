@@ -34,17 +34,11 @@ impl Cone {
     ///
     /// Returns an error if the half-angle is out of range, axis is zero-length,
     /// or the reference direction is not perpendicular to the axis.
-    pub fn new(
-        apex: Point3,
-        axis: Vector3,
-        half_angle: f64,
-        ref_dir: Vector3,
-    ) -> Result<Self> {
+    pub fn new(apex: Point3, axis: Vector3, half_angle: f64, ref_dir: Vector3) -> Result<Self> {
         if half_angle <= TOLERANCE || half_angle >= std::f64::consts::FRAC_PI_2 - TOLERANCE {
-            return Err(GeometryError::Degenerate(
-                "cone half-angle must be in (0, pi/2)".into(),
-            )
-            .into());
+            return Err(
+                GeometryError::Degenerate("cone half-angle must be in (0, pi/2)".into()).into(),
+            );
         }
 
         let axis_len = axis.norm();
@@ -133,10 +127,9 @@ impl Surface for Cone {
 
     fn normal(&self, u: f64, v: f64) -> Result<Vector3> {
         if v.abs() < TOLERANCE {
-            return Err(GeometryError::Degenerate(
-                "cone normal is degenerate at apex".into(),
-            )
-            .into());
+            return Err(
+                GeometryError::Degenerate("cone normal is degenerate at apex".into()).into(),
+            );
         }
         let binormal = self.binormal();
         let ca = self.half_angle.cos();
@@ -166,16 +159,10 @@ impl Surface for Cone {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::f64::consts::{FRAC_PI_4, FRAC_PI_2, TAU};
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
 
     fn z_cone_45() -> Cone {
-        Cone::new(
-            Point3::origin(),
-            Vector3::z(),
-            FRAC_PI_4,
-            Vector3::x(),
-        )
-        .unwrap()
+        Cone::new(Point3::origin(), Vector3::z(), FRAC_PI_4, Vector3::x()).unwrap()
     }
 
     #[test]

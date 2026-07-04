@@ -1,4 +1,5 @@
 use geolis::math::Point3;
+use geolis::operations::boolean::Intersect;
 use geolis::operations::creation::MakeBox;
 use geolis::operations::modification::Shell;
 use geolis::tessellation::{TessellateSolid, TessellationParams};
@@ -6,7 +7,7 @@ use geolis::topology::{FaceSurface, TopologyStore};
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
 
-use super::{register_edges, register_face, register_label};
+use super::{register_edges, register_face, register_label, SceneBounds};
 
 const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
@@ -16,16 +17,17 @@ const RED: Color = Color::rgb(230, 100, 100);
 
 fn render_solid(
     storage: &MeshStorage,
+    bounds: &mut SceneBounds,
     topo: &TopologyStore,
     solid: geolis::topology::SolidId,
     mesh_color: Color,
     edge_color: Color,
 ) {
     if let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(topo) {
-        register_face(storage, mesh, mesh_color);
+        register_face(storage, bounds, mesh, mesh_color);
     }
     if let Ok(solid_data) = topo.solid(solid) {
-        register_edges(storage, topo, solid_data.outer_shell, edge_color);
+        register_edges(storage, bounds, topo, solid_data.outer_shell, edge_color);
     }
 }
 
@@ -59,7 +61,7 @@ fn get_face_by_normal(
     Some(best)
 }
 
-pub fn register(storage: &MeshStorage) {
+pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
     let spacing = 14.0;
     let edge_color = Color::rgb(60, 60, 60);
 
@@ -70,51 +72,75 @@ pub fn register(storage: &MeshStorage) {
         register_label(storage, bx - 2.0, by + 8.0, "1", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
-        if let Ok(solid) =
-            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 4.0, by + 4.0, 4.0))
-                .execute(&mut topo)
+        if let Ok(solid) = MakeBox::new(
+            Point3::new(bx, by, 0.0),
+            Point3::new(bx + 4.0, by + 4.0, 4.0),
+        )
+        .execute(&mut topo)
         {
             if let Some(top) = get_face_by_normal(&topo, solid, |n| n.z) {
                 if let Ok(result) = Shell::new(solid, 0.5, vec![top]).execute(&mut topo) {
-                    render_solid(storage, &topo, result, GREEN, edge_color);
+                    render_solid(storage, bounds, &topo, result, GREEN, edge_color);
                 }
             }
         }
     }
 
-    // Case 2: Shell with side (+x) removed (thickness=0.5)
+    // Case 2: Shell with side (+x) removed (thickness=0.5) — front-half cross-section
     {
         let bx = spacing;
         let by = 0.0;
         register_label(storage, bx - 2.0, by + 8.0, "2", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
-        if let Ok(solid) =
-            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 4.0, by + 4.0, 4.0))
-                .execute(&mut topo)
+        if let Ok(solid) = MakeBox::new(
+            Point3::new(bx, by, 0.0),
+            Point3::new(bx + 4.0, by + 4.0, 4.0),
+        )
+        .execute(&mut topo)
         {
             if let Some(side) = get_face_by_normal(&topo, solid, |n| n.x) {
-                if let Ok(result) = Shell::new(solid, 0.5, vec![side]).execute(&mut topo) {
-                    render_solid(storage, &topo, result, BLUE, edge_color);
+                if let Ok(shell) = Shell::new(solid, 0.5, vec![side]).execute(&mut topo) {
+                    if let Ok(cutter) = MakeBox::new(
+                        Point3::new(bx, by - 0.5, -0.5),
+                        Point3::new(bx + 4.0, by + 2.5, 4.5),
+                    )
+                    .execute(&mut topo)
+                    {
+                        if let Ok(result) = Intersect::new(shell, cutter).execute(&mut topo) {
+                            render_solid(storage, bounds, &topo, result, BLUE, edge_color);
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Case 3: Shell with thick walls (thickness=1.5, 6x6x6 box, top removed)
+    // Case 3: Shell with thick walls (thickness=1.5, 6x6x6 box, top removed) — front-half cross-section
     {
         let bx = spacing * 2.0;
         let by = 0.0;
         register_label(storage, bx - 2.0, by + 8.0, "3", LABEL_SIZE, LABEL_COLOR);
 
         let mut topo = TopologyStore::new();
-        if let Ok(solid) =
-            MakeBox::new(Point3::new(bx, by, 0.0), Point3::new(bx + 6.0, by + 6.0, 6.0))
-                .execute(&mut topo)
+        if let Ok(solid) = MakeBox::new(
+            Point3::new(bx, by, 0.0),
+            Point3::new(bx + 6.0, by + 6.0, 6.0),
+        )
+        .execute(&mut topo)
         {
             if let Some(top) = get_face_by_normal(&topo, solid, |n| n.z) {
-                if let Ok(result) = Shell::new(solid, 1.5, vec![top]).execute(&mut topo) {
-                    render_solid(storage, &topo, result, RED, edge_color);
+                if let Ok(shell) = Shell::new(solid, 1.5, vec![top]).execute(&mut topo) {
+                    if let Ok(cutter) = MakeBox::new(
+                        Point3::new(bx, by - 0.5, -0.5),
+                        Point3::new(bx + 6.0, by + 3.5, 6.5),
+                    )
+                    .execute(&mut topo)
+                    {
+                        if let Ok(result) = Intersect::new(shell, cutter).execute(&mut topo) {
+                            render_solid(storage, bounds, &topo, result, RED, edge_color);
+                        }
+                    }
                 }
             }
         }

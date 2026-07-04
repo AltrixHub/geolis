@@ -89,10 +89,7 @@ pub fn build_network(segments: &[UniqueSegment]) -> Network {
         let mut current_start_node = prev_node;
 
         for &t in &splits {
-            let mid = (
-                seg.start.0 + dx * t,
-                seg.start.1 + dy * t,
-            );
+            let mid = (seg.start.0 + dx * t, seg.start.1 + dy * t);
             let mid_node = ensure_node(&mut all_nodes, mid);
             sub_segments.push(SubSegment {
                 start: current_start,
@@ -196,23 +193,54 @@ mod tests {
     fn double_cross_network() {
         // 4 unique segments for the 井 shape.
         let segments = vec![
-            UniqueSegment { start: (3.0, 0.0), end: (3.0, 10.0) },
-            UniqueSegment { start: (0.0, 7.0), end: (10.0, 7.0) },
-            UniqueSegment { start: (7.0, 0.0), end: (7.0, 10.0) },
-            UniqueSegment { start: (0.0, 3.0), end: (10.0, 3.0) },
+            UniqueSegment {
+                start: (3.0, 0.0),
+                end: (3.0, 10.0),
+            },
+            UniqueSegment {
+                start: (0.0, 7.0),
+                end: (10.0, 7.0),
+            },
+            UniqueSegment {
+                start: (7.0, 0.0),
+                end: (7.0, 10.0),
+            },
+            UniqueSegment {
+                start: (0.0, 3.0),
+                end: (10.0, 3.0),
+            },
         ];
         let net = build_network(&segments);
 
         // 4 junctions: (3,3), (3,7), (7,3), (7,7)
-        let junction_count = net.nodes.iter().filter(|n| n.kind == NodeKind::Junction).count();
-        assert_eq!(junction_count, 4, "expected 4 junctions, got {junction_count}");
+        let junction_count = net
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Junction)
+            .count();
+        assert_eq!(
+            junction_count, 4,
+            "expected 4 junctions, got {junction_count}"
+        );
 
         // 8 dead ends: endpoints of the 4 segments.
-        let dead_end_count = net.nodes.iter().filter(|n| n.kind == NodeKind::DeadEnd).count();
-        assert_eq!(dead_end_count, 8, "expected 8 dead ends, got {dead_end_count}");
+        let dead_end_count = net
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::DeadEnd)
+            .count();
+        assert_eq!(
+            dead_end_count, 8,
+            "expected 8 dead ends, got {dead_end_count}"
+        );
 
         // 12 sub-segments: 4 segments × 3 sub-segments each.
-        assert_eq!(net.sub_segments.len(), 12, "expected 12 sub-segments, got {}", net.sub_segments.len());
+        assert_eq!(
+            net.sub_segments.len(),
+            12,
+            "expected 12 sub-segments, got {}",
+            net.sub_segments.len()
+        );
     }
 
     #[test]
@@ -220,25 +248,55 @@ mod tests {
         // 4-segment closed square: corners are junctions (shared endpoints),
         // no dead ends.
         let segments = vec![
-            UniqueSegment { start: (0.0, 0.0), end: (10.0, 0.0) },
-            UniqueSegment { start: (10.0, 0.0), end: (10.0, 10.0) },
-            UniqueSegment { start: (10.0, 10.0), end: (0.0, 10.0) },
-            UniqueSegment { start: (0.0, 10.0), end: (0.0, 0.0) },
+            UniqueSegment {
+                start: (0.0, 0.0),
+                end: (10.0, 0.0),
+            },
+            UniqueSegment {
+                start: (10.0, 0.0),
+                end: (10.0, 10.0),
+            },
+            UniqueSegment {
+                start: (10.0, 10.0),
+                end: (0.0, 10.0),
+            },
+            UniqueSegment {
+                start: (0.0, 10.0),
+                end: (0.0, 0.0),
+            },
         ];
         let net = build_network(&segments);
 
-        assert_eq!(net.nodes.len(), 4, "expected 4 nodes, got {}", net.nodes.len());
-        assert_eq!(net.sub_segments.len(), 4, "expected 4 sub-segments, got {}", net.sub_segments.len());
+        assert_eq!(
+            net.nodes.len(),
+            4,
+            "expected 4 nodes, got {}",
+            net.nodes.len()
+        );
+        assert_eq!(
+            net.sub_segments.len(),
+            4,
+            "expected 4 sub-segments, got {}",
+            net.sub_segments.len()
+        );
 
-        let dead_end_count = net.nodes.iter().filter(|n| n.kind == NodeKind::DeadEnd).count();
-        assert_eq!(dead_end_count, 0, "closed square should have no dead ends, got {dead_end_count}");
+        let dead_end_count = net
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::DeadEnd)
+            .count();
+        assert_eq!(
+            dead_end_count, 0,
+            "closed square should have no dead ends, got {dead_end_count}"
+        );
     }
 
     #[test]
     fn single_line_no_junctions() {
-        let segments = vec![
-            UniqueSegment { start: (0.0, 0.0), end: (5.0, 0.0) },
-        ];
+        let segments = vec![UniqueSegment {
+            start: (0.0, 0.0),
+            end: (5.0, 0.0),
+        }];
         let net = build_network(&segments);
         assert_eq!(net.nodes.len(), 2);
         assert_eq!(net.sub_segments.len(), 1);
@@ -248,8 +306,14 @@ mod tests {
     #[test]
     fn l_shape_one_junction() {
         let segments = vec![
-            UniqueSegment { start: (0.0, 0.0), end: (5.0, 0.0) },
-            UniqueSegment { start: (5.0, 0.0), end: (5.0, 5.0) },
+            UniqueSegment {
+                start: (0.0, 0.0),
+                end: (5.0, 0.0),
+            },
+            UniqueSegment {
+                start: (5.0, 0.0),
+                end: (5.0, 5.0),
+            },
         ];
         let net = build_network(&segments);
 
@@ -257,6 +321,11 @@ mod tests {
         // segment_segment_intersect_2d includes endpoints.
         // The junction at (5,0) is at t=1.0 for seg0 and t=0.0 for seg1,
         // so it won't be split (it's already an endpoint).
-        assert_eq!(net.sub_segments.len(), 2, "expected 2 sub-segments, got {}", net.sub_segments.len());
+        assert_eq!(
+            net.sub_segments.len(),
+            2,
+            "expected 2 sub-segments, got {}",
+            net.sub_segments.len()
+        );
     }
 }

@@ -11,7 +11,8 @@ use crate::geometry::surface::Surface;
 use crate::math::{Point2, Vector3};
 use crate::topology::{EdgeCurve, FaceId, FaceSurface, TopologyStore, WireId};
 
-use super::{TessellationMode, TessellationParams, TriangleMesh};
+use super::edge_samples::EdgeSampleCache;
+use super::{SurfaceTessellationOptions, TessellationMode, TessellationParams, TriangleMesh};
 
 /// Tessellates a face into a triangle mesh.
 pub struct TessellateFace {
@@ -31,8 +32,23 @@ impl TessellateFace {
     /// # Errors
     ///
     /// Returns an error if the face cannot be tessellated.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn execute(&self, store: &TopologyStore) -> Result<TriangleMesh> {
+        let mut cache = EdgeSampleCache::new(self.params);
+        self.execute_with_cache(store, &mut cache)
+    }
+
+    /// Executes the tessellation against a shared per-solid edge-sample cache,
+    /// so faces sharing boundary edges emit identical boundary vertices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the face cannot be tessellated.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn execute_with_cache(
+        &self,
+        store: &TopologyStore,
+        cache: &mut EdgeSampleCache,
+    ) -> Result<TriangleMesh> {
         let face = store.face(self.face)?;
         let same_sense = face.same_sense;
         let outer_wire_id = face.outer_wire;
@@ -48,12 +64,44 @@ impl TessellateFace {
                     tessellate_annular_disc(&plane, &center, r_min, r_max, same_sense, &self.params)
                 } else {
                     let inner_wire_ids = face.inner_wires.clone();
-                    tessellate_plane(store, &plane, same_sense, outer_wire_id, &inner_wire_ids)
+                    tessellate_plane(
+                        store,
+                        cache,
+                        &plane,
+                        same_sense,
+                        outer_wire_id,
+                        &inner_wire_ids,
+                    )
                 }
             }
+            FaceSurface::Cylinder(_)
+            | FaceSurface::Sphere(_)
+            | FaceSurface::Cone(_)
+            | FaceSurface::Torus(_) => {
+                self.tessellate_analytic(store, outer_wire_id, same_sense, full_rev)
+            }
+            FaceSurface::Nurbs(n) => {
+                let n = n.clone();
+                tessellate_nurbs_face(store, cache, face, &n, same_sense)
+            }
+        }
+    }
+
+    /// Tessellates the analytic revolved-surface arms (cylinder / sphere /
+    /// cone / torus) on their UV grids, with bounds probed from the outer
+    /// wire's inverse-mapped points.
+    fn tessellate_analytic(
+        &self,
+        store: &TopologyStore,
+        outer_wire_id: WireId,
+        same_sense: bool,
+        full_rev: bool,
+    ) -> Result<TriangleMesh> {
+        let face = store.face(self.face)?;
+        let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
+
+        match &face.surface {
             FaceSurface::Cylinder(cyl) => {
-                let cyl = cyl.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| cyl.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -62,11 +110,13 @@ impl TessellateFace {
                 };
                 let n_u = adaptive_angular_segments(cyl.radius(), u_max - u_min, &self.params);
                 let n_v = adaptive_linear_segments(v_max - v_min, &self.params);
-                tessellate_surface(&cyl, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    cyl, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
             FaceSurface::Sphere(sph) => {
-                let sph = sph.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| sph.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -75,11 +125,13 @@ impl TessellateFace {
                 };
                 let n_u = adaptive_angular_segments(sph.radius(), u_max - u_min, &self.params);
                 let n_v = adaptive_angular_segments(sph.radius(), v_max - v_min, &self.params);
-                tessellate_surface(&sph, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    sph, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
             FaceSurface::Cone(cone) => {
-                let cone = cone.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| cone.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -89,11 +141,13 @@ impl TessellateFace {
                 let max_radius = v_max * cone.half_angle().sin();
                 let n_u = adaptive_angular_segments(max_radius, u_max - u_min, &self.params);
                 let n_v = adaptive_linear_segments(v_max - v_min, &self.params);
-                tessellate_surface(&cone, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    cone, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
             FaceSurface::Torus(torus) => {
-                let torus = torus.clone();
-                let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &self.params)?;
                 let (_, _, v_min, v_max) = compute_uv_bounds(&outer_3d, |p| torus.inverse(p));
                 let (u_min, u_max) = if full_rev {
                     (0.0, TAU)
@@ -105,27 +159,91 @@ impl TessellateFace {
                     u_max - u_min,
                     &self.params,
                 );
-                let n_v = adaptive_angular_segments(torus.minor_radius(), v_max - v_min, &self.params);
-                tessellate_surface(&torus, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params)
+                let n_v =
+                    adaptive_angular_segments(torus.minor_radius(), v_max - v_min, &self.params);
+                #[rustfmt::skip]
+                let mesh = tessellate_surface(
+                    torus, u_min, u_max, v_min, v_max, n_u, n_v, same_sense, &self.params,
+                );
+                mesh
             }
+            FaceSurface::Plane(_) | FaceSurface::Nurbs(_) => Err(TessellationError::Failed(
+                "tessellate_analytic called for a non-analytic face".into(),
+            )
+            .into()),
         }
     }
 }
 
+/// Tessellates a NURBS face: faces carrying pcurves take the edge-driven
+/// boundary path (shared-edge conformance); trimmed faces go through the
+/// constrained-Delaunay path; untrimmed legacy faces through the geometric
+/// conforming / tensor-grid paths.
+///
+/// The underlying NURBS tessellators always emit raw surface normals and a fixed
+/// triangle winding (`same_sense = true`). When the face is oriented against the
+/// surface (`same_sense == false`), this flips both — exactly mirroring the
+/// analytic arms (`tessellate_uv_grid`, `tessellate_annular_disc`), which negate
+/// the normal and reverse the winding — so a NURBS back face faces outward like
+/// its analytic counterparts.
+fn tessellate_nurbs_face(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    face: &crate::topology::FaceData,
+    nurbs: &crate::geometry::nurbs::NurbsSurface,
+    same_sense: bool,
+) -> Result<TriangleMesh> {
+    let options = SurfaceTessellationOptions::default();
+
+    // Edge-driven boundary: every outer wire edge has a pcurve, so the outer
+    // UV loop is assembled from the shared per-edge samples (structural
+    // conformance with every adjacent face). Falls back to the geometric
+    // paths when the face predates shared-edge topology.
+    let edge_driven = super::edge_driven_outer_uv(store, cache, face, nurbs, &options)?;
+
+    let mut mesh = match (&face.trim, edge_driven) {
+        (trim, Some(outer)) => {
+            super::tessellate_with_outer_uv(nurbs, &outer, trim.as_ref(), &options)?
+        }
+        // Untrimmed faces with a non-degenerate rectangular boundary go through
+        // the boundary-conforming CDT path so adjacent faces sharing a boundary
+        // curve meet without a silhouette sliver. Closed/seam surfaces (whose
+        // opposite boundary edges coincide) keep the tensor-grid tessellator.
+        (None, None) if super::nurbs_surface_is_open(nurbs) => {
+            super::tessellate_untrimmed_conforming(nurbs, &options)?
+        }
+        (None, None) => super::tessellate_nurbs_surface(nurbs, &options)?,
+        (Some(trim), None) => super::tessellate_trimmed_nurbs_face(nurbs, trim, &options)?,
+    };
+    if !same_sense {
+        for n in &mut mesh.normals {
+            *n = -*n;
+        }
+        for tri in &mut mesh.indices {
+            tri.swap(1, 2);
+        }
+    }
+    Ok(mesh)
+}
+
 /// Tessellates a planar face using CDT.
+///
+/// Boundary polylines come from the shared per-edge sample cache, so a planar
+/// cap referencing the same ring edge as an adjacent NURBS side wall emits the
+/// identical boundary vertices (shared-edge conformance).
 #[allow(clippy::cast_possible_truncation)]
 fn tessellate_plane(
     store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
     plane: &crate::geometry::surface::Plane,
     same_sense: bool,
     outer_wire_id: crate::topology::WireId,
     inner_wire_ids: &[crate::topology::WireId],
 ) -> Result<TriangleMesh> {
-    let params = TessellationParams::default();
-    let outer_3d = collect_wire_points_tessellated(store, outer_wire_id, &params)?;
+    let outer_3d = wire_points_from_cache(store, cache, outer_wire_id)?;
     let mut inner_3d_list = Vec::new();
     for &wire_id in inner_wire_ids {
-        inner_3d_list.push(collect_wire_points_tessellated(store, wire_id, &params)?);
+        inner_3d_list.push(wire_points_from_cache(store, cache, wire_id)?);
     }
 
     let origin = plane.origin();
@@ -292,7 +410,11 @@ fn extract_annular_radii(
 /// Instead of CDT (which struggles with slit-annulus constraint polygons from
 /// full-circle edges), this generates a regular grid in polar coordinates
 /// `(θ, r)` and evaluates points directly on the plane.
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::unnecessary_wraps)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::unnecessary_wraps
+)]
 fn tessellate_annular_disc(
     plane: &crate::geometry::surface::Plane,
     center: &crate::math::Point3,
@@ -438,7 +560,17 @@ fn tessellate_surface(
         }
         TessellationMode::Adaptive => {
             let base = params.min_segments;
-            tessellate_uv_adaptive(surface, u_min, u_max, v_min, v_max, base, base, same_sense, params.tolerance)
+            tessellate_uv_adaptive(
+                surface,
+                u_min,
+                u_max,
+                v_min,
+                v_max,
+                base,
+                base,
+                same_sense,
+                params.tolerance,
+            )
         }
     }
 }
@@ -484,8 +616,16 @@ fn tessellate_uv_adaptive(
             #[allow(clippy::cast_precision_loss)]
             let cu1 = u_min + du * (iu + 1) as f64;
             subdivide_cell(
-                surface, cu0, cu1, cv0, cv1, same_sense, tolerance, 0,
-                &mut mesh, &mut vertex_cache,
+                surface,
+                cu0,
+                cu1,
+                cv0,
+                cv1,
+                same_sense,
+                tolerance,
+                0,
+                &mut mesh,
+                &mut vertex_cache,
             )?;
         }
     }
@@ -529,10 +669,54 @@ fn subdivide_cell(
     let deviation = (actual_mid - bilinear_mid).norm();
 
     if deviation > tolerance && depth < MAX_ADAPTIVE_DEPTH {
-        subdivide_cell(surface, u0, mid_u, v0, mid_v, same_sense, tolerance, depth + 1, mesh, cache)?;
-        subdivide_cell(surface, mid_u, u1, v0, mid_v, same_sense, tolerance, depth + 1, mesh, cache)?;
-        subdivide_cell(surface, u0, mid_u, mid_v, v1, same_sense, tolerance, depth + 1, mesh, cache)?;
-        subdivide_cell(surface, mid_u, u1, mid_v, v1, same_sense, tolerance, depth + 1, mesh, cache)?;
+        subdivide_cell(
+            surface,
+            u0,
+            mid_u,
+            v0,
+            mid_v,
+            same_sense,
+            tolerance,
+            depth + 1,
+            mesh,
+            cache,
+        )?;
+        subdivide_cell(
+            surface,
+            mid_u,
+            u1,
+            v0,
+            mid_v,
+            same_sense,
+            tolerance,
+            depth + 1,
+            mesh,
+            cache,
+        )?;
+        subdivide_cell(
+            surface,
+            u0,
+            mid_u,
+            mid_v,
+            v1,
+            same_sense,
+            tolerance,
+            depth + 1,
+            mesh,
+            cache,
+        )?;
+        subdivide_cell(
+            surface,
+            mid_u,
+            u1,
+            mid_v,
+            v1,
+            same_sense,
+            tolerance,
+            depth + 1,
+            mesh,
+            cache,
+        )?;
     } else {
         let i00 = get_or_insert_vertex(mesh, cache, surface, u0, v0, same_sense)?;
         let i10 = get_or_insert_vertex(mesh, cache, surface, u1, v0, same_sense)?;
@@ -619,6 +803,31 @@ fn adaptive_linear_segments(extent: f64, params: &TessellationParams) -> usize {
     computed.clamp(params.min_segments, params.max_segments)
 }
 
+/// Collects 3D points from a wire out of the shared per-edge sample cache, in
+/// traversal order (each oriented edge's directed polyline, dropping the tail
+/// point duplicated by the next edge's head or the loop closure).
+fn wire_points_from_cache(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    wire_id: crate::topology::WireId,
+) -> Result<Vec<crate::math::Point3>> {
+    let edges = store.wire(wire_id)?.edges.clone();
+    let mut points = Vec::new();
+    for oe in &edges {
+        let samples = cache.get(store, oe.edge)?;
+        let n = samples.points.len();
+        if n == 0 {
+            continue;
+        }
+        if oe.forward {
+            points.extend_from_slice(&samples.points[..n - 1]);
+        } else {
+            points.extend(samples.points.iter().rev().take(n - 1).copied());
+        }
+    }
+    Ok(points)
+}
+
 /// Collects 3D points from a wire, tessellating curved edges into polylines.
 ///
 /// For Line edges, only the start point is included (avoiding duplicates).
@@ -657,6 +866,9 @@ fn collect_wire_points_tessellated(
             EdgeCurve::Ellipse(ellipse) => {
                 let n = tessellate_edge_segments(ellipse.semi_major(), t_start, t_end, params);
                 add_curve_samples(&mut points, ellipse, t_start, t_end, n)?;
+            }
+            EdgeCurve::Nurbs(nurbs) => {
+                add_curve_samples(&mut points, nurbs, t_start, t_end, params.max_segments)?;
             }
         }
     }
@@ -916,17 +1128,17 @@ mod tests {
     use crate::geometry::curve::Circle;
     use crate::geometry::surface::{Cylinder, Sphere, Torus};
     use crate::math::Vector3;
-    use crate::topology::{
-        EdgeCurve, EdgeData, FaceData, OrientedEdge, VertexData, WireData,
-    };
+    use crate::topology::{EdgeCurve, EdgeData, FaceData, OrientedEdge, VertexData, WireData};
     use std::f64::consts::TAU;
 
     /// Helper: creates a cylindrical face with a wire of 4 vertices
     /// spanning the cylinder from u=0..TAU, v=0..height.
-    fn make_cylinder_face(store: &mut crate::topology::TopologyStore, radius: f64, height: f64) -> FaceId {
-        let cyl = Cylinder::new(
-            Point3::origin(), radius, Vector3::z(), Vector3::x(),
-        ).unwrap();
+    fn make_cylinder_face(
+        store: &mut crate::topology::TopologyStore,
+        radius: f64,
+        height: f64,
+    ) -> FaceId {
+        let cyl = Cylinder::new(Point3::origin(), radius, Vector3::z(), Vector3::x()).unwrap();
 
         // 4 corner vertices of the "unrolled" cylinder patch
         let v0 = store.add_vertex(VertexData::new(Point3::new(radius, 0.0, 0.0)));
@@ -934,31 +1146,46 @@ mod tests {
 
         // Circle edges at bottom and top (full circles, so start=end vertex)
         let bottom_circle = Circle::new(
-            Point3::new(0.0, 0.0, 0.0), radius, Vector3::z(), Vector3::x(),
-        ).unwrap();
+            Point3::new(0.0, 0.0, 0.0),
+            radius,
+            Vector3::z(),
+            Vector3::x(),
+        )
+        .unwrap();
         let top_circle = Circle::new(
-            Point3::new(0.0, 0.0, height), radius, Vector3::z(), Vector3::x(),
-        ).unwrap();
+            Point3::new(0.0, 0.0, height),
+            radius,
+            Vector3::z(),
+            Vector3::x(),
+        )
+        .unwrap();
 
         let e_bottom = store.add_edge(EdgeData {
-            start: v0, end: v0,
+            start: v0,
+            end: v0,
             curve: EdgeCurve::Circle(bottom_circle),
-            t_start: 0.0, t_end: TAU,
+            t_start: 0.0,
+            t_end: TAU,
         });
         let e_top = store.add_edge(EdgeData {
-            start: v1, end: v1,
+            start: v1,
+            end: v1,
             curve: EdgeCurve::Circle(top_circle),
-            t_start: 0.0, t_end: TAU,
+            t_start: 0.0,
+            t_end: TAU,
         });
         let e_seam = store.add_edge(EdgeData {
-            start: v0, end: v1,
+            start: v0,
+            end: v1,
             curve: EdgeCurve::Line(
                 crate::geometry::curve::Line::new(
                     Point3::new(radius, 0.0, 0.0),
                     Vector3::new(0.0, 0.0, height),
-                ).unwrap()
+                )
+                .unwrap(),
             ),
-            t_start: 0.0, t_end: height,
+            t_start: 0.0,
+            t_end: height,
         });
 
         let wire = store.add_wire(WireData {
@@ -976,6 +1203,8 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -1012,9 +1241,7 @@ mod tests {
 
     /// Helper: creates a full sphere face (u=0..TAU, v=-PI/2..PI/2).
     fn make_sphere_face(store: &mut crate::topology::TopologyStore, radius: f64) -> FaceId {
-        let sph = Sphere::new(
-            Point3::origin(), radius, Vector3::z(), Vector3::x(),
-        ).unwrap();
+        let sph = Sphere::new(Point3::origin(), radius, Vector3::z(), Vector3::x()).unwrap();
 
         // For a full sphere, we need a wire. Use two poles + two meridian seams.
         let south = Point3::new(0.0, 0.0, -radius);
@@ -1025,11 +1252,11 @@ mod tests {
         // Seam edge along u=0 from south to north
         let seam_dir = north - south;
         let e_seam = store.add_edge(EdgeData {
-            start: v_south, end: v_north,
-            curve: EdgeCurve::Line(
-                crate::geometry::curve::Line::new(south, seam_dir).unwrap()
-            ),
-            t_start: 0.0, t_end: seam_dir.norm(),
+            start: v_south,
+            end: v_north,
+            curve: EdgeCurve::Line(crate::geometry::curve::Line::new(south, seam_dir).unwrap()),
+            t_start: 0.0,
+            t_end: seam_dir.norm(),
         });
 
         let wire = store.add_wire(WireData {
@@ -1045,6 +1272,8 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -1084,8 +1313,13 @@ mod tests {
         minor_r: f64,
     ) -> FaceId {
         let torus = Torus::new(
-            Point3::origin(), major_r, minor_r, Vector3::z(), Vector3::x(),
-        ).unwrap();
+            Point3::origin(),
+            major_r,
+            minor_r,
+            Vector3::z(),
+            Vector3::x(),
+        )
+        .unwrap();
 
         // Outer point at u=0, v=0
         let pt = Point3::new(major_r + minor_r, 0.0, 0.0);
@@ -1093,16 +1327,19 @@ mod tests {
 
         // Single seam edge (degenerate closed loop for full torus)
         let e_seam = store.add_edge(EdgeData {
-            start: v0, end: v0,
+            start: v0,
+            end: v0,
             curve: EdgeCurve::Circle(
                 Circle::new(
                     Point3::new(major_r, 0.0, 0.0),
                     minor_r,
                     Vector3::y(),
                     Vector3::x(),
-                ).unwrap()
+                )
+                .unwrap(),
             ),
-            t_start: 0.0, t_end: TAU,
+            t_start: 0.0,
+            t_end: TAU,
         });
 
         let wire = store.add_wire(WireData {
@@ -1115,6 +1352,8 @@ mod tests {
             outer_wire: wire,
             inner_wires: vec![],
             same_sense: true,
+            trim: None,
+            pcurves: Vec::new(),
         })
     }
 
@@ -1142,9 +1381,7 @@ mod tests {
             mode: TessellationMode::Adaptive,
             ..TessellationParams::default()
         };
-        let mesh = TessellateFace::new(face, params)
-            .execute(&store)
-            .unwrap();
+        let mesh = TessellateFace::new(face, params).execute(&store).unwrap();
         assert!(!mesh.indices.is_empty());
         assert_eq!(mesh.vertices.len(), mesh.normals.len());
         assert_eq!(mesh.vertices.len(), mesh.uvs.len());
@@ -1158,9 +1395,7 @@ mod tests {
             mode: TessellationMode::Adaptive,
             ..TessellationParams::default()
         };
-        let mesh = TessellateFace::new(face, params)
-            .execute(&store)
-            .unwrap();
+        let mesh = TessellateFace::new(face, params).execute(&store).unwrap();
         assert!(!mesh.indices.is_empty());
         assert_eq!(mesh.vertices.len(), mesh.normals.len());
     }
@@ -1173,9 +1408,7 @@ mod tests {
             mode: TessellationMode::Adaptive,
             ..TessellationParams::default()
         };
-        let mesh = TessellateFace::new(face, params)
-            .execute(&store)
-            .unwrap();
+        let mesh = TessellateFace::new(face, params).execute(&store).unwrap();
         assert!(!mesh.indices.is_empty());
         assert_eq!(mesh.vertices.len(), mesh.normals.len());
     }
@@ -1194,9 +1427,7 @@ mod tests {
             max_segments: 256,
             mode: TessellationMode::Default,
         };
-        let default_mesh = TessellateFace::new(face, coarse)
-            .execute(&store)
-            .unwrap();
+        let default_mesh = TessellateFace::new(face, coarse).execute(&store).unwrap();
 
         let adaptive = TessellationParams {
             tolerance: 0.5,
@@ -1204,9 +1435,7 @@ mod tests {
             max_segments: 256,
             mode: TessellationMode::Adaptive,
         };
-        let adaptive_mesh = TessellateFace::new(face, adaptive)
-            .execute(&store)
-            .unwrap();
+        let adaptive_mesh = TessellateFace::new(face, adaptive).execute(&store).unwrap();
 
         // With coarse tolerance on a cylinder, the initial 4-segment grid
         // has cells with significant midpoint deviation, so adaptive should
@@ -1227,9 +1456,7 @@ mod tests {
             mode: TessellationMode::Adaptive,
             ..TessellationParams::default()
         };
-        let mesh = TessellateFace::new(face, params)
-            .execute(&store)
-            .unwrap();
+        let mesh = TessellateFace::new(face, params).execute(&store).unwrap();
         for (i, n) in mesh.normals.iter().enumerate() {
             let v = &mesh.vertices[i];
             let len = Vector3::new(v.x, v.y, v.z).norm();
@@ -1240,6 +1467,91 @@ mod tests {
             }
         }
     }
+
+    // ── NURBS face same_sense tests ──────────────────────────────
+
+    use crate::geometry::nurbs::{KnotVector, NurbsSurface};
+
+    /// A bulged 3x3 NURBS patch over [0,1]x[0,1] whose normal varies across the
+    /// domain (so a flip is unambiguous, unlike a flat plane).
+    fn bulged_nurbs_surface() -> NurbsSurface {
+        let shape = [[0.0_f64, 0.5, 0.0], [0.5, 1.5, 0.5], [0.0, 0.5, 0.0]];
+        let mut control = Vec::with_capacity(9);
+        for (i, row) in shape.iter().enumerate() {
+            for (j, &z) in row.iter().enumerate() {
+                #[allow(clippy::cast_precision_loss)]
+                control.push(Point3::new(i as f64, j as f64, z));
+            }
+        }
+        let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        NurbsSurface::from_unweighted(control, 3, 3, knots.clone(), knots, 2, 2).unwrap()
+    }
+
+    /// Finds the tessellated vertex closest (in XY) to the surface point at
+    /// `(u, v)` and returns its normal alongside the raw surface normal there.
+    fn nearest_normal_pair(
+        mesh: &TriangleMesh,
+        surface: &NurbsSurface,
+        u: f64,
+        v: f64,
+    ) -> (Vector3, Vector3) {
+        let target = surface.evaluate(u, v).unwrap();
+        let raw = surface.normal(u, v).unwrap();
+        let mut best = 0usize;
+        let mut best_d = f64::INFINITY;
+        for (i, p) in mesh.vertices.iter().enumerate() {
+            let d = (p.x - target.x).powi(2) + (p.y - target.y).powi(2);
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        (mesh.normals[best], raw)
+    }
+
+    #[test]
+    fn nurbs_face_same_sense_true_matches_raw_normal() {
+        let surface = bulged_nurbs_surface();
+        let mut store = crate::topology::TopologyStore::new();
+        let face = MakeNurbsFace::new(surface.clone())
+            .execute(&mut store)
+            .unwrap();
+        // same_sense defaults to true.
+        let mesh = TessellateFace::new(face, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        for &(u, v) in &[(0.25, 0.25), (0.5, 0.5), (0.75, 0.25)] {
+            let (got, raw) = nearest_normal_pair(&mesh, &surface, u, v);
+            let dot = got.dot(&raw);
+            assert!(
+                dot > 0.9,
+                "same_sense=true normal at ({u},{v}) should match raw (dot={dot})"
+            );
+        }
+    }
+
+    #[test]
+    fn nurbs_face_same_sense_false_flips_normal() {
+        let surface = bulged_nurbs_surface();
+        let mut store = crate::topology::TopologyStore::new();
+        let face = MakeNurbsFace::new(surface.clone())
+            .execute(&mut store)
+            .unwrap();
+        store.face_mut(face).unwrap().same_sense = false;
+        let mesh = TessellateFace::new(face, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        for &(u, v) in &[(0.25, 0.25), (0.5, 0.5), (0.75, 0.25)] {
+            let (got, raw) = nearest_normal_pair(&mesh, &surface, u, v);
+            let dot = got.dot(&raw);
+            assert!(
+                dot < -0.9,
+                "same_sense=false normal at ({u},{v}) should oppose raw (dot={dot})"
+            );
+        }
+    }
+
+    use crate::operations::creation::MakeNurbsFace;
 
     #[test]
     fn default_mode_unchanged() {

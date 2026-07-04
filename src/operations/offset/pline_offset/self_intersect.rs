@@ -17,6 +17,7 @@ pub struct Intersection {
     /// Parameter on segment j (0..1).
     pub t_j: f64,
     /// Intersection point.
+    #[allow(dead_code)]
     pub point: (f64, f64),
 }
 
@@ -66,14 +67,12 @@ pub fn find_all(pline: &Pline) -> Vec<Intersection> {
                 }
                 (false, true) => {
                     // Line-arc: segment i is line, segment j is arc.
-                    let (cx, cy, r, sa, sw) =
-                        arc_from_bulge(vj0.x, vj0.y, vj1.x, vj1.y, vj0.bulge);
+                    let (cx, cy, r, sa, sw) = arc_from_bulge(vj0.x, vj0.y, vj1.x, vj1.y, vj0.bulge);
                     line_arc_intersect_2d(vi0.x, vi0.y, vi1.x, vi1.y, cx, cy, r, sa, sw)
                 }
                 (true, false) => {
                     // Arc-line: segment i is arc, segment j is line.
-                    let (cx, cy, r, sa, sw) =
-                        arc_from_bulge(vi0.x, vi0.y, vi1.x, vi1.y, vi0.bulge);
+                    let (cx, cy, r, sa, sw) = arc_from_bulge(vi0.x, vi0.y, vi1.x, vi1.y, vi0.bulge);
                     // line_arc returns (point, t_line, t_arc); we need (point, t_arc, t_line).
                     line_arc_intersect_2d(vj0.x, vj0.y, vj1.x, vj1.y, cx, cy, r, sa, sw)
                         .into_iter()
@@ -113,9 +112,11 @@ pub fn find_all(pline: &Pline) -> Vec<Intersection> {
 
     // Sort by segment index, then by parameter.
     results.sort_by(|a, b| {
-        a.seg_i
-            .cmp(&b.seg_i)
-            .then(a.t_i.partial_cmp(&b.t_i).unwrap_or(std::cmp::Ordering::Equal))
+        a.seg_i.cmp(&b.seg_i).then(
+            a.t_i
+                .partial_cmp(&b.t_i)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
 
     results
