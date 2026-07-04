@@ -22,6 +22,12 @@
 //! hole half as a boundary notch — the notched faces keep their tagged
 //! names, and the split kink sub-edges (above and below the window) are
 //! shared by the neighboring fragments.
+//!
+//! Variant 4 (F6 Phase R1) cascades three box cutters through ONE wall —
+//! door + window + window subtracted SEQUENTIALLY, each cut operating on
+//! the already-punched result of the previous one. The earlier cuts' band
+//! fragments ride through the later cuts as target faces, so the finished
+//! wall carries three named openings whose reveals all resolve by name.
 
 use std::f64::consts::FRAC_PI_2;
 
@@ -40,6 +46,7 @@ const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 const WALL_COLOR: Color = Color::rgb(200, 170, 130);
 const CUT_WALL_COLOR: Color = Color::rgb(150, 180, 210);
 const KINK_WALL_COLOR: Color = Color::rgb(170, 210, 160);
+const CASCADE_WALL_COLOR: Color = Color::rgb(210, 160, 190);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
 /// Wall thickness in plan.
@@ -106,6 +113,28 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
             storage,
             bounds,
             &kink_store,
+            solid_data.outer_shell,
+            EDGE_COLOR,
+        );
+    }
+
+    register_label(storage, -1.5, 23.0, "4", LABEL_SIZE, LABEL_COLOR);
+
+    let mut cascade_store = TopologyStore::new();
+    let Ok(cascade_solid) = build_cascade_wall(&mut cascade_store) else {
+        return;
+    };
+    let Ok(cascade_mesh) =
+        TessellateSolid::new(cascade_solid, TessellationParams::default()).execute(&cascade_store)
+    else {
+        return;
+    };
+    register_face(storage, bounds, cascade_mesh, CASCADE_WALL_COLOR);
+    if let Ok(solid_data) = cascade_store.solid(cascade_solid) {
+        register_edges(
+            storage,
+            bounds,
+            &cascade_store,
             solid_data.outer_shell,
             EDGE_COLOR,
         );
@@ -333,4 +362,82 @@ fn build_kink_window_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> 
     Subtract::new(wall, cutter)
         .with_op_id(OpId::new("demo-kink-window-cut"))
         .execute(store)
+}
+
+/// Builds the F6 Phase R1 variant: one straight tagged wall minus a door
+/// and two windows, subtracted SEQUENTIALLY — each cut punches the result
+/// of the previous one, and every cut carries its own op id so all three
+/// openings' band fragments resolve by name on the final solid.
+fn build_cascade_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
+    const Y0: f64 = 18.0;
+    let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+
+    let wall_profile = vec![
+        ProfileSegment::Line {
+            start: p(0.0, Y0),
+            end: p(6.0, Y0),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0),
+            end: p(6.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0 + THICKNESS),
+            end: p(0.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(0.0, Y0 + THICKNESS),
+            end: p(0.0, Y0),
+        },
+    ];
+    let wall_tags = ["outer", "end-east", "inner", "end-west"]
+        .iter()
+        .map(|t| SegmentTag::new(*t))
+        .collect();
+    let wall = MakeSegmentedPrism::new(wall_profile, Vector3::new(0.0, 0.0, HEIGHT))
+        .with_op_id(OpId::new("demo-cascade-wall"))
+        .with_segment_tags(wall_tags)
+        .execute(store)?;
+
+    // Door + two windows: interior, non-overlapping openings, each a
+    // genuine 4-side-face box extruded through the wall along +Y.
+    let openings: [(&str, f64, f64, f64, f64); 3] = [
+        ("demo-cascade-door", 0.6, 1.5, 0.15, 2.25),
+        ("demo-cascade-win-a", 2.2, 3.4, 1.0, 2.0),
+        ("demo-cascade-win-b", 4.2, 5.4, 1.0, 2.0),
+    ];
+    let mut current = wall;
+    for (op, x0, x1, z0, z1) in openings {
+        let q = |x: f64, z: f64| Point3::new(x, Y0 - 1.0, z);
+        let cutter_profile = vec![
+            ProfileSegment::Line {
+                start: q(x0, z0),
+                end: q(x1, z0),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z0),
+                end: q(x1, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z1),
+                end: q(x0, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x0, z1),
+                end: q(x0, z0),
+            },
+        ];
+        let cutter_tags = ["sill", "jamb-right", "head", "jamb-left"]
+            .iter()
+            .map(|t| SegmentTag::new(*t))
+            .collect();
+        let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 2.4, 0.0))
+            .with_op_id(OpId::new(format!("{op}-box")))
+            .with_segment_tags(cutter_tags)
+            .execute(store)?;
+        current = Subtract::new(current, cutter)
+            .with_op_id(OpId::new(op))
+            .execute(store)?;
+    }
+    Ok(current)
 }
