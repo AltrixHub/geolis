@@ -617,6 +617,45 @@ fn door_then_door_notches_notched_faces() {
     }
 }
 
+/// R2 acceptance 3b (demo variant geometry): a bottom-touching door THEN an
+/// interior window — the window punches the already-NOTCHED wall faces (a
+/// trim hole on a single kept fragment, filtered by its trim region).
+#[test]
+fn door_then_window_punches_notched_faces() {
+    let (store, result) = cascade(&[DOOR, WINDOW]);
+    assert_eq!(
+        welded_boundary_edges(&store, result),
+        0,
+        "door + window wall must weld watertight"
+    );
+    let mesh = TessellateSolid::new(result, TessellationParams::default())
+        .execute(&store)
+        .unwrap();
+    assert_open(&mesh, &DOOR);
+    assert_open(&mesh, &WINDOW);
+
+    // The notched wall faces keep their names and carry the window hole.
+    for tag in ["outer", "inner"] {
+        let f = store
+            .names()
+            .face(&wall_tag_name(tag))
+            .unwrap_or_else(|| panic!("{tag} does not resolve"));
+        assert_eq!(
+            store.face(f).unwrap().inner_wires.len(),
+            1,
+            "{tag} carries the window hole"
+        );
+    }
+    // Both cuts' bands resolve (no sill band for the door; all four for
+    // the window).
+    for tag in ["jamb-left", "head", "jamb-right"] {
+        assert!(store.names().face(&band_name(&DOOR, tag)).is_some());
+    }
+    for tag in ["sill", "jamb-right", "head", "jamb-left"] {
+        assert!(store.names().face(&band_name(&WINDOW, tag)).is_some());
+    }
+}
+
 /// Open-chain extraction contract: a cap-touching door yields one
 /// multi-face through cut whose two chains are OPEN, single-target,
 /// direction-aligned, and terminal-pinned exactly on the bottom ring

@@ -28,6 +28,14 @@
 //! the already-punched result of the previous one. The earlier cuts' band
 //! fragments ride through the later cuts as target faces, so the finished
 //! wall carries three named openings whose reveals all resolve by name.
+//!
+//! Variant 5 (F6 Phase R2) cuts a FULL-HEIGHT door: the cutter reaches
+//! below the wall's bottom cap, so the entry / exit traces are open
+//! boundary notches on the wall faces, the doorway walls close onto
+//! cap-plane closure edges, and the bottom cap is rebuilt as two named
+//! `Split` fragments sharing those exact edges — a genuinely open,
+//! watertight doorway. A window cut follows on the same wall (the R2
+//! cascade: a later cut on an already-notched face).
 
 use std::f64::consts::FRAC_PI_2;
 
@@ -47,6 +55,7 @@ const WALL_COLOR: Color = Color::rgb(200, 170, 130);
 const CUT_WALL_COLOR: Color = Color::rgb(150, 180, 210);
 const KINK_WALL_COLOR: Color = Color::rgb(170, 210, 160);
 const CASCADE_WALL_COLOR: Color = Color::rgb(210, 160, 190);
+const DOOR_WALL_COLOR: Color = Color::rgb(160, 200, 200);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
 /// Wall thickness in plan.
@@ -135,6 +144,28 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
             storage,
             bounds,
             &cascade_store,
+            solid_data.outer_shell,
+            EDGE_COLOR,
+        );
+    }
+
+    register_label(storage, -1.5, 28.0, "5", LABEL_SIZE, LABEL_COLOR);
+
+    let mut door_store = TopologyStore::new();
+    let Ok(door_solid) = build_full_height_door_wall(&mut door_store) else {
+        return;
+    };
+    let Ok(door_mesh) =
+        TessellateSolid::new(door_solid, TessellationParams::default()).execute(&door_store)
+    else {
+        return;
+    };
+    register_face(storage, bounds, door_mesh, DOOR_WALL_COLOR);
+    if let Ok(solid_data) = door_store.solid(door_solid) {
+        register_edges(
+            storage,
+            bounds,
+            &door_store,
             solid_data.outer_shell,
             EDGE_COLOR,
         );
@@ -405,6 +436,84 @@ fn build_cascade_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
         ("demo-cascade-door", 0.6, 1.5, 0.15, 2.25),
         ("demo-cascade-win-a", 2.2, 3.4, 1.0, 2.0),
         ("demo-cascade-win-b", 4.2, 5.4, 1.0, 2.0),
+    ];
+    let mut current = wall;
+    for (op, x0, x1, z0, z1) in openings {
+        let q = |x: f64, z: f64| Point3::new(x, Y0 - 1.0, z);
+        let cutter_profile = vec![
+            ProfileSegment::Line {
+                start: q(x0, z0),
+                end: q(x1, z0),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z0),
+                end: q(x1, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z1),
+                end: q(x0, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x0, z1),
+                end: q(x0, z0),
+            },
+        ];
+        let cutter_tags = ["sill", "jamb-right", "head", "jamb-left"]
+            .iter()
+            .map(|t| SegmentTag::new(*t))
+            .collect();
+        let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 2.4, 0.0))
+            .with_op_id(OpId::new(format!("{op}-box")))
+            .with_segment_tags(cutter_tags)
+            .execute(store)?;
+        current = Subtract::new(current, cutter)
+            .with_op_id(OpId::new(op))
+            .execute(store)?;
+    }
+    Ok(current)
+}
+
+/// Builds the F6 Phase R2 variant: one straight tagged wall minus a
+/// FULL-HEIGHT door (the cutter's sill lies below the wall, its head inside
+/// it) and a window. The door's cut chains are OPEN — they terminate on the
+/// wall's bottom ring — so the bottom cap is notched into two `Split`
+/// fragments sharing the doorway's closure edges, and the window then cuts
+/// the already-notched wall faces.
+fn build_full_height_door_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
+    const Y0: f64 = 23.0;
+    let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+
+    let wall_profile = vec![
+        ProfileSegment::Line {
+            start: p(0.0, Y0),
+            end: p(6.0, Y0),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0),
+            end: p(6.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0 + THICKNESS),
+            end: p(0.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(0.0, Y0 + THICKNESS),
+            end: p(0.0, Y0),
+        },
+    ];
+    let wall_tags = ["outer", "end-east", "inner", "end-west"]
+        .iter()
+        .map(|t| SegmentTag::new(*t))
+        .collect();
+    let wall = MakeSegmentedPrism::new(wall_profile, Vector3::new(0.0, 0.0, HEIGHT))
+        .with_op_id(OpId::new("demo-door-wall"))
+        .with_segment_tags(wall_tags)
+        .execute(store)?;
+
+    // Full-height door (sill below the wall) then a window, sequentially.
+    let openings: [(&str, f64, f64, f64, f64); 2] = [
+        ("demo-full-door", 0.8, 1.7, -0.5, 2.25),
+        ("demo-door-win", 3.2, 4.4, 1.0, 2.0),
     ];
     let mut current = wall;
     for (op, x0, x1, z0, z1) in openings {
