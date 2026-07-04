@@ -46,12 +46,44 @@ impl fmt::Display for OpId {
     }
 }
 
+/// A caller-supplied, opaque tag identifying one profile segment of a
+/// segmented creation op (e.g. [`MakeSegmentedPrism`]). Like [`OpId`], geolis
+/// never invents the identity: the caller derives tags from its own outline
+/// provenance, so a face keeps its name when positional segment indices shift
+/// (junction re-trims). Rebuild-stable by construction.
+///
+/// [`MakeSegmentedPrism`]: crate::operations::creation::MakeSegmentedPrism
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SegmentTag(Arc<str>);
+
+impl SegmentTag {
+    /// Creates a segment tag from the caller's stable identifier.
+    pub fn new(tag: impl Into<Arc<str>>) -> Self {
+        Self(tag.into())
+    }
+
+    /// The raw identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SegmentTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The role of a face within its creation operation.
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub enum FaceRole {
     /// A side face, indexed by the op's deterministic side order (e.g. the
     /// curved wall: 0 = inner, 1 = outer, 2 = start end, 3 = end end).
     Side(u8),
+    /// A side face identified by a caller-supplied segment tag
+    /// (junction-stable — survives segment-count changes, unlike `Side(k)`).
+    Tagged(SegmentTag),
     /// The cap at the extrusion start (`v0` end).
     CapStart,
     /// The cap at the extrusion end (`v1` end).
@@ -198,19 +230,21 @@ impl NameRegistry {
 // ---------------------------------------------------------------------------
 // Canonical string form (opaque to consumers; stable for graph storage).
 //
-// Grammar (all tokens ASCII; op ids are percent-escaped for `%(:)`):
+// Grammar (all tokens ASCII; op ids and segment tags are percent-escaped for
+// `%(:)`):
 //   face := "created:" op ":" role
 //         | "band:" op ":" index ":(" face ")"
 //         | "floor:" op ":(" face ")"
 //   edge := "ring:" op ":" ("start" | "end")
 //         | "rim:"  op ":" index ":(" face ")"
-//   role := "side" u8 | "cap-start" | "cap-end" | "top" | "bottom" | "wall"
+//   role := "side" u8 | "side:" tag | "cap-start" | "cap-end" | "top"
+//         | "bottom" | "wall"
 // ---------------------------------------------------------------------------
 
 /// Percent-escapes the characters the grammar reserves.
-fn escape_op(op: &OpId) -> String {
-    let mut out = String::with_capacity(op.as_str().len());
-    for c in op.as_str().chars() {
+fn escape_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
         match c {
             '%' => out.push_str("%25"),
             ':' => out.push_str("%3A"),
@@ -222,7 +256,7 @@ fn escape_op(op: &OpId) -> String {
     out
 }
 
-fn unescape_op(s: &str) -> Option<OpId> {
+fn unescape_component(s: &str) -> Option<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -234,13 +268,22 @@ fn unescape_op(s: &str) -> Option<OpId> {
             out.push(c);
         }
     }
-    Some(OpId::new(out))
+    Some(out)
+}
+
+fn escape_op(op: &OpId) -> String {
+    escape_component(op.as_str())
+}
+
+fn unescape_op(s: &str) -> Option<OpId> {
+    unescape_component(s).map(OpId::new)
 }
 
 impl fmt::Display for FaceRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Side(k) => write!(f, "side{k}"),
+            Self::Tagged(tag) => write!(f, "side:{}", escape_component(tag.as_str())),
             Self::CapStart => f.write_str("cap-start"),
             Self::CapEnd => f.write_str("cap-end"),
             Self::Top => f.write_str("top"),
@@ -260,11 +303,19 @@ impl std::str::FromStr for FaceRole {
             "top" => Ok(Self::Top),
             "bottom" => Ok(Self::Bottom),
             "wall" => Ok(Self::Wall),
-            _ => s
-                .strip_prefix("side")
-                .and_then(|k| k.parse::<u8>().ok())
-                .map(Self::Side)
-                .ok_or(()),
+            _ => {
+                // "side:" (tagged) must be checked before the bare "side"
+                // prefix of the positional form.
+                if let Some(tag) = s.strip_prefix("side:") {
+                    return unescape_component(tag)
+                        .map(|t| Self::Tagged(SegmentTag::new(t)))
+                        .ok_or(());
+                }
+                s.strip_prefix("side")
+                    .and_then(|k| k.parse::<u8>().ok())
+                    .map(Self::Side)
+                    .ok_or(())
+            }
         }
     }
 }
@@ -452,6 +503,25 @@ mod tests {
                     role: FaceRole::CapEnd,
                 }),
             },
+            // Tagged side face (F5): opaque caller tag, plain.
+            FaceName::Created {
+                op: OpId::new("wall1"),
+                role: FaceRole::Tagged(SegmentTag::new("centerline-3/outer")),
+            },
+            // Tagged side face with every reserved character in the tag.
+            FaceName::Created {
+                op: OpId::new("op:with(specials)%"),
+                role: FaceRole::Tagged(SegmentTag::new("tag:with(specials)%25")),
+            },
+            // Tagged side face nested inside a band name (paren escaping).
+            FaceName::Band {
+                op: OpId::new("cut1"),
+                tool_face: Box::new(FaceName::Created {
+                    op: OpId::new("wall1"),
+                    role: FaceRole::Tagged(SegmentTag::new("seg(0)")),
+                }),
+                loop_index: 2,
+            },
             // Nested: a band cut into a band (future splits compose too).
             FaceName::Band {
                 op: OpId::new("cut2"),
@@ -496,6 +566,22 @@ mod tests {
         assert!("band:cut1:zero:(created:a:top)"
             .parse::<FaceName>()
             .is_err());
+    }
+
+    /// The positional `side<k>` and tagged `side:<tag>` forms stay distinct:
+    /// a tag that is itself a digit string must not collapse into `Side(k)`.
+    #[test]
+    fn positional_and_tagged_side_forms_are_distinct() {
+        let positional: FaceRole = "side0".parse().unwrap();
+        assert_eq!(positional, FaceRole::Side(0));
+
+        let tagged: FaceRole = "side:0".parse().unwrap();
+        assert_eq!(tagged, FaceRole::Tagged(SegmentTag::new("0")));
+        assert_ne!(positional, tagged);
+
+        // Round trip preserves the distinction.
+        assert_eq!(FaceRole::Side(0).to_string(), "side0");
+        assert_eq!(FaceRole::Tagged(SegmentTag::new("0")).to_string(), "side:0");
     }
 
     #[test]

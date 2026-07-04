@@ -817,7 +817,7 @@ mod tests {
         ] {
             let name = FaceName::Created {
                 op: OpId::new("slab1"),
-                role,
+                role: role.clone(),
             };
             assert!(
                 store.names().face(&name).is_some(),
@@ -840,7 +840,7 @@ mod tests {
         ] {
             let name = FaceName::Created {
                 op: OpId::new("wall1"),
-                role,
+                role: role.clone(),
             };
             assert!(
                 store.names().face(&name).is_some(),
@@ -862,7 +862,7 @@ mod tests {
         for role in [FaceRole::Wall, FaceRole::CapStart, FaceRole::CapEnd] {
             let name = FaceName::Created {
                 op: OpId::new("vase1"),
-                role,
+                role: role.clone(),
             };
             assert!(store.names().face(&name).is_some(), "{role:?} named");
         }
