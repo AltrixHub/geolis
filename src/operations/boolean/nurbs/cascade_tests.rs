@@ -334,3 +334,61 @@ fn cascade_order_does_not_change_geometry_or_names() {
         }
     }
 }
+
+/// Pinned characterization of the F5 lead "near-duplicate unwelded vertices
+/// on the sill line" (verified real, 2026-07-04, F6 R1):
+///
+/// The wall − box-window mesh carries cross-face vertex pairs along the
+/// shared hole-rim edges (sill, head, jambs) separated by up to ~7.9e-10.
+/// Root cause: the trimmed CDT maps every vertex through its OWN face's
+/// surface — the punched wall face evaluates `S_target(uv_a)` from the trim
+/// hole polyline while the band fragment evaluates `S_tool(uv_b)` via its
+/// pcurve — so the SSI marcher's point-acceptance residual (bounded by its
+/// 1e-7 acceptance, `stitch::JUNCTION_TOLERANCE`) surfaces as a cross-face
+/// mismatch. The true weld belongs in the tessellation layer (shared-edge 3D
+/// pinning so both faces consume one 3D sample per shared-edge parameter) —
+/// scheduled as part of F6 R3.
+///
+/// Until then this test pins the bound: every near-duplicate pair stays
+/// within the marcher's acceptance, so the 1e-6 position weld (the shipped
+/// watertightness contract) always merges them. A regression pushing rim
+/// disagreement past the marcher bound fails here.
+#[test]
+fn rim_cross_face_mismatch_stays_within_marcher_acceptance() {
+    /// The SSI marcher's point-acceptance bound (`stitch::JUNCTION_TOLERANCE`).
+    const MARCHER_ACCEPTANCE: f64 = 1e-7;
+
+    let mut store = TopologyStore::new();
+    let wall = MakeSegmentedPrism::new(wall_profile(), Vector3::new(0.0, 0.0, 3.0))
+        .with_op_id(OpId::new("wall1"))
+        .with_segment_tags(wall_tags())
+        .execute(&mut store)
+        .unwrap();
+    let cutter = build_cutter(&mut store, &WIN_A);
+    let result = Subtract::new(wall, cutter)
+        .with_op_id(OpId::new("cut1"))
+        .execute(&mut store)
+        .unwrap();
+    let mesh = TessellateSolid::new(result, TessellationParams::default())
+        .execute(&store)
+        .unwrap();
+
+    // Any two distinct-but-nearby vertices are the two faces' images of one
+    // shared rim sample; their separation must stay within the marcher's
+    // acceptance so the 1e-6 position weld closes them.
+    let mut max_near_dup = 0.0_f64;
+    for i in 0..mesh.vertices.len() {
+        for j in (i + 1)..mesh.vertices.len() {
+            let d = (mesh.vertices[i] - mesh.vertices[j]).norm();
+            if d > 0.0 && d < 1e-4 {
+                max_near_dup = max_near_dup.max(d);
+            }
+        }
+    }
+    assert!(
+        max_near_dup <= MARCHER_ACCEPTANCE,
+        "cross-face rim vertex mismatch {max_near_dup:.3e} exceeds the SSI \
+         marcher's acceptance {MARCHER_ACCEPTANCE:.0e}; the punch/band rim \
+         images have drifted apart"
+    );
+}
