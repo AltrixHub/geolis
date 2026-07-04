@@ -9,6 +9,7 @@ pub mod nurbs_trimmed;
 pub mod nurbs_window;
 pub mod primitives;
 pub mod revolve;
+pub mod segmented_prism;
 pub mod shell;
 pub mod split;
 pub mod stroke_joins;
@@ -135,6 +136,7 @@ pub const PATTERNS: &[&str] = &[
     "nurbs_trimmed",
     "nurbs_boolean",
     "nurbs_window",
+    "segmented_prism",
 ];
 
 /// Register meshes for the named pattern.
@@ -212,6 +214,10 @@ pub fn register(storage: &MeshStorage, name: &str) -> Option<SceneBounds> {
         }
         "nurbs_window" => {
             nurbs_window::register(storage, &mut bounds);
+            true
+        }
+        "segmented_prism" => {
+            segmented_prism::register(storage, &mut bounds);
             true
         }
         _ => false,
