@@ -70,6 +70,17 @@ pub(crate) fn intersect_through_cut(
     // intersect requires at most one loop per target face.
     let mut faces_with_loops: HashSet<FaceId> = HashSet::new();
     for cut in &cuts {
+        if matches!(
+            cut,
+            ToolFaceCut::MultiFaceThrough { .. } | ToolFaceCut::MultiFacePocket { .. }
+        ) {
+            return Err(OperationError::Failed(
+                "keep-inside intersect does not support multi-face (chained \
+                 loop) tools"
+                    .into(),
+            )
+            .into());
+        }
         let ToolFaceCut::Through { loops, .. } = cut else {
             return Err(OperationError::Failed(
                 "keep-inside intersect requires through cuts (a pocket tool \

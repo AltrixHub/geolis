@@ -77,8 +77,8 @@ pub(crate) fn subtract_through_cut(
                 result_faces.push(band);
                 if let Some(op) = op_id {
                     name_band(store, op, *tool_face, band);
-                    name_rim(store, op, &id_map, &loops[0], entry, 0);
-                    name_rim(store, op, &id_map, &loops[1], exit, 1);
+                    name_rim(store, op, copy_of(&id_map, &loops[0])?, entry, 0);
+                    name_rim(store, op, copy_of(&id_map, &loops[1])?, exit, 1);
                 }
             }
             super::loops::ToolFaceCut::Pocket { tool_face, entry } => {
@@ -101,22 +101,108 @@ pub(crate) fn subtract_through_cut(
                 result_faces.push(floor);
                 if let Some(op) = op_id {
                     name_band(store, op, *tool_face, band);
-                    name_rim(store, op, &id_map, entry, entry_ring, 0);
-                    if let Some(cap_name) = store.names().name_of_face(buried.cap_face).cloned() {
-                        store.names_mut().bind_face(
-                            floor,
-                            crate::topology::FaceName::Floor {
-                                op: op.clone(),
-                                cap: Box::new(cap_name),
-                            },
-                        );
+                    name_rim(store, op, copy_of(&id_map, entry)?, entry_ring, 0);
+                    name_floor(store, op, buried.cap_face, floor);
+                }
+            }
+            super::loops::ToolFaceCut::MultiFaceThrough { chains } => {
+                // Chained loops: punch each chain as one hole ring of one
+                // edge per segment, then build one band fragment per tool
+                // side face, sharing the ring edges and the new kink edges.
+                let entry = remap_chain(&chains[0], &id_map)?;
+                let exit = remap_chain(&chains[1], &id_map)?;
+                let entry_ring = super::punch::punch_chain(store, &entry)?;
+                let exit_ring = super::punch::punch_chain(store, &exit)?;
+                let fragments = super::band::build_band_fragments(
+                    store,
+                    &entry,
+                    &exit,
+                    &entry_ring,
+                    &exit_ring,
+                )?;
+                for fragment in &fragments {
+                    result_faces.push(fragment.face);
+                }
+                if let Some(op) = op_id {
+                    for fragment in &fragments {
+                        name_band(store, op, fragment.tool_face, fragment.face);
                     }
+                    name_rim(store, op, entry.target_face, entry_ring.wire, 0);
+                    name_rim(store, op, exit.target_face, exit_ring.wire, 1);
+                }
+            }
+            super::loops::ToolFaceCut::MultiFacePocket { entry } => {
+                // Buried multi-face tool: the shared bottom ring is resolved
+                // across all crossed side faces; the floor is the flipped cap.
+                let buried = super::pocket::resolve_buried_chain_end(store, entry, &tool_faces)?;
+                let remapped = remap_chain(entry, &id_map)?;
+                let entry_ring = super::punch::punch_chain(store, &remapped)?;
+                let fragments = super::band::build_pocket_band_fragments(
+                    store,
+                    &remapped,
+                    &entry_ring,
+                    &buried,
+                )?;
+                for fragment in &fragments {
+                    result_faces.push(fragment.face);
+                }
+                let floor = super::pocket::pocket_floor(store, buried.cap_face)?;
+                result_faces.push(floor);
+                if let Some(op) = op_id {
+                    for fragment in &fragments {
+                        name_band(store, op, fragment.tool_face, fragment.face);
+                    }
+                    name_rim(store, op, remapped.target_face, entry_ring.wire, 0);
+                    name_floor(store, op, buried.cap_face, floor);
                 }
             }
         }
     }
 
     Ok(finish_solid(store, result_faces))
+}
+
+/// Remaps a chained loop's target face (all segments lie on one face) to its
+/// result copy.
+fn remap_chain(
+    chain: &super::stitch::CutChain,
+    id_map: &HashMap<FaceId, FaceId>,
+) -> Result<super::stitch::CutChain> {
+    let copy = *id_map.get(&chain.target_face).ok_or_else(|| {
+        OperationError::Failed("cut loop references an unknown target face".into())
+    })?;
+    let mut remapped = chain.clone();
+    remapped.target_face = copy;
+    for seg in &mut remapped.segments {
+        seg.target_face = copy;
+    }
+    Ok(remapped)
+}
+
+/// Looks up the result copy of a loop's target face.
+fn copy_of(id_map: &HashMap<FaceId, FaceId>, loop_: &super::loops::CutLoop) -> Result<FaceId> {
+    id_map.get(&loop_.target_face).copied().ok_or_else(|| {
+        OperationError::Failed("cut loop references an unknown target face".into()).into()
+    })
+}
+
+/// Binds the pocket floor's `Floor { op, cap name }` when the buried cap is
+/// named (unnamed tools propagate unnamed floors).
+fn name_floor(
+    store: &mut TopologyStore,
+    op: &crate::topology::OpId,
+    cap_face: FaceId,
+    floor: FaceId,
+) {
+    if let Some(cap_name) = store.names().name_of_face(cap_face).cloned() {
+        store.names_mut().bind_face(
+            floor,
+            crate::topology::FaceName::Floor {
+                op: op.clone(),
+                cap: Box::new(cap_name),
+            },
+        );
+    }
 }
 
 /// Errors if any tool cap (planar tool face) intersects any target face.
@@ -200,19 +286,16 @@ fn name_band(
 }
 
 /// Names a punched hole-rim ring edge `CutRim { op, punched face name, loop }`
-/// when the punched target face is named.
+/// when the punched target face is named. The name binds to the ring wire's
+/// first edge (for a chained ring, its first chain segment's edge).
 fn name_rim(
     store: &mut TopologyStore,
     op: &crate::topology::OpId,
-    id_map: &HashMap<FaceId, FaceId>,
-    loop_: &super::loops::CutLoop,
+    punched_face: FaceId,
     ring_wire: crate::topology::WireId,
     loop_index: u32,
 ) {
-    let Some(&copy) = id_map.get(&loop_.target_face) else {
-        return;
-    };
-    let Some(target_name) = store.names().name_of_face(copy).cloned() else {
+    let Some(target_name) = store.names().name_of_face(punched_face).cloned() else {
         return;
     };
     let Ok(wire) = store.wire(ring_wire) else {
@@ -974,6 +1057,594 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- F5 Phase B acceptance: multi-face (box) cutters ----
+
+    /// Straight segmented-prism wall: 6 x 0.4 footprint extruded 3 up.
+    fn straight_wall_profile() -> Vec<crate::operations::creation::ProfileSegment> {
+        use crate::operations::creation::ProfileSegment;
+        let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+        let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+        vec![
+            line(p(0.0, 0.0), p(6.0, 0.0)),
+            line(p(6.0, 0.0), p(6.0, 0.4)),
+            line(p(6.0, 0.4), p(0.0, 0.4)),
+            line(p(0.0, 0.4), p(0.0, 0.0)),
+        ]
+    }
+
+    /// Box-cutter window profile in the XZ plane at `y = -1`, spanning
+    /// `x in [x0, x0 + 1.5]`, `z in [1, 2]`.
+    fn box_window_profile(x0: f64) -> Vec<crate::operations::creation::ProfileSegment> {
+        use crate::operations::creation::ProfileSegment;
+        let p = |x: f64, z: f64| Point3::new(x, -1.0, z);
+        let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+        let x1 = x0 + 1.5;
+        vec![
+            line(p(x0, 1.0), p(x1, 1.0)), // sill
+            line(p(x1, 1.0), p(x1, 2.0)), // jamb-right
+            line(p(x1, 2.0), p(x0, 2.0)), // head
+            line(p(x0, 2.0), p(x0, 1.0)), // jamb-left
+        ]
+    }
+
+    fn wall_tags() -> Vec<crate::topology::SegmentTag> {
+        ["outer", "end-east", "inner", "end-west"]
+            .iter()
+            .map(|t| crate::topology::SegmentTag::new(*t))
+            .collect()
+    }
+
+    fn box_tags() -> Vec<crate::topology::SegmentTag> {
+        ["sill", "jamb-right", "head", "jamb-left"]
+            .iter()
+            .map(|t| crate::topology::SegmentTag::new(*t))
+            .collect()
+    }
+
+    /// Builds wall − box window with op ids; `x0` positions the window,
+    /// `depth` the box extrusion length from `y = -1` (2.4 = through,
+    /// 1.25 = buried mid-wall).
+    fn named_wall_minus_box(x0: f64, depth: f64) -> (TopologyStore, SolidId) {
+        use crate::math::Vector3;
+        use crate::operations::creation::MakeSegmentedPrism;
+        use crate::topology::OpId;
+
+        let mut store = TopologyStore::new();
+        let wall = MakeSegmentedPrism::new(straight_wall_profile(), Vector3::new(0.0, 0.0, 3.0))
+            .with_op_id(OpId::new("wall1"))
+            .with_segment_tags(wall_tags())
+            .execute(&mut store)
+            .unwrap();
+        let cutter = MakeSegmentedPrism::new(box_window_profile(x0), Vector3::new(0.0, depth, 0.0))
+            .with_op_id(OpId::new("win1"))
+            .with_segment_tags(box_tags())
+            .execute(&mut store)
+            .unwrap();
+        let result =
+            subtract_through_cut(&mut store, wall, cutter, Some(&OpId::new("cut1"))).unwrap();
+        (store, result)
+    }
+
+    /// Position-welded boundary-edge count of a solid's tessellation (edges
+    /// used != 2 after vertex welding).
+    ///
+    /// Welding is proximity-based (each vertex joins an existing
+    /// representative within `1e-6`, probing the neighboring quantization
+    /// cells) rather than raw grid bucketing: adjacent faces emit rim
+    /// vertices agreeing to ~1e-9, and axis-aligned fixtures land those
+    /// exactly on `1e-6` grid-cell boundaries where single-cell bucketing
+    /// splits coincident points spuriously.
+    fn welded_boundary_edges(store: &TopologyStore, solid: SolidId) -> usize {
+        const WELD: f64 = 1e-6;
+        #[allow(clippy::cast_possible_truncation)]
+        fn cell(p: &Point3) -> (i64, i64, i64) {
+            (
+                (p.x / WELD).round() as i64,
+                (p.y / WELD).round() as i64,
+                (p.z / WELD).round() as i64,
+            )
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        fn canon_id(
+            cells: &mut HashMap<(i64, i64, i64), Vec<u32>>,
+            reps: &mut Vec<Point3>,
+            p: &Point3,
+        ) -> u32 {
+            let (cx, cy, cz) = cell(p);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(ids) = cells.get(&(cx + dx, cy + dy, cz + dz)) {
+                            for &id in ids {
+                                if (reps[id as usize] - p).norm() <= WELD {
+                                    return id;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let id = reps.len() as u32;
+            reps.push(*p);
+            cells.entry((cx, cy, cz)).or_default().push(id);
+            id
+        }
+        let mesh = TessellateSolid::new(solid, TessellationParams::default())
+            .execute(store)
+            .unwrap();
+        assert!(!mesh.indices.is_empty(), "empty mesh");
+        let mut cells: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+        let mut reps: Vec<Point3> = Vec::new();
+        let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &mesh.indices {
+            let a = canon_id(&mut cells, &mut reps, &mesh.vertices[tri[0] as usize]);
+            let b = canon_id(&mut cells, &mut reps, &mesh.vertices[tri[1] as usize]);
+            let c = canon_id(&mut cells, &mut reps, &mesh.vertices[tri[2] as usize]);
+            for &(x, y) in &[(a, b), (b, c), (c, a)] {
+                let key = if x < y { (x, y) } else { (y, x) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        counts.values().filter(|&&c| c != 2).count()
+    }
+
+    /// Acceptance B1: segmented-prism wall − genuine 4-face box cutter → a
+    /// through window. The result is position-weld watertight, the hole is
+    /// genuinely open, both punched wall faces carry a 4-edge chained hole
+    /// ring, and the band consists of exactly 4 fragment faces.
+    #[test]
+    fn wall_minus_box_window_is_watertight_with_open_hole() {
+        use crate::math::Vector3;
+        use crate::operations::creation::MakeSegmentedPrism;
+
+        let mut store = TopologyStore::new();
+        let wall = MakeSegmentedPrism::new(straight_wall_profile(), Vector3::new(0.0, 0.0, 3.0))
+            .execute(&mut store)
+            .unwrap();
+        let cutter = MakeSegmentedPrism::new(box_window_profile(2.0), Vector3::new(0.0, 2.4, 0.0))
+            .execute(&mut store)
+            .unwrap();
+        let result = subtract_through_cut(&mut store, wall, cutter, None).unwrap();
+
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        assert_eq!(
+            shell.faces.len(),
+            10,
+            "6 wall faces + 4 band fragments, got {}",
+            shell.faces.len()
+        );
+
+        // The two punched wall faces each carry ONE hole ring wire of 4 edges
+        // (one per chain segment).
+        let mut punched = 0usize;
+        for &f in &shell.faces {
+            let face = store.face(f).unwrap();
+            if face.inner_wires.is_empty() {
+                continue;
+            }
+            punched += 1;
+            assert_eq!(face.inner_wires.len(), 1, "one hole per punched face");
+            let ring = store.wire(face.inner_wires[0]).unwrap();
+            assert_eq!(ring.edges.len(), 4, "chained hole ring has 4 edges");
+        }
+        assert_eq!(punched, 2, "entry + exit faces punched");
+
+        // Position-weld watertight: no boundary edges anywhere — the chained
+        // rings, the kink crossings, and the wall perimeter all conform.
+        let boundary = welded_boundary_edges(&store, result);
+        assert_eq!(
+            boundary, 0,
+            "wall − box window must position-weld watertight \
+             (found {boundary} boundary edges)"
+        );
+
+        // The hole is open: no mesh vertex intrudes into the tunnel interior.
+        let mesh = TessellateSolid::new(result, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        for v in &mesh.vertices {
+            let inside = v.x > 2.05 && v.x < 3.45 && v.z > 1.05 && v.z < 1.95;
+            assert!(
+                !(inside && v.y > 0.05 && v.y < 0.35),
+                "vertex ({:.3},{:.3},{:.3}) intrudes into the window tunnel",
+                v.x,
+                v.y,
+                v.z
+            );
+        }
+    }
+
+    /// Adjacent band fragments share their kink-crossing edges, and each
+    /// fragment shares its entry/exit ring edge with the punched wall faces'
+    /// chained hole rings (F2 shared-edge topology).
+    #[test]
+    fn box_window_band_fragments_share_ring_and_kink_edges() {
+        use crate::math::Vector3;
+        use crate::operations::creation::MakeSegmentedPrism;
+        use crate::topology::EdgeId;
+
+        let mut store = TopologyStore::new();
+        let wall = MakeSegmentedPrism::new(straight_wall_profile(), Vector3::new(0.0, 0.0, 3.0))
+            .execute(&mut store)
+            .unwrap();
+        let cutter = MakeSegmentedPrism::new(box_window_profile(2.0), Vector3::new(0.0, 2.4, 0.0))
+            .execute(&mut store)
+            .unwrap();
+        let result = subtract_through_cut(&mut store, wall, cutter, None).unwrap();
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+
+        // Ring edges of the two punched faces.
+        let mut ring_edges: Vec<EdgeId> = Vec::new();
+        for &f in &shell.faces {
+            for &w in &store.face(f).unwrap().inner_wires {
+                ring_edges.extend(store.wire(w).unwrap().edges.iter().map(|oe| oe.edge));
+            }
+        }
+        assert_eq!(ring_edges.len(), 8, "2 chained rings x 4 edges");
+
+        // Band fragments: faces with a 4-edge outer wire referencing ring
+        // edges (the wall faces' outer wires reference wall boundary edges).
+        let mut kink_edge_uses: HashMap<EdgeId, usize> = HashMap::new();
+        let mut fragments = 0usize;
+        for &f in &shell.faces {
+            let face = store.face(f).unwrap();
+            let wire = store.wire(face.outer_wire).unwrap();
+            let ring_refs = wire
+                .edges
+                .iter()
+                .filter(|oe| ring_edges.contains(&oe.edge))
+                .count();
+            if ring_refs == 0 {
+                continue;
+            }
+            fragments += 1;
+            assert_eq!(wire.edges.len(), 4, "fragment wire: 2 rings + 2 kinks");
+            assert_eq!(
+                ring_refs, 2,
+                "fragment references one entry + one exit ring edge"
+            );
+            for oe in &wire.edges {
+                if !ring_edges.contains(&oe.edge) {
+                    *kink_edge_uses.entry(oe.edge).or_insert(0) += 1;
+                }
+            }
+        }
+        assert_eq!(fragments, 4, "one band fragment per box side face");
+        assert_eq!(kink_edge_uses.len(), 4, "4 shared kink-crossing edges");
+        for (&edge, &uses) in &kink_edge_uses {
+            assert_eq!(
+                uses, 2,
+                "kink edge {edge:?} must be shared by exactly 2 fragments"
+            );
+        }
+    }
+
+    /// Acceptance B2 (F4 rebuild-stability pattern): every band fragment binds
+    /// `Band {{ op, tool_face: that side face's Created{{Tagged}} name }}`, the
+    /// chained rims bind `CutRim`, and rebuilding the same model into a fresh
+    /// store resolves every name to identical geometry.
+    #[test]
+    fn box_window_band_names_are_rebuild_stable() {
+        use crate::topology::{EdgeName, FaceName, FaceRole, OpId, SegmentTag};
+
+        let (store_a, result_a) = named_wall_minus_box(2.0, 2.4);
+        let (store_b, _) = named_wall_minus_box(2.0, 2.4);
+
+        let band_name = |tag: &str| FaceName::Band {
+            op: OpId::new("cut1"),
+            tool_face: Box::new(FaceName::Created {
+                op: OpId::new("win1"),
+                role: FaceRole::Tagged(SegmentTag::new(tag)),
+            }),
+            loop_index: 0,
+        };
+
+        let shell_a = store_a
+            .shell(store_a.solid(result_a).unwrap().outer_shell)
+            .unwrap();
+        for tag in ["sill", "jamb-right", "head", "jamb-left"] {
+            let name = band_name(tag);
+            let fa = store_a.names().face(&name).expect("band resolves in A");
+            let fb = store_b.names().face(&name).expect("band resolves in B");
+            assert!(
+                shell_a.faces.contains(&fa),
+                "named band fragment lives in the result shell"
+            );
+            let sample = |store: &TopologyStore, f| match &store.face(f).unwrap().surface {
+                FaceSurface::Nurbs(s) => s.point_at(0.4, 0.3).unwrap(),
+                other => panic!("band fragment must be NURBS, got {other:?}"),
+            };
+            assert!(
+                (sample(&store_a, fa) - sample(&store_b, fb)).norm() < 1e-9,
+                "band fragment {tag} moved across rebuilds"
+            );
+        }
+
+        // Chained hole rims: entry on the outer wall face, exit on the inner.
+        for (target_tag, loop_index) in [("outer", 0u32), ("inner", 1u32)] {
+            let rim = EdgeName::CutRim {
+                op: OpId::new("cut1"),
+                target: Box::new(FaceName::Created {
+                    op: OpId::new("wall1"),
+                    role: FaceRole::Tagged(SegmentTag::new(target_tag)),
+                }),
+                loop_index,
+            };
+            assert!(
+                store_a.names().edge(&rim).is_some(),
+                "{target_tag} rim named in A"
+            );
+            assert!(
+                store_b.names().edge(&rim).is_some(),
+                "{target_tag} rim named in B"
+            );
+        }
+
+        // The wall's tagged faces transferred onto the punched result copies.
+        let outer = FaceName::Created {
+            op: OpId::new("wall1"),
+            role: FaceRole::Tagged(SegmentTag::new("outer")),
+        };
+        let outer_face = store_a.names().face(&outer).expect("outer resolves");
+        assert!(shell_a.faces.contains(&outer_face));
+        assert!(
+            !store_a.face(outer_face).unwrap().inner_wires.is_empty(),
+            "punched outer face carries the chained hole ring"
+        );
+    }
+
+    /// Acceptance B2 (parameter change): moving the box window keeps every
+    /// canonical name resolving to the same ROLE at the new location.
+    #[test]
+    fn box_window_names_survive_parameter_changes() {
+        use crate::topology::{FaceName, FaceRole, OpId, SegmentTag};
+
+        let (moved, _) = named_wall_minus_box(2.3, 2.4);
+
+        let sill_band = FaceName::Band {
+            op: OpId::new("cut1"),
+            tool_face: Box::new(FaceName::Created {
+                op: OpId::new("win1"),
+                role: FaceRole::Tagged(SegmentTag::new("sill")),
+            }),
+            loop_index: 0,
+        };
+        let band_face = moved.names().face(&sill_band).expect("sill band resolves");
+        let FaceSurface::Nurbs(surf) = &moved.face(band_face).unwrap().surface else {
+            panic!("band fragment must be NURBS");
+        };
+        // The sill fragment follows the moved tool: it stays the z = 1 plane
+        // strip, now spanning x in [2.3, 3.8].
+        let p = surf.point_at(0.5, 0.5).unwrap();
+        assert!((p.z - 1.0).abs() < 1e-9, "sill band stays at z = 1");
+        assert!(
+            p.x > 2.3 - 1e-9 && p.x < 3.8 + 1e-9,
+            "sill band moved with the box"
+        );
+
+        let outer = FaceName::Created {
+            op: OpId::new("wall1"),
+            role: FaceRole::Tagged(SegmentTag::new("outer")),
+        };
+        let outer_face = moved.names().face(&outer).expect("outer still resolves");
+        assert!(
+            !moved.face(outer_face).unwrap().inner_wires.is_empty(),
+            "moved window still punches the outer face"
+        );
+    }
+
+    /// Acceptance B3 (pocket variant): a box buried mid-wall cuts a blind
+    /// niche — 4 band fragments down to the shared buried ring, the flipped
+    /// buried cap as the floor (named `Floor`), and NO exit rim.
+    #[test]
+    fn buried_box_cuts_a_pocket_with_fragment_band_and_floor() {
+        use crate::topology::{EdgeName, FaceName, FaceRole, OpId, SegmentTag};
+
+        // Box from y = -1 to y = 0.25: enters the wall (y in [0, 0.4]) and
+        // ends inside it.
+        let (store, result) = named_wall_minus_box(2.0, 1.25);
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        assert_eq!(
+            shell.faces.len(),
+            11,
+            "6 wall faces + 4 band fragments + floor, got {}",
+            shell.faces.len()
+        );
+
+        // The floor: a planar face at y = 0.25 whose effective normal points
+        // back INTO the cavity (-Y).
+        let mut floor_found = false;
+        for &f in &shell.faces {
+            let face = store.face(f).unwrap();
+            if let FaceSurface::Plane(plane) = &face.surface {
+                if (plane.origin().y - 0.25).abs() < 1e-9 {
+                    let n = plane.plane_normal();
+                    let effective_y = if face.same_sense { n.y } else { -n.y };
+                    assert!(effective_y < 0.0, "pocket floor must face into the cavity");
+                    floor_found = true;
+                }
+            }
+        }
+        assert!(floor_found, "expected a planar pocket floor at y = 0.25");
+
+        // Names: all 4 fragment bands + the floor resolve; the exit rim does
+        // not exist.
+        for tag in ["sill", "jamb-right", "head", "jamb-left"] {
+            let band = FaceName::Band {
+                op: OpId::new("cut1"),
+                tool_face: Box::new(FaceName::Created {
+                    op: OpId::new("win1"),
+                    role: FaceRole::Tagged(SegmentTag::new(tag)),
+                }),
+                loop_index: 0,
+            };
+            assert!(
+                store.names().face(&band).is_some(),
+                "pocket band fragment {tag} resolves"
+            );
+        }
+        let floor = FaceName::Floor {
+            op: OpId::new("cut1"),
+            cap: Box::new(FaceName::Created {
+                op: OpId::new("win1"),
+                role: FaceRole::CapEnd,
+            }),
+        };
+        assert!(
+            store.names().face(&floor).is_some(),
+            "pocket floor resolves"
+        );
+        let exit_rim = EdgeName::CutRim {
+            op: OpId::new("cut1"),
+            target: Box::new(FaceName::Created {
+                op: OpId::new("wall1"),
+                role: FaceRole::Tagged(SegmentTag::new("inner")),
+            }),
+            loop_index: 1,
+        };
+        assert!(
+            store.names().edge(&exit_rim).is_none(),
+            "the exit rim genuinely no longer exists"
+        );
+
+        // The pocket result position-welds watertight.
+        let boundary = welded_boundary_edges(&store, result);
+        assert_eq!(
+            boundary, 0,
+            "buried-box pocket must position-weld watertight \
+             (found {boundary} boundary edges)"
+        );
+    }
+
+    /// Acceptance B4 (curved host): an annular segmented-prism wall (two arc
+    /// side faces + two radial end faces) cut by a radial box — the chained
+    /// entry/exit loops land on the CURVED arc faces, the punched cylindrical
+    /// faces stay conformal, and all 4 fragment bands resolve by name.
+    #[test]
+    fn curved_wall_box_window_through_arc_faces() {
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeSegmentedPrism, ProfileSegment};
+        use crate::topology::{FaceName, FaceRole, OpId, SegmentTag};
+        use std::f64::consts::PI;
+
+        let deg = |d: f64| d * PI / 180.0;
+        let mut store = TopologyStore::new();
+
+        // Annular wall strip: outer arc r = 8.4, inner arc r = 8.0, azimuth
+        // 60..120 degrees, extruded 2.5 up. The inner arc is traversed
+        // backwards via the -Z normal (the Phase A fillet convention).
+        let outer_start = Point3::new(8.4 * deg(60.0).cos(), 8.4 * deg(60.0).sin(), 0.0);
+        let outer_end = Point3::new(8.4 * deg(120.0).cos(), 8.4 * deg(120.0).sin(), 0.0);
+        let inner_start = Point3::new(8.0 * deg(120.0).cos(), 8.0 * deg(120.0).sin(), 0.0);
+        let inner_end = Point3::new(8.0 * deg(60.0).cos(), 8.0 * deg(60.0).sin(), 0.0);
+        let profile = vec![
+            ProfileSegment::Arc {
+                center: Point3::origin(),
+                radius: 8.4,
+                normal: Vector3::z(),
+                ref_dir: Vector3::x(),
+                start_angle: deg(60.0),
+                end_angle: deg(120.0),
+            },
+            ProfileSegment::Line {
+                start: outer_end,
+                end: inner_start,
+            },
+            ProfileSegment::Arc {
+                center: Point3::origin(),
+                radius: 8.0,
+                normal: -Vector3::z(),
+                ref_dir: Vector3::x(),
+                start_angle: deg(-120.0),
+                end_angle: deg(-60.0),
+            },
+            ProfileSegment::Line {
+                start: inner_end,
+                end: outer_start,
+            },
+        ];
+        let wall_tags: Vec<SegmentTag> = ["convex", "end-west", "concave", "end-east"]
+            .iter()
+            .map(|t| SegmentTag::new(*t))
+            .collect();
+        let wall = MakeSegmentedPrism::new(profile, Vector3::new(0.0, 0.0, 2.5))
+            .with_op_id(OpId::new("wall1"))
+            .with_segment_tags(wall_tags)
+            .execute(&mut store)
+            .unwrap();
+
+        // Radial box cutter through the wall at 90 degrees azimuth: window
+        // rectangle in the XZ plane at y = 6.5, extruded 2.6 along +Y.
+        let p = |x: f64, z: f64| Point3::new(x, 6.5, z);
+        let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+        let cutter_profile = vec![
+            line(p(-0.7, 0.9), p(0.7, 0.9)),
+            line(p(0.7, 0.9), p(0.7, 1.7)),
+            line(p(0.7, 1.7), p(-0.7, 1.7)),
+            line(p(-0.7, 1.7), p(-0.7, 0.9)),
+        ];
+        let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 2.6, 0.0))
+            .with_op_id(OpId::new("win1"))
+            .with_segment_tags(box_tags())
+            .execute(&mut store)
+            .unwrap();
+
+        let result =
+            subtract_through_cut(&mut store, wall, cutter, Some(&OpId::new("cut1"))).unwrap();
+
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        assert_eq!(shell.faces.len(), 10, "6 wall faces + 4 band fragments");
+
+        // Both punched faces are the CURVED arc faces (cylindrical patches).
+        for &f in &shell.faces {
+            let face = store.face(f).unwrap();
+            if face.inner_wires.is_empty() {
+                continue;
+            }
+            let FaceSurface::Nurbs(surf) = &face.surface else {
+                panic!("punched face must be NURBS");
+            };
+            let sample = surf.point_at(0.31, 0.62).unwrap();
+            let r = (sample.x * sample.x + sample.y * sample.y).sqrt();
+            assert!(
+                (r - 8.0).abs() < 1e-9 || (r - 8.4).abs() < 1e-9,
+                "punched face is not one of the arc walls (r = {r})"
+            );
+        }
+
+        // All 4 fragment bands resolve by name.
+        for tag in ["sill", "jamb-right", "head", "jamb-left"] {
+            let band = FaceName::Band {
+                op: OpId::new("cut1"),
+                tool_face: Box::new(FaceName::Created {
+                    op: OpId::new("win1"),
+                    role: FaceRole::Tagged(SegmentTag::new(tag)),
+                }),
+                loop_index: 0,
+            };
+            assert!(
+                store.names().face(&band).is_some(),
+                "curved-host band fragment {tag} resolves"
+            );
+        }
+
+        // Manifold and watertight under position welding.
+        let boundary = welded_boundary_edges(&store, result);
+        assert_eq!(
+            boundary, 0,
+            "curved wall − box window must position-weld watertight \
+             (found {boundary} boundary edges)"
+        );
     }
 
     #[test]

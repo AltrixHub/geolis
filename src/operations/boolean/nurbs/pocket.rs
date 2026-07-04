@@ -22,9 +22,10 @@ use crate::error::{OperationError, Result};
 use crate::geometry::surface::Surface;
 use crate::math::{Point2, TOLERANCE};
 use crate::tessellation::{tessellate_nurbs_curve_params, CurveTessellationOptions};
-use crate::topology::{EdgeCurve, FaceId, FaceSurface, TopologyStore, WireId};
+use crate::topology::{EdgeCurve, EdgeId, FaceId, FaceSurface, TopologyStore, WireId};
 
 use super::loops::CutLoop;
+use super::stitch::CutChain;
 
 /// The buried end of a pocket tool.
 pub(crate) struct BuriedEnd {
@@ -34,6 +35,25 @@ pub(crate) struct BuriedEnd {
     pub ring_wire: WireId,
     /// The buried cap face.
     pub cap_face: FaceId,
+}
+
+/// The buried end of a multi-face pocket tool: the shared bottom ring
+/// resolved across every side face the entry chain crosses.
+pub(crate) struct BuriedChainEnd {
+    /// The buried cap face (its flipped copy becomes the pocket floor).
+    pub cap_face: FaceId,
+    /// Per chain segment, in chain order: that side face's shared ring edge
+    /// at the buried end and the face's buried `v` bound.
+    pub rings: Vec<(EdgeId, f64)>,
+}
+
+/// Which parametric end of a tool side face is buried inside the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuriedSide {
+    /// The `v0` end.
+    Low,
+    /// The `v1` end.
+    High,
 }
 
 /// Resolves which end of the pocket tool is buried inside the target.
@@ -48,6 +68,63 @@ pub(crate) fn resolve_buried_end(
     entry: &CutLoop,
     tool_faces: &[FaceId],
 ) -> Result<BuriedEnd> {
+    let side = buried_side(store, entry)?;
+    let v_boundary = buried_v_bound(store, entry.tool_face, side)?;
+    let ring_edge = side_ring_edge(store, entry.tool_face, v_boundary)?;
+    let cap_face = cap_sharing_ring_edge(store, tool_faces, entry.tool_face, ring_edge)?;
+    Ok(BuriedEnd {
+        v_boundary,
+        ring_wire: store.face(cap_face)?.outer_wire,
+        cap_face,
+    })
+}
+
+/// Resolves the buried end of a multi-face pocket tool: the buried side is
+/// probed on the chain's first segment, then every crossed side face
+/// contributes its own shared ring edge at that end, and the buried cap must
+/// carry ALL of those edges on its outer wire (the shared bottom ring).
+///
+/// # Errors
+///
+/// Returns a typed error when the entry is grazing/ambiguous, a side face
+/// lacks pcurves or a boundary edge at the buried end, or no single cap
+/// shares the whole buried ring.
+pub(crate) fn resolve_buried_chain_end(
+    store: &TopologyStore,
+    entry: &CutChain,
+    tool_faces: &[FaceId],
+) -> Result<BuriedChainEnd> {
+    let first = entry
+        .segments
+        .first()
+        .ok_or_else(|| OperationError::Failed("empty chained entry loop".into()))?;
+    let side = buried_side(store, first)?;
+
+    let mut rings = Vec::with_capacity(entry.segments.len());
+    for seg in &entry.segments {
+        let v_boundary = buried_v_bound(store, seg.tool_face, side)?;
+        let ring_edge = side_ring_edge(store, seg.tool_face, v_boundary)?;
+        rings.push((ring_edge, v_boundary));
+    }
+
+    let cap_face = cap_sharing_ring_edge(store, tool_faces, first.tool_face, rings[0].0)?;
+    let cap_wire = store.wire(store.face(cap_face)?.outer_wire)?;
+    for &(edge, _) in &rings {
+        if !cap_wire.edges.iter().any(|oe| oe.edge == edge) {
+            return Err(OperationError::Failed(
+                "pocket subtract found no single tool cap sharing the whole \
+                 buried ring"
+                    .into(),
+            )
+            .into());
+        }
+    }
+    Ok(BuriedChainEnd { cap_face, rings })
+}
+
+/// Probes which side of the entry loop's tool face points INTO the target
+/// material: the direction against the target's outward normal.
+fn buried_side(store: &TopologyStore, entry: &CutLoop) -> Result<BuriedSide> {
     // Target outward normal at the entry loop.
     let target = store.face(entry.target_face)?;
     let FaceSurface::Nurbs(target_surf) = &target.surface else {
@@ -80,24 +157,42 @@ pub(crate) fn resolve_buried_end(
     let dot_lo = dot_toward(side_v - delta)?;
     let dot_hi = dot_toward(side_v + delta)?;
 
-    let v_boundary = match (dot_lo < -TOLERANCE, dot_hi < -TOLERANCE) {
-        (true, false) => v0,
-        (false, true) => v1,
-        _ => {
-            return Err(OperationError::Failed(
-                "pocket subtract could not resolve the buried tool end \
-                 (grazing or ambiguous entry)"
-                    .into(),
-            )
-            .into());
-        }
-    };
+    match (dot_lo < -TOLERANCE, dot_hi < -TOLERANCE) {
+        (true, false) => Ok(BuriedSide::Low),
+        (false, true) => Ok(BuriedSide::High),
+        _ => Err(OperationError::Failed(
+            "pocket subtract could not resolve the buried tool end \
+             (grazing or ambiguous entry)"
+                .into(),
+        )
+        .into()),
+    }
+}
 
-    // The shared ring edge at the buried boundary, via the side face's pcurves.
-    let side_wire = store.wire(side.outer_wire)?;
+/// The buried `v` bound of one tool side face for the given buried side.
+fn buried_v_bound(store: &TopologyStore, side_face: FaceId, side: BuriedSide) -> Result<f64> {
+    let face = store.face(side_face)?;
+    let FaceSurface::Nurbs(surf) = &face.surface else {
+        return Err(OperationError::Failed(
+            "pocket subtract requires a NURBS tool side face".into(),
+        )
+        .into());
+    };
+    let (_, (v0, v1)) = surf.parameter_domain();
+    Ok(match side {
+        BuriedSide::Low => v0,
+        BuriedSide::High => v1,
+    })
+}
+
+/// The shared ring edge of a tool side face at the buried `v` boundary, found
+/// via the face's pcurves.
+fn side_ring_edge(store: &TopologyStore, side_face: FaceId, v_boundary: f64) -> Result<EdgeId> {
+    let face = store.face(side_face)?;
+    let side_wire = store.wire(face.outer_wire)?;
     let mut ring_edge = None;
     for oe in &side_wire.edges {
-        let Some(pcurve) = side.pcurve_for(oe.edge) else {
+        let Some(pcurve) = face.pcurve_for(oe.edge) else {
             return Err(OperationError::Failed(
                 "pocket subtract requires a shared-edge tool (side face \
                  without pcurves)"
@@ -111,18 +206,25 @@ pub(crate) fn resolve_buried_end(
             ring_edge = Some(oe.edge);
         }
     }
-    let Some(ring_edge) = ring_edge else {
-        return Err(OperationError::Failed(
+    ring_edge.ok_or_else(|| {
+        OperationError::Failed(
             "pocket subtract found no side-face boundary edge at the buried \
              end"
             .into(),
         )
-        .into());
-    };
+        .into()
+    })
+}
 
-    // The buried cap: the tool face whose outer wire contains the ring edge.
+/// The tool cap face whose outer wire contains the given buried ring edge.
+fn cap_sharing_ring_edge(
+    store: &TopologyStore,
+    tool_faces: &[FaceId],
+    entry_side_face: FaceId,
+    ring_edge: EdgeId,
+) -> Result<FaceId> {
     for &f in tool_faces {
-        if f == entry.tool_face {
+        if f == entry_side_face {
             continue;
         }
         let face = store.face(f)?;
@@ -130,11 +232,7 @@ pub(crate) fn resolve_buried_end(
             continue;
         };
         if wire.edges.iter().any(|oe| oe.edge == ring_edge) {
-            return Ok(BuriedEnd {
-                v_boundary,
-                ring_wire: face.outer_wire,
-                cap_face: f,
-            });
+            return Ok(f);
         }
     }
     Err(OperationError::Failed(
@@ -165,7 +263,24 @@ pub(crate) fn buried_ring_uv(
         )
         .into());
     };
-    let edge = store.edge(ring.edge)?;
+    buried_edge_uv(store, ring.edge, v_boundary)
+}
+
+/// UV samples of ONE buried ring edge in its side face's parameter space: the
+/// straight `v = v_boundary` line at the edge curve's chord-adaptive
+/// parameters (same-parameter convention: the shared ring edge's curve
+/// parameter equals the side surface's `u`), so the band fragment rim and the
+/// pocket floor rim coincide.
+///
+/// # Errors
+///
+/// Propagates store lookups and curve sampling errors.
+pub(crate) fn buried_edge_uv(
+    store: &TopologyStore,
+    ring_edge: EdgeId,
+    v_boundary: f64,
+) -> Result<Vec<Point2>> {
+    let edge = store.edge(ring_edge)?;
     let EdgeCurve::Nurbs(curve) = &edge.curve else {
         return Err(
             OperationError::Failed("pocket buried ring edge must be a NURBS ring".into()).into(),
