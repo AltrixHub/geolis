@@ -2074,53 +2074,59 @@ mod tests {
         }
     }
 
+    /// Builds a 3-outer-segment wall (narrow tagged `outer-mid` piece,
+    /// x in [2.5, 3.0]) minus a box window at `x0` (window spans
+    /// `[x0, x0 + 1.5]`, covering `outer-mid` fully for `x0 in [1.5, 2.5]`).
+    fn named_middle_segment_wall_minus_box(x0: f64) -> (TopologyStore, SolidId) {
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeSegmentedPrism, ProfileSegment};
+        use crate::topology::{OpId, SegmentTag};
+
+        let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+        let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+        let mut store = TopologyStore::new();
+        let profile = vec![
+            line(p(0.0, 0.0), p(2.5, 0.0)), // outer-a
+            line(p(2.5, 0.0), p(3.0, 0.0)), // outer-mid (narrow)
+            line(p(3.0, 0.0), p(6.0, 0.0)), // outer-c
+            line(p(6.0, 0.0), p(6.0, 0.4)),
+            line(p(6.0, 0.4), p(0.0, 0.4)),
+            line(p(0.0, 0.4), p(0.0, 0.0)),
+        ];
+        let tags: Vec<SegmentTag> = [
+            "outer-a",
+            "outer-mid",
+            "outer-c",
+            "end-east",
+            "inner",
+            "end-west",
+        ]
+        .iter()
+        .map(|t| SegmentTag::new(*t))
+        .collect();
+        let wall = MakeSegmentedPrism::new(profile, Vector3::new(0.0, 0.0, 3.0))
+            .with_op_id(OpId::new("wall1"))
+            .with_segment_tags(tags)
+            .execute(&mut store)
+            .unwrap();
+        let cutter = MakeSegmentedPrism::new(box_window_profile(x0), Vector3::new(0.0, 2.4, 0.0))
+            .with_op_id(OpId::new("win1"))
+            .with_segment_tags(box_tags())
+            .execute(&mut store)
+            .unwrap();
+        let result =
+            subtract_through_cut(&mut store, wall, cutter, Some(&OpId::new("cut1"))).unwrap();
+        (store, result)
+    }
+
     /// Acceptance C2: a window spanning a full (narrow) middle segment
     /// severs that face into TWO kept fragments named `Split{{l|r}}`; the
     /// names re-resolve across rebuilds and after sliding the window.
     #[test]
     fn window_spanning_middle_segment_binds_split_names() {
-        use crate::math::Vector3;
-        use crate::operations::creation::{MakeSegmentedPrism, ProfileSegment};
         use crate::topology::{FaceName, FaceRole, OpId, SegmentTag, SplitSide};
 
-        let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
-        let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
-        let build = |x0: f64| -> (TopologyStore, SolidId) {
-            let mut store = TopologyStore::new();
-            let profile = vec![
-                line(p(0.0, 0.0), p(2.5, 0.0)), // outer-a
-                line(p(2.5, 0.0), p(3.0, 0.0)), // outer-mid (narrow)
-                line(p(3.0, 0.0), p(6.0, 0.0)), // outer-c
-                line(p(6.0, 0.0), p(6.0, 0.4)),
-                line(p(6.0, 0.4), p(0.0, 0.4)),
-                line(p(0.0, 0.4), p(0.0, 0.0)),
-            ];
-            let tags: Vec<SegmentTag> = [
-                "outer-a",
-                "outer-mid",
-                "outer-c",
-                "end-east",
-                "inner",
-                "end-west",
-            ]
-            .iter()
-            .map(|t| SegmentTag::new(*t))
-            .collect();
-            let wall = MakeSegmentedPrism::new(profile, Vector3::new(0.0, 0.0, 3.0))
-                .with_op_id(OpId::new("wall1"))
-                .with_segment_tags(tags)
-                .execute(&mut store)
-                .unwrap();
-            let cutter =
-                MakeSegmentedPrism::new(box_window_profile(x0), Vector3::new(0.0, 2.4, 0.0))
-                    .with_op_id(OpId::new("win1"))
-                    .with_segment_tags(box_tags())
-                    .execute(&mut store)
-                    .unwrap();
-            let result =
-                subtract_through_cut(&mut store, wall, cutter, Some(&OpId::new("cut1"))).unwrap();
-            (store, result)
-        };
+        let build = named_middle_segment_wall_minus_box;
 
         // Window x in [2.0, 3.5] covers outer-mid (x in [2.5, 3.0]) fully.
         let (store_a, result_a) = build(2.0);
