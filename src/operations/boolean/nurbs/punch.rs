@@ -8,7 +8,11 @@
 //!
 //! - The hole pcurve is a **degree-1 polyline** through the SSI trace points
 //!   (not a fitted rational arc); the trimmed CDT tessellator samples loops into
-//!   polylines anyway, so this is lossless for tessellation.
+//!   polylines anyway, so this is lossless for tessellation. Chained rings
+//!   ([`punch_chain`]) also build their 3D ring edges as degree-1 polylines
+//!   through the same samples, with knot-compatible target/tool pcurves —
+//!   the edge sample cache then serves ONE canonical 3D polyline per rim
+//!   edge to every face that references it (F6 R3 rim weld).
 //! - Loops on a geometrically closed tool arrive genuinely `closed` from the
 //!   SSI marcher (periodic-domain wrapping) with exact seam samples at every
 //!   crossing, shared by the punch (`uv_a`) and band (`uv_b`) rings. The ring's
@@ -21,8 +25,8 @@ use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::math::{Point2, Point3, TOLERANCE};
 use crate::topology::{
-    EdgeCurve, EdgeData, FaceId, FaceSurface, FaceTrim, OrientedEdge, TopologyStore, TrimLoop,
-    VertexData, WireData, WireId,
+    EdgeCurve, EdgeData, FaceId, FacePcurve, FaceSurface, FaceTrim, OrientedEdge, TopologyStore,
+    TrimLoop, VertexData, WireData, WireId,
 };
 
 use super::loops::CutLoop;
@@ -40,13 +44,26 @@ pub(crate) struct ChainRing {
     pub edges: Vec<crate::topology::EdgeId>,
     /// Per-junction shared vertices, in chain order.
     pub junctions: Vec<crate::topology::VertexId>,
+    /// Tool-UV pcurve of `edges[i]` (in segment `i`'s tool face parameter
+    /// space), knot-compatible with the ring edge — the band fragments
+    /// register these so edge-driven tessellation pins their rim vertices
+    /// to the same canonical edge samples as the punched target face.
+    pub tool_pcurves: Vec<NurbsCurve2D>,
 }
 
 /// Punches a chained loop onto its target face: the concatenated target-UV
 /// traces become one CW trim hole, and the 3D trace becomes a closed inner
-/// wire of one edge PER chain segment with shared junction vertices at the
-/// kink crossings — so the per-tool-face band fragments can each reference
-/// exactly their segment's ring edge (F2 shared-edge topology).
+/// wire of one degree-1 polyline edge PER chain segment (through the exact
+/// SSI samples) with shared junction vertices at the kink crossings — so the
+/// per-tool-face band fragments can each reference exactly their segment's
+/// ring edge (F2 shared-edge topology).
+///
+/// Each ring edge carries knot-compatible pcurves on BOTH sides: the
+/// target-UV pcurve is registered on the punched face here, the tool-UV
+/// pcurve is returned in the [`ChainRing`] for the band fragments. Both
+/// faces therefore take the edge-driven tessellation path and pin their rim
+/// vertices to the ONE canonical per-edge 3D polyline (exact cross-face
+/// coincidence — the F6 R3 rim weld).
 ///
 /// # Errors
 ///
@@ -70,7 +87,8 @@ pub(crate) fn punch_chain(store: &mut TopologyStore, chain: &CutChain) -> Result
     }
     let hole_loop = ssi_trim_loop(&uv, true)?;
 
-    // 2. Shared junction vertices + one interpolated 3D edge per segment.
+    // 2. Shared junction vertices + one degree-1 trace edge per segment with
+    //    lockstep target/tool pcurves (the shared trace-edge construction).
     let n = chain.segments.len();
     let mut junctions = Vec::with_capacity(n);
     for seg in &chain.segments {
@@ -82,24 +100,20 @@ pub(crate) fn punch_chain(store: &mut TopologyStore, chain: &CutChain) -> Result
         junctions.push(store.add_vertex(VertexData::new(start)));
     }
     let mut edges = Vec::with_capacity(n);
+    let mut target_pcurves = Vec::with_capacity(n);
+    let mut tool_pcurves = Vec::with_capacity(n);
     for (i, seg) in chain.segments.iter().enumerate() {
-        let pts = dedup3d(&seg.branch.points);
-        if pts.len() < 2 {
-            return Err(OperationError::Failed(
-                "chain segment degenerated to fewer than 2 distinct 3D points".into(),
-            )
-            .into());
-        }
-        let degree = 3.min(pts.len() - 1);
-        let (curve, _) = NurbsCurve3D::interpolate(&pts, degree)?;
-        let (t0, t1) = curve.parameter_domain();
-        edges.push(store.add_edge(EdgeData {
-            start: junctions[i],
-            end: junctions[(i + 1) % n],
-            curve: EdgeCurve::Nurbs(curve),
-            t_start: t0,
-            t_end: t1,
-        }));
+        let (edge, pcurve, tool_pcurve) = super::split::trace_edge(
+            store,
+            &seg.branch.points,
+            &seg.branch.uv_a,
+            &seg.branch.uv_b,
+            junctions[i],
+            junctions[(i + 1) % n],
+        )?;
+        edges.push(edge);
+        target_pcurves.push(pcurve);
+        tool_pcurves.push(tool_pcurve);
     }
     let wire = store.add_wire(WireData {
         edges: edges.iter().map(|&e| OrientedEdge::new(e, true)).collect(),
@@ -107,18 +121,23 @@ pub(crate) fn punch_chain(store: &mut TopologyStore, chain: &CutChain) -> Result
     });
 
     // 3. Attach to the face: full-domain outer trim if absent, push the hole,
-    //    append the inner wire.
+    //    append the inner wire, and register the target-UV ring pcurves so
+    //    the hole tessellates edge-driven.
     let face = store.face_mut(target_face)?;
     let trim = face
         .trim
         .get_or_insert_with(|| FaceTrim::new(full_domain_outer_loop(&surface), Vec::new()));
     trim.holes.push(hole_loop);
     face.inner_wires.push(wire);
+    for (&edge, curve) in edges.iter().zip(target_pcurves) {
+        face.pcurves.push(FacePcurve { edge, curve });
+    }
 
     Ok(ChainRing {
         wire,
         edges,
         junctions,
+        tool_pcurves,
     })
 }
 

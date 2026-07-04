@@ -21,7 +21,8 @@ pub use tessellate_solid::TessellateSolid;
 pub use tessellate_stroke::TessellateStroke;
 pub use tessellate_trimmed::tessellate_trimmed_nurbs_face;
 pub(crate) use tessellate_trimmed::{
-    edge_driven_outer_uv, tessellate_untrimmed_conforming, tessellate_with_outer_uv,
+    edge_driven_outer_uv, face_hole_loops_uv, tessellate_untrimmed_conforming,
+    tessellate_with_outer_uv, UvPinMap,
 };
 
 #[cfg(test)]

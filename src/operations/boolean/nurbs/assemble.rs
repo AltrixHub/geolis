@@ -495,6 +495,7 @@ fn ring_for_chain(
             wire,
             edges: topo.edges.clone(),
             junctions: topo.junctions.clone(),
+            tool_pcurves: topo.tool_pcurves.clone(),
         });
     }
     let mut remapped = chain.clone();

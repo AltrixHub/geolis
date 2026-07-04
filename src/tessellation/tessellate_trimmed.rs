@@ -15,10 +15,15 @@
 //! common boundary curve; the edge is sampled once per
 //! [`super::edge_samples::EdgeSampleCache`] and every face consumes the same
 //! polyline. NURBS faces carrying per-edge pcurves take the edge-driven outer
-//! loop ([`edge_driven_outer_uv`]); planar caps consume the cached 3D samples
-//! directly. Conformance is structural: both faces emit bit-identical
-//! boundary vertices by construction, and closed side surfaces (whose seam is
-//! not a topological edge) close their UV rectangle with seam connectors.
+//! loop ([`edge_driven_outer_uv`]) and edge-driven hole loops
+//! ([`face_hole_loops_uv`]); planar caps consume the cached 3D samples
+//! directly. On the edge-driven paths every boundary vertex is **3D-pinned**
+//! ([`UvPinMap`]): the emitted position is the canonical cached edge sample,
+//! not `surface.point_at(uv)`, so two faces meeting at an edge emit
+//! bit-identical boundary vertices even when their surfaces disagree by the
+//! SSI marcher's acceptance residual (the F6 R3 rim weld). Closed side
+//! surfaces (whose seam is not a topological edge) close their UV rectangle
+//! with seam connectors.
 //!
 //! **Design (a) — solid-agnostic boundary-conforming sampling (fallback for
 //! faces without pcurves, e.g. the curved slab / wall builders):** any face
@@ -43,8 +48,8 @@ use spade::{
 use crate::error::{Result, TessellationError};
 use crate::geometry::nurbs::{NurbsCurve2D, NurbsSurface};
 use crate::geometry::surface::Surface;
-use crate::math::{Point2, Vector3};
-use crate::topology::{FaceData, FaceTrim, TopologyStore, TrimLoop};
+use crate::math::{Point2, Point3, Vector3};
+use crate::topology::{FaceData, FaceTrim, TopologyStore, TrimLoop, WireId};
 
 use super::edge_samples::EdgeSampleCache;
 use super::tessellate_nurbs::{
@@ -61,6 +66,23 @@ const PCURVE_SEGMENT_SAMPLES: usize = 32;
 /// Minimum UV separation between consecutive polyline points. Points closer than
 /// this are merged so spade never receives duplicate constraint vertices.
 const MERGE_EPS: f64 = 1e-9;
+
+/// Canonical 3D positions for boundary UV vertices lying on shared edges,
+/// keyed by the exact UV bit pattern.
+///
+/// Edge-driven boundary loops record one entry per (pcurve-mapped) edge
+/// sample; when the CDT emits a vertex at a pinned UV, its 3D position is the
+/// cached edge sample instead of `surface.point_at(uv)`. Every face
+/// referencing the edge therefore emits the bit-identical 3D vertex — the
+/// same canonical polyline the planar-cap path consumes directly — so
+/// cross-face rim coincidence is exact (no marcher-residual near-duplicates,
+/// no tolerance-based post-weld).
+pub(crate) type UvPinMap = HashMap<(u64, u64), Point3>;
+
+/// The exact-bits pin key of a UV point.
+fn pin_key(p: &Point2) -> (u64, u64) {
+    (p.x.to_bits(), p.y.to_bits())
+}
 
 /// Tessellates a trimmed NURBS face into a triangle mesh.
 ///
@@ -84,7 +106,7 @@ pub fn tessellate_trimmed_nurbs_face(
     let outer = outer_loop_uv(surface, &trim.outer)?;
     let holes: Vec<Vec<Point2>> = trim.holes.iter().map(sample_loop).collect::<Result<_>>()?;
 
-    tessellate_cdt(surface, &outer, &holes, options)
+    tessellate_cdt(surface, &outer, &holes, &UvPinMap::new(), options)
 }
 
 /// Tessellates an untrimmed NURBS face whose outer boundary is the full
@@ -103,7 +125,7 @@ pub(crate) fn tessellate_untrimmed_conforming(
 ) -> Result<TriangleMesh> {
     validate_options(options)?;
     let outer = conforming_boundary_uv(surface, BOUNDARY_CHORD_TOLERANCE)?;
-    tessellate_cdt(surface, &outer, &[], options)
+    tessellate_cdt(surface, &outer, &[], &UvPinMap::new(), options)
 }
 
 /// Chooses the outer-loop UV sampling: boundary-conforming when the loop is the
@@ -116,31 +138,68 @@ fn outer_loop_uv(surface: &NurbsSurface, outer: &TrimLoop) -> Result<Vec<Point2>
     }
 }
 
-/// Tessellates a NURBS face whose outer UV loop was assembled by the caller
-/// (edge-driven path), with hole loops sampled from the trim as usual.
+/// Tessellates a NURBS face whose outer UV loop and hole loops were assembled
+/// by the caller (edge-driven path), with the caller's pin map anchoring
+/// boundary vertices to the canonical shared-edge samples.
 ///
 /// # Errors
 ///
-/// Propagates option-validation, loop-sampling, and CDT construction errors.
+/// Propagates option-validation and CDT construction errors.
 pub(crate) fn tessellate_with_outer_uv(
     surface: &NurbsSurface,
     outer: &[Point2],
-    trim: Option<&FaceTrim>,
+    holes: &[Vec<Point2>],
+    pins: &UvPinMap,
     options: &SurfaceTessellationOptions,
 ) -> Result<TriangleMesh> {
     validate_options(options)?;
-    let holes: Vec<Vec<Point2>> = match trim {
-        Some(t) => t.holes.iter().map(sample_loop).collect::<Result<_>>()?,
-        None => Vec::new(),
+    tessellate_cdt(surface, outer, holes, pins, options)
+}
+
+/// One UV chain per wire edge (traversal order), mapped from the shared edge
+/// samples through the face's pcurves, with every sample's canonical 3D point
+/// recorded in `pins`. Returns `None` when the face records no pcurve for
+/// some wire edge (legacy face) — the caller falls back to geometric paths.
+fn wire_uv_chains(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    face: &FaceData,
+    wire_id: WireId,
+    pins: &mut UvPinMap,
+) -> Result<Option<Vec<Vec<Point2>>>> {
+    let Ok(wire) = store.wire(wire_id) else {
+        return Ok(None);
     };
-    tessellate_cdt(surface, outer, &holes, options)
+    if wire.edges.is_empty() {
+        return Ok(None);
+    }
+    let oriented: Vec<crate::topology::OrientedEdge> = wire.edges.clone();
+
+    let mut chains: Vec<Vec<Point2>> = Vec::with_capacity(oriented.len());
+    for oe in &oriented {
+        let Some(pcurve) = face.pcurve_for(oe.edge) else {
+            return Ok(None);
+        };
+        let samples = cache.get(store, oe.edge)?;
+        let mut uv = Vec::with_capacity(samples.params.len());
+        for (&t, &p3) in samples.params.iter().zip(&samples.points) {
+            let q = pcurve.point_at(t)?;
+            pins.insert(pin_key(&q), p3);
+            uv.push(q);
+        }
+        if !oe.forward {
+            uv.reverse();
+        }
+        chains.push(uv);
+    }
+    Ok(Some(chains))
 }
 
 /// Builds the outer UV polyline of a face from its outer wire's shared edge
 /// samples mapped through the face's pcurves — the edge-driven boundary path
 /// of shared-edge topology. Every face referencing an edge consumes the same
-/// cached samples, so adjacent faces emit identical 3D boundary vertices by
-/// construction.
+/// cached samples (and pins their canonical 3D positions), so adjacent faces
+/// emit identical 3D boundary vertices by construction.
 ///
 /// Consecutive wire edges whose UV images do not meet (a geometrically closed
 /// direction whose seam is not a topological edge) are joined by an
@@ -159,31 +218,11 @@ pub(crate) fn edge_driven_outer_uv(
     face: &FaceData,
     surface: &NurbsSurface,
     options: &SurfaceTessellationOptions,
+    pins: &mut UvPinMap,
 ) -> Result<Option<Vec<Point2>>> {
-    let Ok(wire) = store.wire(face.outer_wire) else {
+    let Some(chains) = wire_uv_chains(store, cache, face, face.outer_wire, pins)? else {
         return Ok(None);
     };
-    if wire.edges.is_empty() {
-        return Ok(None);
-    }
-    let oriented: Vec<crate::topology::OrientedEdge> = wire.edges.clone();
-
-    // One UV chain per wire edge, in traversal order.
-    let mut chains: Vec<Vec<Point2>> = Vec::with_capacity(oriented.len());
-    for oe in &oriented {
-        let Some(pcurve) = face.pcurve_for(oe.edge) else {
-            return Ok(None);
-        };
-        let samples = cache.get(store, oe.edge)?;
-        let mut uv = Vec::with_capacity(samples.params.len());
-        for &t in &samples.params {
-            uv.push(pcurve.point_at(t)?);
-        }
-        if !oe.forward {
-            uv.reverse();
-        }
-        chains.push(uv);
-    }
 
     // Assemble the loop, inserting seam connectors where consecutive chains do
     // not meet in UV.
@@ -205,6 +244,74 @@ pub(crate) fn edge_driven_outer_uv(
         return Ok(None);
     }
     Ok(Some(pts))
+}
+
+/// Builds one hole's UV polyline from its inner wire's shared edge samples
+/// mapped through the face's pcurves (with canonical 3D pins) — the
+/// edge-driven counterpart of [`edge_driven_outer_uv`] for hole rings.
+///
+/// Hole rings are interior loops, so consecutive chains must meet exactly
+/// (no seam connectors); a gap or a missing pcurve falls back to the trim
+/// hole sampling (`None`).
+fn edge_driven_hole_uv(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    face: &FaceData,
+    wire_id: WireId,
+    pins: &mut UvPinMap,
+) -> Result<Option<Vec<Point2>>> {
+    let Some(chains) = wire_uv_chains(store, cache, face, wire_id, pins)? else {
+        return Ok(None);
+    };
+    let mut pts: Vec<Point2> = Vec::new();
+    let n = chains.len();
+    for i in 0..n {
+        let Some(&end) = chains[i].last() else {
+            return Ok(None);
+        };
+        if (end - chains[(i + 1) % n][0]).norm() > MERGE_EPS {
+            return Ok(None);
+        }
+        pts.extend_from_slice(&chains[i]);
+    }
+    dedup_closed(&mut pts);
+    if pts.len() < 3 {
+        return Ok(None);
+    }
+    Ok(Some(pts))
+}
+
+/// Assembles a face's hole UV loops for the edge-driven tessellation path:
+/// inner wires whose edges all carry pcurves sample edge-driven (pinned to
+/// the canonical shared-edge 3D polylines); the rest fall back to the
+/// matching trim hole loop (punch lockstep order). An inner wire with
+/// neither pcurves nor a trim hole is 3D-only bookkeeping (e.g. a band
+/// face's exit ring) and contributes no CDT hole.
+///
+/// # Errors
+///
+/// Propagates store lookups, pcurve evaluation, and trim sampling errors.
+pub(crate) fn face_hole_loops_uv(
+    store: &TopologyStore,
+    cache: &mut EdgeSampleCache,
+    face: &FaceData,
+    pins: &mut UvPinMap,
+) -> Result<Vec<Vec<Point2>>> {
+    let trim_holes: &[TrimLoop] = face.trim.as_ref().map_or(&[], |t| t.holes.as_slice());
+    let mut holes: Vec<Vec<Point2>> = Vec::with_capacity(face.inner_wires.len());
+    for (i, &wire_id) in face.inner_wires.iter().enumerate() {
+        if let Some(loop_uv) = edge_driven_hole_uv(store, cache, face, wire_id, pins)? {
+            holes.push(loop_uv);
+        } else if let Some(hole) = trim_holes.get(i) {
+            holes.push(sample_loop(hole)?);
+        }
+    }
+    // Trim holes beyond the paired range (no matching inner wire) keep the
+    // plain trim sampling.
+    for hole in trim_holes.iter().skip(face.inner_wires.len()) {
+        holes.push(sample_loop(hole)?);
+    }
+    Ok(holes)
 }
 
 /// Appends the interior points of a straight axis-aligned UV connector from
@@ -278,6 +385,7 @@ fn tessellate_cdt(
     surface: &NurbsSurface,
     outer: &[Point2],
     holes: &[Vec<Point2>],
+    pins: &UvPinMap,
     options: &SurfaceTessellationOptions,
 ) -> Result<TriangleMesh> {
     // Adaptive UV grid (shared with the full-domain tessellator).
@@ -332,7 +440,13 @@ fn tessellate_cdt(
             } else {
                 let pos = vh.position();
                 let (u, v) = (pos.x, pos.y);
-                let p3 = surface.point_at(u, v)?;
+                // Boundary vertices on shared edges take the canonical
+                // per-edge 3D sample (bit-identical across the faces that
+                // reference the edge); everything else evaluates the surface.
+                let p3 = match pins.get(&pin_key(&Point2::new(u, v))) {
+                    Some(&pinned) => pinned,
+                    None => surface.point_at(u, v)?,
+                };
                 // A collapsed pole yields a zero normal; fall back to +Z so the
                 // mesh stays well-formed, matching the full-domain tessellator.
                 let n = surface.normal(u, v).unwrap_or_else(|_| Vector3::z());

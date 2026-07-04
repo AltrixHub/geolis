@@ -48,7 +48,7 @@ use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{KnotVector, NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 use crate::math::Point2;
 use crate::topology::{
-    EdgeCurve, EdgeData, EdgeId, FaceData, FaceId, FaceSurface, FaceTrim, OrientedEdge,
+    EdgeCurve, EdgeData, EdgeId, FaceData, FaceId, FacePcurve, FaceSurface, FaceTrim, OrientedEdge,
     TopologyStore, TrimLoop, VertexId, WireData, WireId,
 };
 
@@ -376,6 +376,15 @@ pub(crate) fn build_band_fragments(
             is_closed: true,
         });
 
+        let pcurves = fragment_pcurves(
+            store,
+            entry_ring,
+            exit_ring,
+            run,
+            exit_run,
+            &[kink_start, kink_end],
+        )?;
+
         // Subtract: band normals point INTO the hole (`same_sense = false`).
         let face = store.add_face(FaceData {
             surface: FaceSurface::Nurbs(surface),
@@ -383,7 +392,7 @@ pub(crate) fn build_band_fragments(
             inner_wires: Vec::new(),
             same_sense: false,
             trim: Some(trim),
-            pcurves: Vec::new(),
+            pcurves,
         });
         fragments.push(BandFragment { tool_face, face });
     }
@@ -498,6 +507,9 @@ pub(crate) fn build_open_band_fragments(
             is_closed: true,
         });
 
+        let pcurves =
+            fragment_pcurves(store, entry_ring, exit_ring, run, exit_run, &[left, right])?;
+
         // Subtract: band normals point INTO the doorway (`same_sense = false`).
         let face = store.add_face(FaceData {
             surface: FaceSurface::Nurbs(surface),
@@ -505,7 +517,7 @@ pub(crate) fn build_open_band_fragments(
             inner_wires: Vec::new(),
             same_sense: false,
             trim: Some(trim),
-            pcurves: Vec::new(),
+            pcurves,
         });
         fragments.push(BandFragment { tool_face, face });
     }
@@ -623,6 +635,98 @@ pub(crate) fn build_pocket_band_fragments(
         fragments.push(BandFragment { tool_face, face });
     }
     Ok(fragments)
+}
+
+/// Builds one band fragment's pcurve table: the ring edges' tool-UV pcurves
+/// (entry + exit runs, knot-compatible with the shared trace edges) plus one
+/// straight connector pcurve per kink / cap-plane closure edge. With every
+/// outer-wire edge covered, the fragment tessellates edge-driven and pins
+/// its rim vertices to the canonical per-edge 3D samples — exactly the
+/// vertices the punched / split target faces emit (F6 R3 rim weld).
+fn fragment_pcurves(
+    store: &TopologyStore,
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+    run: &ToolRun,
+    exit_run: &ToolRun,
+    connectors: &[EdgeId],
+) -> Result<Vec<FacePcurve>> {
+    let mut pcurves: Vec<FacePcurve> = Vec::new();
+    for &k in &run.indices {
+        pcurves.push(FacePcurve {
+            edge: entry_ring.edges[k],
+            curve: entry_ring.tool_pcurves[k].clone(),
+        });
+    }
+    for &k in &exit_run.indices {
+        pcurves.push(FacePcurve {
+            edge: exit_ring.edges[k],
+            curve: exit_ring.tool_pcurves[k].clone(),
+        });
+    }
+    // Connector edges run from an ENTRY junction (edge start) to an EXIT
+    // junction (edge end) by construction; their UV endpoints are the
+    // matching ring pcurve terminals, so the assembled UV loop closes
+    // bit-exactly at the junctions.
+    for &conn in connectors {
+        let edge = store.edge(conn)?;
+        let (start_vertex, end_vertex) = (edge.start, edge.end);
+        let start_uv = ring_terminal_uv(entry_ring, run, start_vertex)?;
+        let end_uv = ring_terminal_uv(exit_ring, exit_run, end_vertex)?;
+        pcurves.push(FacePcurve {
+            edge: conn,
+            curve: connector_pcurve(store, conn, start_uv, end_uv)?,
+        });
+    }
+    Ok(pcurves)
+}
+
+/// The tool-UV image of a run terminal junction: the matching terminal
+/// control point of the run's first / last ring pcurve (bit-exact with the
+/// ring chain ends, so junction UV values coincide across wire edges).
+fn ring_terminal_uv(ring: &ChainRing, run: &ToolRun, vertex: VertexId) -> Result<Point2> {
+    // Closed rings have one junction per edge (cyclic); open rings carry one
+    // extra tail terminal vertex.
+    let closed = ring.junctions.len() == ring.edges.len();
+    let first_vertex = ring.junctions[run.first()];
+    let end_index = if closed {
+        (run.last() + 1) % ring.edges.len()
+    } else {
+        run.last() + 1
+    };
+    let last_vertex = ring.junctions[end_index];
+    let terminal = if vertex == first_vertex {
+        ring.tool_pcurves[run.first()].control_points().first()
+    } else if vertex == last_vertex {
+        ring.tool_pcurves[run.last()].control_points().last()
+    } else {
+        return Err(OperationError::Failed(
+            "band connector edge does not land on the run's terminal junctions".into(),
+        )
+        .into());
+    };
+    terminal
+        .copied()
+        .ok_or_else(|| OperationError::Failed("ring pcurve without control points".into()).into())
+}
+
+/// A degree-1 UV pcurve for a straight connector edge (kink crossing or
+/// cap-plane closure), knot-compatible with the edge's 3D polyline:
+/// `t_start` maps to `start_uv`, `t_end` to `end_uv`.
+fn connector_pcurve(
+    store: &TopologyStore,
+    edge: EdgeId,
+    start_uv: Point2,
+    end_uv: Point2,
+) -> Result<NurbsCurve2D> {
+    let data = store.edge(edge)?;
+    let EdgeCurve::Nurbs(curve) = &data.curve else {
+        return Err(
+            OperationError::Failed("band connector edge must be a NURBS polyline".into()).into(),
+        );
+    };
+    let knots = KnotVector::new(curve.knots().as_slice().to_vec())?;
+    NurbsCurve2D::from_unweighted(vec![start_uv, end_uv], knots, 1)
 }
 
 /// The vertex shared by two edges (a tool ring corner).
