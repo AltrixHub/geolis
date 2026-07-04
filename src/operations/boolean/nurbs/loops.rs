@@ -18,11 +18,14 @@
 //! and is rejected with a typed error (general boolean face splitting will
 //! lift this).
 
+use std::collections::HashMap;
+
 use crate::error::{OperationError, Result};
 use crate::geometry::nurbs::{
     intersect_surfaces, IntersectionOptions, NurbsSurface, SurfaceIntersectionCurve,
 };
-use crate::topology::{FaceId, FaceSurface, TopologyStore};
+use crate::math::Point2;
+use crate::topology::{FaceId, FaceSurface, TopologyStore, TrimLoop};
 
 use super::stitch::{self, CutChain};
 
@@ -89,6 +92,21 @@ pub(crate) fn extract_cut_loops(
     target_faces: &[(FaceId, NurbsSurface)],
     tool_faces: &[(FaceId, NurbsSurface)],
 ) -> Result<Vec<ToolFaceCut>> {
+    extract_cut_loops_trimmed(target_faces, tool_faces, &HashMap::new())
+}
+
+/// [`extract_cut_loops`] with per-target-face UV trim regions: an SSI branch
+/// whose target trace lies outside its face's kept trim region is dropped.
+///
+/// Required for targets carrying split fragments: two fragments of one
+/// split face share the SAME untrimmed parent surface, so a later cut's SSI
+/// yields the identical branch once per fragment — only the fragment whose
+/// kept region contains the trace actually receives the cut.
+pub(crate) fn extract_cut_loops_trimmed(
+    target_faces: &[(FaceId, NurbsSurface)],
+    tool_faces: &[(FaceId, NurbsSurface)],
+    target_trims: &HashMap<FaceId, TrimRegion>,
+) -> Result<Vec<ToolFaceCut>> {
     let options = IntersectionOptions::default();
     let mut loops: Vec<CutLoop> = Vec::new();
     let mut open_segments: Vec<CutLoop> = Vec::new();
@@ -105,6 +123,13 @@ pub(crate) fn extract_cut_loops(
             for branch in branches {
                 if branch.points.len() < 3 {
                     continue;
+                }
+                // Drop branches outside the target face's kept trim region
+                // (a twin fragment of the same parent surface owns them).
+                if let Some(region) = target_trims.get(target_id) {
+                    if !region.contains(branch.uv_a[branch.uv_a.len() / 2]) {
+                        continue;
+                    }
                 }
                 // An open branch is acceptable only when BOTH endpoints sit
                 // on a tool kink edge or a target face boundary (chained
@@ -235,9 +260,25 @@ fn group_chains(
         match group.len() {
             1 => {
                 let entry = group.pop().unwrap_or_else(|| unreachable!());
+                if !entry.closed {
+                    return Err(OperationError::Failed(
+                        "cap-touching cut chain without a matching exit chain \
+                         (a blind cap-touching cut is unsupported)"
+                            .into(),
+                    )
+                    .into());
+                }
                 cuts.push(ToolFaceCut::MultiFacePocket { entry });
             }
             2 => {
+                if group[0].closed != group[1].closed {
+                    return Err(OperationError::Failed(
+                        "chained cut loops of one tool face group disagree on \
+                         cap contact (one open, one closed)"
+                            .into(),
+                    )
+                    .into());
+                }
                 group.sort_by(|a, b| {
                     a.mean_v()
                         .partial_cmp(&b.mean_v())
@@ -324,6 +365,77 @@ pub(crate) fn collect_nurbs_faces(
         }
     }
     out
+}
+
+/// A face's kept UV region, sampled from its trim loops: inside the outer
+/// polygon and outside every hole polygon.
+#[derive(Debug, Clone)]
+pub(crate) struct TrimRegion {
+    outer: Vec<Point2>,
+    holes: Vec<Vec<Point2>>,
+}
+
+impl TrimRegion {
+    /// Whether a UV point lies in the kept region.
+    pub(crate) fn contains(&self, uv: Point2) -> bool {
+        super::split::polygon_contains(&self.outer, uv)
+            && !self
+                .holes
+                .iter()
+                .any(|hole| super::split::polygon_contains(hole, uv))
+    }
+}
+
+/// Builds the [`TrimRegion`] map of every trimmed target NURBS face.
+///
+/// # Errors
+///
+/// Returns an error when a trim curve cannot be evaluated.
+pub(crate) fn collect_trim_regions(
+    store: &TopologyStore,
+    faces: &[FaceId],
+) -> Result<HashMap<FaceId, TrimRegion>> {
+    let mut out = HashMap::new();
+    for &fid in faces {
+        let Ok(face) = store.face(fid) else {
+            continue;
+        };
+        if !matches!(face.surface, FaceSurface::Nurbs(_)) {
+            continue;
+        }
+        let Some(trim) = &face.trim else {
+            continue;
+        };
+        let outer = trim_polygon(&trim.outer)?;
+        let mut holes = Vec::with_capacity(trim.holes.len());
+        for hole in &trim.holes {
+            holes.push(trim_polygon(hole)?);
+        }
+        out.insert(fid, TrimRegion { outer, holes });
+    }
+    Ok(out)
+}
+
+/// Samples a trim loop into a UV polygon at its curves' knot breakpoints
+/// (exact for the degree-1 loops the boolean pipeline builds).
+fn trim_polygon(loop_: &TrimLoop) -> Result<Vec<Point2>> {
+    let mut poly: Vec<Point2> = Vec::new();
+    for curve in &loop_.curves {
+        let (t0, t1) = curve.parameter_domain();
+        for &t in curve.knots().as_slice() {
+            if t < t0 || t > t1 {
+                continue;
+            }
+            let p = curve.point_at(t)?;
+            if poly.last().is_none_or(|q| (p - *q).norm() > 1e-12) {
+                poly.push(p);
+            }
+        }
+    }
+    while poly.len() >= 2 && (poly[0] - poly[poly.len() - 1]).norm() < 1e-12 {
+        poly.pop();
+    }
+    Ok(poly)
 }
 
 #[cfg(test)]

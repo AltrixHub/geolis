@@ -245,6 +245,27 @@ fn tool_runs(chain: &CutChain) -> Result<Vec<ToolRun>> {
     Ok(runs)
 }
 
+/// Groups an OPEN chain's segments into linear contiguous runs per tool
+/// face, from the chain head (a single-face open chain yields one run).
+fn open_tool_runs(chain: &CutChain) -> Vec<ToolRun> {
+    let n = chain.segments.len();
+    let mut runs: Vec<ToolRun> = Vec::new();
+    let mut start = 0usize;
+    while start < n {
+        let face = chain.segments[start].tool_face;
+        let mut len = 1usize;
+        while start + len < n && chain.segments[start + len].tool_face == face {
+            len += 1;
+        }
+        runs.push(ToolRun {
+            face,
+            indices: (start..start + len).collect(),
+        });
+        start += len;
+    }
+    runs
+}
+
 /// Builds the band fragments of a multi-face through cut: ONE face per tool
 /// side face crossed by the chained loops, each trimmed to that face's chain
 /// segments (possibly several, when the loop crosses target face boundaries
@@ -367,6 +388,155 @@ pub(crate) fn build_band_fragments(
         fragments.push(BandFragment { tool_face, face });
     }
     Ok(fragments)
+}
+
+/// Builds the band fragments of an OPEN (cap-touching) through cut: one
+/// face per tool-face run, sharing the entry / exit trace edges with the
+/// split target-face fragments and NEW kink-crossing edges with adjacent
+/// band fragments — plus TWO cap-plane closure edges joining the entry and
+/// exit chains' matching terminals. The closure edges are returned so the
+/// cap-notch rebuild can share them (the notched cap gains exactly these
+/// edges — watertight by construction).
+///
+/// The entry and exit chains are normalized to the same geometric direction
+/// (their lexicographically smaller terminals come first), so their
+/// tool-face runs align index-to-index and their terminals pair start-to-
+/// start / end-to-end.
+///
+/// # Errors
+///
+/// Returns an error when the chains' tool-face runs disagree, a tool face
+/// is not NURBS, or a fragment polygon degenerates.
+pub(crate) fn build_open_band_fragments(
+    store: &mut TopologyStore,
+    entry: &CutChain,
+    exit: &CutChain,
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+) -> Result<(Vec<BandFragment>, [EdgeId; 2])> {
+    let entry_runs = open_tool_runs(entry);
+    let exit_runs = open_tool_runs(exit);
+    let n_runs = entry_runs.len();
+    if n_runs == 0 || exit_runs.len() != n_runs {
+        return Err(OperationError::Failed(
+            "cap-touching through cut requires entry and exit chains \
+             crossing the same tool side faces"
+                .into(),
+        )
+        .into());
+    }
+    for (a, b) in entry_runs.iter().zip(&exit_runs) {
+        if a.face != b.face {
+            return Err(OperationError::Failed(
+                "entry and exit chained loops cross different tool side \
+                 faces"
+                    .into(),
+            )
+            .into());
+        }
+    }
+
+    // Terminal closure edges (start / end), lying in the cap planes.
+    let start_closure = closure_edge(store, entry, exit, entry_ring, exit_ring, false)?;
+    let end_closure = closure_edge(store, entry, exit, entry_ring, exit_ring, true)?;
+
+    // One interior kink-crossing edge per run junction (i | i + 1).
+    let mut kinks: Vec<EdgeId> = Vec::with_capacity(n_runs.saturating_sub(1));
+    for i in 0..n_runs.saturating_sub(1) {
+        let entry_idx = entry_runs[i + 1].first();
+        let exit_idx = exit_runs[i + 1].first();
+        kinks.push(straight_edge(
+            store,
+            entry_ring.junctions[entry_idx],
+            exit_ring.junctions[exit_idx],
+            entry.segments[entry_idx].branch.points[0],
+            exit.segments[exit_idx].branch.points[0],
+        )?);
+    }
+
+    let mut fragments = Vec::with_capacity(n_runs);
+    for (i, run) in entry_runs.iter().enumerate() {
+        let tool_face = run.face;
+        let surface = match &store.face(tool_face)?.surface {
+            FaceSurface::Nurbs(s) => s.clone(),
+            _ => {
+                return Err(OperationError::Failed(
+                    "through-cut band requires a NURBS tool side face".into(),
+                )
+                .into())
+            }
+        };
+        let exit_run = &exit_runs[i];
+
+        // Trim ribbon between the two concatenated tool-UV traces.
+        let mut entry_uv: Vec<Point2> = Vec::new();
+        for &k in &run.indices {
+            entry_uv.extend_from_slice(&entry.segments[k].branch.uv_b);
+        }
+        let mut exit_uv: Vec<Point2> = Vec::new();
+        for &k in &exit_run.indices {
+            exit_uv.extend_from_slice(&exit.segments[k].branch.uv_b);
+        }
+        let entry_trace = clamp_trace(&entry_uv, &surface);
+        let exit_trace = clamp_trace(&exit_uv, &surface);
+        let outer = stitch_band_loop(&entry_trace, &exit_trace)?;
+        let trim = FaceTrim::new(outer, Vec::new());
+
+        let left = if i == 0 { start_closure } else { kinks[i - 1] };
+        let right = if i == n_runs - 1 {
+            end_closure
+        } else {
+            kinks[i]
+        };
+        let mut cycle: Vec<EdgeId> = run.indices.iter().map(|&k| entry_ring.edges[k]).collect();
+        cycle.push(right);
+        cycle.extend(exit_run.indices.iter().rev().map(|&k| exit_ring.edges[k]));
+        cycle.push(left);
+        let wire_edges = orient_cycle(store, &cycle)?;
+        let wire = store.add_wire(WireData {
+            edges: wire_edges,
+            is_closed: true,
+        });
+
+        // Subtract: band normals point INTO the doorway (`same_sense = false`).
+        let face = store.add_face(FaceData {
+            surface: FaceSurface::Nurbs(surface),
+            outer_wire: wire,
+            inner_wires: Vec::new(),
+            same_sense: false,
+            trim: Some(trim),
+            pcurves: Vec::new(),
+        });
+        fragments.push(BandFragment { tool_face, face });
+    }
+    Ok((fragments, [start_closure, end_closure]))
+}
+
+/// Builds one terminal closure edge between the entry and exit chains'
+/// matching terminals (`tail == false`: chain heads; `true`: chain tails).
+/// The edge is a straight segment in the cap plane, exact for extruded
+/// tools whose section at the cap is a straight line across the target
+/// thickness.
+fn closure_edge(
+    store: &mut TopologyStore,
+    entry: &CutChain,
+    exit: &CutChain,
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+    tail: bool,
+) -> Result<EdgeId> {
+    let terminal = |chain: &CutChain, ring: &ChainRing| -> (VertexId, crate::math::Point3) {
+        if tail {
+            let seg = chain.segments.last().unwrap_or_else(|| unreachable!());
+            let p = *seg.branch.points.last().unwrap_or_else(|| unreachable!());
+            (*ring.junctions.last().unwrap_or_else(|| unreachable!()), p)
+        } else {
+            (ring.junctions[0], chain.segments[0].branch.points[0])
+        }
+    };
+    let (entry_v, entry_p) = terminal(entry, entry_ring);
+    let (exit_v, exit_p) = terminal(exit, exit_ring);
+    straight_edge(store, entry_v, exit_v, entry_p, exit_p)
 }
 
 /// Builds the pocket band fragments of a multi-face blind cut: ONE face per
