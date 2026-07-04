@@ -147,8 +147,12 @@ fn assemble_multiface_through(
         for fragment in &fragments {
             name_band(store, op, fragment.tool_face, fragment.face);
         }
-        name_rim(store, op, entry.target_face, entry_ring.wire, 0);
-        name_rim(store, op, exit.target_face, exit_ring.wire, 1);
+        if let (Some(entry_face), Some(exit_face)) =
+            (entry.single_target_face(), exit.single_target_face())
+        {
+            name_rim(store, op, entry_face, entry_ring.wire, 0);
+            name_rim(store, op, exit_face, exit_ring.wire, 1);
+        }
     }
     Ok(())
 }
@@ -178,25 +182,24 @@ fn assemble_multiface_pocket(
         for fragment in &fragments {
             name_band(store, op, fragment.tool_face, fragment.face);
         }
-        name_rim(store, op, remapped.target_face, entry_ring.wire, 0);
+        if let Some(entry_face) = remapped.single_target_face() {
+            name_rim(store, op, entry_face, entry_ring.wire, 0);
+        }
         name_floor(store, op, buried.cap_face, floor);
     }
     Ok(())
 }
 
-/// Remaps a chained loop's target face (all segments lie on one face) to its
-/// result copy.
+/// Remaps a chained loop's target faces to their result copies.
 fn remap_chain(
     chain: &super::stitch::CutChain,
     id_map: &HashMap<FaceId, FaceId>,
 ) -> Result<super::stitch::CutChain> {
-    let copy = *id_map.get(&chain.target_face).ok_or_else(|| {
-        OperationError::Failed("cut loop references an unknown target face".into())
-    })?;
     let mut remapped = chain.clone();
-    remapped.target_face = copy;
     for seg in &mut remapped.segments {
-        seg.target_face = copy;
+        seg.target_face = *id_map.get(&seg.target_face).ok_or_else(|| {
+            OperationError::Failed("cut loop references an unknown target face".into())
+        })?;
     }
     Ok(remapped)
 }

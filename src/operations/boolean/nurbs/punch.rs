@@ -53,7 +53,14 @@ pub(crate) struct ChainRing {
 /// Returns an error if the target face is not a NURBS face, the concatenated
 /// trace degenerates, or curve / wire construction fails.
 pub(crate) fn punch_chain(store: &mut TopologyStore, chain: &CutChain) -> Result<ChainRing> {
-    let surface = nurbs_surface_of(store, chain.target_face)?;
+    let target_face = chain.single_target_face().ok_or_else(|| {
+        OperationError::Failed(
+            "punch_chain requires a chained loop on a single target face \
+             (target-crossing chains go through the face splitter)"
+                .into(),
+        )
+    })?;
+    let surface = nurbs_surface_of(store, target_face)?;
 
     // 1. CW hole pcurve from the concatenated target-UV traces (junction
     //    samples are welded, so consecutive duplicates collapse in dedup).
@@ -101,7 +108,7 @@ pub(crate) fn punch_chain(store: &mut TopologyStore, chain: &CutChain) -> Result
 
     // 3. Attach to the face: full-domain outer trim if absent, push the hole,
     //    append the inner wire.
-    let face = store.face_mut(chain.target_face)?;
+    let face = store.face_mut(target_face)?;
     let trim = face
         .trim
         .get_or_insert_with(|| FaceTrim::new(full_domain_outer_loop(&surface), Vec::new()));
