@@ -11,7 +11,7 @@
 //! wall face is still "the wall's outer face"); new faces (band, pocket
 //! floor) and new edges (hole rims) get names composed from their parents.
 //! Resolution failure is `None` — no geometric best-match heuristics
-//! (Kripac 1997 / Chen & Hoffmann 1995 / OCCT TNaming motivate the problem;
+//! (Kripac 1997 / Chen & Hoffmann 1995 / OCCT `TNaming` motivate the problem;
 //! geolis's small deterministic op set lets derivational names replace their
 //! heavyweight history machinery).
 
@@ -46,12 +46,44 @@ impl fmt::Display for OpId {
     }
 }
 
+/// A caller-supplied, opaque tag identifying one profile segment of a
+/// segmented creation op (e.g. [`MakeSegmentedPrism`]). Like [`OpId`], geolis
+/// never invents the identity: the caller derives tags from its own outline
+/// provenance, so a face keeps its name when positional segment indices shift
+/// (junction re-trims). Rebuild-stable by construction.
+///
+/// [`MakeSegmentedPrism`]: crate::operations::creation::MakeSegmentedPrism
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SegmentTag(Arc<str>);
+
+impl SegmentTag {
+    /// Creates a segment tag from the caller's stable identifier.
+    pub fn new(tag: impl Into<Arc<str>>) -> Self {
+        Self(tag.into())
+    }
+
+    /// The raw identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SegmentTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The role of a face within its creation operation.
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub enum FaceRole {
     /// A side face, indexed by the op's deterministic side order (e.g. the
     /// curved wall: 0 = inner, 1 = outer, 2 = start end, 3 = end end).
     Side(u8),
+    /// A side face identified by a caller-supplied segment tag
+    /// (junction-stable — survives segment-count changes, unlike `Side(k)`).
+    Tagged(SegmentTag),
     /// The cap at the extrusion start (`v0` end).
     CapStart,
     /// The cap at the extrusion end (`v1` end).
@@ -71,6 +103,27 @@ pub enum EdgeRole {
     RingStart,
     /// The shared ring edge at the extrusion end (`v1` / last profile end).
     RingEnd,
+}
+
+/// The side of a face split, determined by the split's canonical trace
+/// orientation.
+///
+/// **Deterministic rule:** the canonical trace is the boundary-to-boundary
+/// trace whose canonically-oriented UV chord starts lexicographically first
+/// (a trace chord `end - start` is canonically oriented so that it is
+/// lexicographically positive: `du > 0`, or `du == 0 && dv > 0`). A fragment
+/// is `Left` when its representative interior point lies on the positive
+/// cross-product side of that oriented chord (`cross(chord, point - start) >
+/// 0`), `Right` otherwise. The rule depends only on the cut geometry, so it
+/// is stable across rebuilds and parameter changes.
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+pub enum SplitSide {
+    /// The fragment on the positive cross-product side of the canonical
+    /// trace chord.
+    Left,
+    /// The fragment on the negative cross-product side of the canonical
+    /// trace chord.
+    Right,
 }
 
 /// A persistent, rebuild-stable name for a face.
@@ -99,6 +152,17 @@ pub enum FaceName {
         op: OpId,
         /// The buried cap's name.
         cap: Box<FaceName>,
+    },
+    /// One kept fragment of a face a boolean split along a cut trace
+    /// (F3b). The parent name retires; the two fragments carry composed
+    /// names distinguished by [`SplitSide`].
+    Split {
+        /// The boolean operation that split the face.
+        op: OpId,
+        /// The split face's former name.
+        parent: Box<FaceName>,
+        /// Which side of the canonical trace this fragment lies on.
+        side: SplitSide,
     },
 }
 
@@ -170,6 +234,34 @@ impl NameRegistry {
         }
     }
 
+    /// The split-aware transfer (F3b): the parent face's name retires and the
+    /// two kept fragments bind composed [`FaceName::Split`] names (`left`
+    /// gets [`SplitSide::Left`], `right` gets [`SplitSide::Right`]).
+    ///
+    /// An unnamed parent propagates unnamed fragments (no-op).
+    pub fn split_face(&mut self, from: FaceId, op: &OpId, left: FaceId, right: FaceId) {
+        let Some(parent) = self.face_names.remove(&from) else {
+            return;
+        };
+        self.faces_by_name.remove(&parent);
+        self.bind_face(
+            left,
+            FaceName::Split {
+                op: op.clone(),
+                parent: Box::new(parent.clone()),
+                side: SplitSide::Left,
+            },
+        );
+        self.bind_face(
+            right,
+            FaceName::Split {
+                op: op.clone(),
+                parent: Box::new(parent),
+                side: SplitSide::Right,
+            },
+        );
+    }
+
     /// Resolves a face name to the current face id.
     #[must_use]
     pub fn face(&self, name: &FaceName) -> Option<FaceId> {
@@ -198,19 +290,22 @@ impl NameRegistry {
 // ---------------------------------------------------------------------------
 // Canonical string form (opaque to consumers; stable for graph storage).
 //
-// Grammar (all tokens ASCII; op ids are percent-escaped for `%(:)`):
+// Grammar (all tokens ASCII; op ids and segment tags are percent-escaped for
+// `%(:)`):
 //   face := "created:" op ":" role
 //         | "band:" op ":" index ":(" face ")"
 //         | "floor:" op ":(" face ")"
+//         | "split:" op ":" ("l" | "r") ":(" face ")"
 //   edge := "ring:" op ":" ("start" | "end")
 //         | "rim:"  op ":" index ":(" face ")"
-//   role := "side" u8 | "cap-start" | "cap-end" | "top" | "bottom" | "wall"
+//   role := "side" u8 | "side:" tag | "cap-start" | "cap-end" | "top"
+//         | "bottom" | "wall"
 // ---------------------------------------------------------------------------
 
 /// Percent-escapes the characters the grammar reserves.
-fn escape_op(op: &OpId) -> String {
-    let mut out = String::with_capacity(op.as_str().len());
-    for c in op.as_str().chars() {
+fn escape_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
         match c {
             '%' => out.push_str("%25"),
             ':' => out.push_str("%3A"),
@@ -222,7 +317,7 @@ fn escape_op(op: &OpId) -> String {
     out
 }
 
-fn unescape_op(s: &str) -> Option<OpId> {
+fn unescape_component(s: &str) -> Option<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -234,13 +329,22 @@ fn unescape_op(s: &str) -> Option<OpId> {
             out.push(c);
         }
     }
-    Some(OpId::new(out))
+    Some(out)
+}
+
+fn escape_op(op: &OpId) -> String {
+    escape_component(op.as_str())
+}
+
+fn unescape_op(s: &str) -> Option<OpId> {
+    unescape_component(s).map(OpId::new)
 }
 
 impl fmt::Display for FaceRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Side(k) => write!(f, "side{k}"),
+            Self::Tagged(tag) => write!(f, "side:{}", escape_component(tag.as_str())),
             Self::CapStart => f.write_str("cap-start"),
             Self::CapEnd => f.write_str("cap-end"),
             Self::Top => f.write_str("top"),
@@ -260,11 +364,19 @@ impl std::str::FromStr for FaceRole {
             "top" => Ok(Self::Top),
             "bottom" => Ok(Self::Bottom),
             "wall" => Ok(Self::Wall),
-            _ => s
-                .strip_prefix("side")
-                .and_then(|k| k.parse::<u8>().ok())
-                .map(Self::Side)
-                .ok_or(()),
+            _ => {
+                // "side:" (tagged) must be checked before the bare "side"
+                // prefix of the positional form.
+                if let Some(tag) = s.strip_prefix("side:") {
+                    return unescape_component(tag)
+                        .map(|t| Self::Tagged(SegmentTag::new(t)))
+                        .ok_or(());
+                }
+                s.strip_prefix("side")
+                    .and_then(|k| k.parse::<u8>().ok())
+                    .map(Self::Side)
+                    .ok_or(())
+            }
         }
     }
 }
@@ -279,6 +391,13 @@ impl fmt::Display for FaceName {
                 loop_index,
             } => write!(f, "band:{}:{loop_index}:({tool_face})", escape_op(op)),
             Self::Floor { op, cap } => write!(f, "floor:{}:({cap})", escape_op(op)),
+            Self::Split { op, parent, side } => {
+                let s = match side {
+                    SplitSide::Left => "l",
+                    SplitSide::Right => "r",
+                };
+                write!(f, "split:{}:{s}:({parent})", escape_op(op))
+            }
         }
     }
 }
@@ -342,6 +461,20 @@ impl std::str::FromStr for FaceName {
             return Ok(Self::Floor {
                 op,
                 cap: Box::new(inner.ok_or(())?.parse()?),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("split:") {
+            let (op, rest) = split_op(rest).ok_or(())?;
+            let (side, inner) = match rest.split_once(':') {
+                Some(("l", inner)) => (SplitSide::Left, inner),
+                Some(("r", inner)) => (SplitSide::Right, inner),
+                _ => return Err(()),
+            };
+            let inner = inner.strip_prefix('(').and_then(|r| r.strip_suffix(')'));
+            return Ok(Self::Split {
+                op,
+                parent: Box::new(inner.ok_or(())?.parse()?),
+                side,
             });
         }
         Err(())
@@ -452,6 +585,25 @@ mod tests {
                     role: FaceRole::CapEnd,
                 }),
             },
+            // Tagged side face (F5): opaque caller tag, plain.
+            FaceName::Created {
+                op: OpId::new("wall1"),
+                role: FaceRole::Tagged(SegmentTag::new("centerline-3/outer")),
+            },
+            // Tagged side face with every reserved character in the tag.
+            FaceName::Created {
+                op: OpId::new("op:with(specials)%"),
+                role: FaceRole::Tagged(SegmentTag::new("tag:with(specials)%25")),
+            },
+            // Tagged side face nested inside a band name (paren escaping).
+            FaceName::Band {
+                op: OpId::new("cut1"),
+                tool_face: Box::new(FaceName::Created {
+                    op: OpId::new("wall1"),
+                    role: FaceRole::Tagged(SegmentTag::new("seg(0)")),
+                }),
+                loop_index: 2,
+            },
             // Nested: a band cut into a band (future splits compose too).
             FaceName::Band {
                 op: OpId::new("cut2"),
@@ -496,6 +648,128 @@ mod tests {
         assert!("band:cut1:zero:(created:a:top)"
             .parse::<FaceName>()
             .is_err());
+    }
+
+    /// The `split:` grammar arm round-trips, composes recursively, and
+    /// rejects malformed side / parenthesis forms.
+    #[test]
+    fn split_names_round_trip() {
+        let cases: Vec<FaceName> = vec![
+            // Split fragments (F3b): left / right of a tagged wall face.
+            FaceName::Split {
+                op: OpId::new("cut1"),
+                parent: Box::new(FaceName::Created {
+                    op: OpId::new("wall1"),
+                    role: FaceRole::Tagged(SegmentTag::new("outer")),
+                }),
+                side: SplitSide::Left,
+            },
+            FaceName::Split {
+                op: OpId::new("cut:with(specials)%"),
+                parent: Box::new(FaceName::Created {
+                    op: OpId::new("wall1"),
+                    role: FaceRole::Side(2),
+                }),
+                side: SplitSide::Right,
+            },
+            // A split of a split (repeated cuts compose).
+            FaceName::Split {
+                op: OpId::new("cut2"),
+                parent: Box::new(FaceName::Split {
+                    op: OpId::new("cut1"),
+                    parent: Box::new(FaceName::Created {
+                        op: OpId::new("wall1"),
+                        role: FaceRole::Top,
+                    }),
+                    side: SplitSide::Right,
+                }),
+                side: SplitSide::Left,
+            },
+            // A band whose tool face is itself a split fragment.
+            FaceName::Band {
+                op: OpId::new("cut2"),
+                tool_face: Box::new(FaceName::Split {
+                    op: OpId::new("cut1"),
+                    parent: Box::new(FaceName::Created {
+                        op: OpId::new("win1"),
+                        role: FaceRole::Side(0),
+                    }),
+                    side: SplitSide::Left,
+                }),
+                loop_index: 0,
+            },
+        ];
+        for name in cases {
+            let text = name.to_string();
+            let parsed: FaceName = text.parse().unwrap_or_else(|()| panic!("parse {text}"));
+            assert_eq!(parsed, name, "round trip failed for {text}");
+        }
+
+        // The canonical form is exactly the documented grammar.
+        let sample = FaceName::Split {
+            op: OpId::new("cut1"),
+            parent: Box::new(FaceName::Created {
+                op: OpId::new("wall1"),
+                role: FaceRole::Top,
+            }),
+            side: SplitSide::Left,
+        };
+        assert_eq!(sample.to_string(), "split:cut1:l:(created:wall1:top)");
+
+        assert!("split:cut1:x:(created:a:top)".parse::<FaceName>().is_err());
+        assert!("split:cut1:l:created:a:top".parse::<FaceName>().is_err());
+    }
+
+    /// The positional `side<k>` and tagged `side:<tag>` forms stay distinct:
+    /// a tag that is itself a digit string must not collapse into `Side(k)`.
+    #[test]
+    fn positional_and_tagged_side_forms_are_distinct() {
+        let positional: FaceRole = "side0".parse().unwrap();
+        assert_eq!(positional, FaceRole::Side(0));
+
+        let tagged: FaceRole = "side:0".parse().unwrap();
+        assert_eq!(tagged, FaceRole::Tagged(SegmentTag::new("0")));
+        assert_ne!(positional, tagged);
+
+        // Round trip preserves the distinction.
+        assert_eq!(FaceRole::Side(0).to_string(), "side0");
+        assert_eq!(FaceRole::Tagged(SegmentTag::new("0")).to_string(), "side:0");
+    }
+
+    /// `split_face` retires the parent name and binds the two composed
+    /// fragment names; an unnamed parent propagates unnamed fragments.
+    #[test]
+    fn split_face_retires_parent_and_binds_fragments() {
+        let mut store = TopologyStore::new();
+        let parent = dummy_face(&mut store);
+        let left = dummy_face(&mut store);
+        let right = dummy_face(&mut store);
+        let mut reg = NameRegistry::default();
+        reg.bind_face(parent, outer("wall1"));
+        reg.split_face(parent, &OpId::new("cut1"), left, right);
+
+        assert_eq!(reg.name_of_face(parent), None, "parent name retired");
+        assert_eq!(reg.face(&outer("wall1")), None, "parent name unresolvable");
+        let left_name = FaceName::Split {
+            op: OpId::new("cut1"),
+            parent: Box::new(outer("wall1")),
+            side: SplitSide::Left,
+        };
+        let right_name = FaceName::Split {
+            op: OpId::new("cut1"),
+            parent: Box::new(outer("wall1")),
+            side: SplitSide::Right,
+        };
+        assert_eq!(reg.face(&left_name), Some(left));
+        assert_eq!(reg.face(&right_name), Some(right));
+
+        // Unnamed parent: nothing binds.
+        let unnamed = dummy_face(&mut store);
+        let a = dummy_face(&mut store);
+        let b = dummy_face(&mut store);
+        reg.split_face(unnamed, &OpId::new("cut2"), a, b);
+        assert_eq!(reg.name_of_face(a), None);
+        assert_eq!(reg.name_of_face(b), None);
     }
 
     #[test]

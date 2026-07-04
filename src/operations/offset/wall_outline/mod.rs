@@ -26,14 +26,17 @@ pub struct WallFootprint2D {
 }
 
 impl WallFootprint2D {
+    #[must_use]
     pub fn outer(&self) -> &Pline {
         &self.outer
     }
 
+    #[must_use]
     pub fn holes(&self) -> &[Pline] {
         &self.holes
     }
 
+    #[must_use]
     pub fn into_parts(self) -> (Pline, Vec<Pline>) {
         (self.outer, self.holes)
     }
@@ -486,10 +489,10 @@ mod tests {
             .sum()
     }
 
-    fn max_dist_to_centerlines(
-        boundaries: &[Pline],
-        centerlines: &[((f64, f64), (f64, f64))],
-    ) -> f64 {
+    /// A 2D centerline segment as `((x0, y0), (x1, y1))`.
+    type Segment2 = ((f64, f64), (f64, f64));
+
+    fn max_dist_to_centerlines(boundaries: &[Pline], centerlines: &[Segment2]) -> f64 {
         let mut max_d = 0.0_f64;
         for b in boundaries {
             for v in &b.vertices {
@@ -503,7 +506,7 @@ mod tests {
         max_d
     }
 
-    fn pline_to_centerlines(pline: &Pline) -> Vec<((f64, f64), (f64, f64))> {
+    fn pline_to_centerlines(pline: &Pline) -> Vec<Segment2> {
         let n = pline.vertices.len();
         let seg_count = if pline.closed { n } else { n.saturating_sub(1) };
         (0..seg_count)
@@ -633,7 +636,7 @@ mod tests {
     ///   - 2 holes (one per room, separated by the shared wall material)
     ///
     /// This mirrors `BoundarySolver` emitting one closed-ring `WallBaseline`
-    /// per zone into WallLayer's Rings slot.
+    /// per zone into `WallLayer`'s Rings slot.
     #[test]
     fn two_adjacent_zones_one_outer_two_holes() {
         let d = 0.15;
@@ -917,8 +920,8 @@ mod tests {
 
     /// Regression for plan-13k: a continuous Wall centerline that crosses
     /// itself MULTIPLE times must not produce a CDT-unsafe output set,
-    /// even when polygon_union returns nested-island depth-2 structure.
-    /// Before T6-T10, this case panicked spade::cdt with a 2nd-crossing
+    /// even when `polygon_union` returns nested-island depth-2 structure.
+    /// Before T6-T10, this case panicked `spade::cdt` with a 2nd-crossing
     /// input.
     ///
     /// Success criterion: `WallOutline2D::execute` returns Ok(non-empty)

@@ -188,6 +188,8 @@ mod tests {
     }
 
     #[test]
+    // Intersection coordinates read clearest in i/j/x/y notation.
+    #[allow(clippy::many_single_char_names)]
     fn find_self_intersection_figure_eight_returns_crossing() {
         // Figure-8: vertices 0..3 = (0,0), (2,2), (0,2), (2,0).
         // Edges:

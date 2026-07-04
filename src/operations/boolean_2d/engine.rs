@@ -686,6 +686,88 @@ pub(crate) fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) ->
     loops
 }
 
+/// Builds the containment matrix on leftmost-vertex witnesses with bounded
+/// `Boundary` fallback: `contained_in[i]` lists every loop that strictly
+/// contains loop `i`.
+///
+/// # Errors
+///
+/// Returns [`OperationError::Failed`] when a loop's witness candidates are
+/// exhausted (every tried witness lies on the other loop's boundary).
+fn containment_matrix(
+    polygons: &[Polygon],
+    witness_candidates: &[Vec<(f64, f64)>],
+) -> Result<Vec<Vec<usize>>> {
+    const MAX_WITNESS_FALLBACK: usize = 3;
+    let n = polygons.len();
+    let mut contained_in: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for (j, polygon) in polygons.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let mut witness_idx = 0;
+            loop {
+                if witness_idx >= MAX_WITNESS_FALLBACK || witness_idx >= witness_candidates[i].len()
+                {
+                    return Err(OperationError::Failed(format!(
+                        "boolean_2d: assemble_faces witness disambiguation \
+                         exhausted for loop {i} against loop {j} (tried \
+                         {witness_idx} candidates, all on j's boundary)"
+                    ))
+                    .into());
+                }
+                let w = witness_candidates[i][witness_idx];
+                match point_in_polygon_class(w, polygon) {
+                    PointClass::Inside => {
+                        contained_in[i].push(j);
+                        break;
+                    }
+                    PointClass::Outside => break,
+                    PointClass::Boundary => {
+                        witness_idx += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(contained_in)
+}
+
+/// Computes each loop's parent: the unique containing loop at `depth − 1`.
+///
+/// # Errors
+///
+/// Returns [`OperationError::Failed`] when the parent candidate at
+/// `depth − 1` is not unique (broken arrangement topology).
+fn parent_loops(contained_in: &[Vec<usize>], depth: &[usize]) -> Result<Vec<Option<usize>>> {
+    let n = depth.len();
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        if depth[i] == 0 {
+            continue;
+        }
+        let target_depth = depth[i] - 1;
+        let candidates: Vec<usize> = contained_in[i]
+            .iter()
+            .copied()
+            .filter(|&j| depth[j] == target_depth)
+            .collect();
+        if candidates.len() != 1 {
+            return Err(OperationError::Failed(format!(
+                "boolean_2d: assemble_faces found {} parent candidates for \
+                 loop {} (depth {}); arrangement topology is broken",
+                candidates.len(),
+                i,
+                depth[i],
+            ))
+            .into());
+        }
+        parent[i] = Some(candidates[0]);
+    }
+    Ok(parent)
+}
+
 /// Assemble closed boundary loops into face topology
 /// (`Vec<PolygonWithHoles>`).
 ///
@@ -751,68 +833,15 @@ pub(crate) fn assemble_faces(
         .collect();
 
     // 2. Containment matrix with bounded Boundary fallback.
-    const MAX_WITNESS_FALLBACK: usize = 3;
-    let mut contained_in: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let mut witness_idx = 0;
-            loop {
-                if witness_idx >= MAX_WITNESS_FALLBACK || witness_idx >= witness_candidates[i].len()
-                {
-                    return Err(OperationError::Failed(format!(
-                        "boolean_2d: assemble_faces witness disambiguation \
-                         exhausted for loop {i} against loop {j} (tried \
-                         {witness_idx} candidates, all on j's boundary)"
-                    ))
-                    .into());
-                }
-                let w = witness_candidates[i][witness_idx];
-                match point_in_polygon_class(w, &polygons[j]) {
-                    PointClass::Inside => {
-                        contained_in[i].push(j);
-                        break;
-                    }
-                    PointClass::Outside => break,
-                    PointClass::Boundary => {
-                        witness_idx += 1;
-                    }
-                }
-            }
-        }
-    }
+    let contained_in = containment_matrix(&polygons, &witness_candidates)?;
 
     // 3. Depth and parent.
-    let depth: Vec<usize> = contained_in.iter().map(|s| s.len()).collect();
-    let mut parent: Vec<Option<usize>> = vec![None; n];
-    for i in 0..n {
-        if depth[i] == 0 {
-            continue;
-        }
-        let target_depth = depth[i] - 1;
-        let candidates: Vec<usize> = contained_in[i]
-            .iter()
-            .copied()
-            .filter(|&j| depth[j] == target_depth)
-            .collect();
-        if candidates.len() != 1 {
-            return Err(OperationError::Failed(format!(
-                "boolean_2d: assemble_faces found {} parent candidates for \
-                 loop {} (depth {}); arrangement topology is broken",
-                candidates.len(),
-                i,
-                depth[i],
-            ))
-            .into());
-        }
-        parent[i] = Some(candidates[0]);
-    }
+    let depth: Vec<usize> = contained_in.iter().map(Vec::len).collect();
+    let parent = parent_loops(&contained_in, &depth)?;
 
     // 4. Validate orientation parity.
     for i in 0..n {
-        let want_ccw = depth[i] % 2 == 0;
+        let want_ccw = depth[i].is_multiple_of(2);
         let is_ccw = orientation[i] == Orientation::Ccw;
         if want_ccw != is_ccw {
             return Err(OperationError::Failed(format!(
@@ -947,7 +976,7 @@ fn lerp(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    //! Engine-internal tests (assemble_faces synthetic loop fixtures).
+    //! Engine-internal tests (`assemble_faces` synthetic loop fixtures).
     //!
     //! The end-to-end union / subtract behaviour is exercised by tests
     //! in the `union` / `subtract` submodules; this file only covers
@@ -1149,8 +1178,8 @@ mod tests {
         assert_eq!(faces_a.len(), faces_b.len());
         let mut counts_a: Vec<usize> = faces_a.iter().map(|f| f.holes.len()).collect();
         let mut counts_b: Vec<usize> = faces_b.iter().map(|f| f.holes.len()).collect();
-        counts_a.sort();
-        counts_b.sort();
+        counts_a.sort_unstable();
+        counts_b.sort_unstable();
         assert_eq!(counts_a, counts_b);
     }
 }

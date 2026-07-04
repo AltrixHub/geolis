@@ -35,22 +35,42 @@ impl LineSurfaceIntersect {
         Self { line, t_min, t_max }
     }
 
-    /// Intersects the line with a Plane.
+    /// Intersects the line with a `Plane`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if evaluating the line at a candidate parameter
+    /// fails.
     pub fn with_plane(&self, plane: &Plane) -> Result<Vec<CurveSurfaceHit>> {
         intersect_line_plane(&self.line, self.t_min, self.t_max, plane)
     }
 
-    /// Intersects the line with a Cylinder.
+    /// Intersects the line with a `Cylinder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if evaluating the line at a candidate parameter
+    /// fails.
     pub fn with_cylinder(&self, cyl: &Cylinder) -> Result<Vec<CurveSurfaceHit>> {
         intersect_line_cylinder(&self.line, self.t_min, self.t_max, cyl)
     }
 
-    /// Intersects the line with a Sphere.
+    /// Intersects the line with a `Sphere`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if evaluating the line at a candidate parameter
+    /// fails.
     pub fn with_sphere(&self, sph: &Sphere) -> Result<Vec<CurveSurfaceHit>> {
         intersect_line_sphere(&self.line, self.t_min, self.t_max, sph)
     }
 
-    /// Intersects the line with a Cone.
+    /// Intersects the line with a `Cone`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if evaluating the line at a candidate parameter
+    /// fails.
     pub fn with_cone(&self, cone: &Cone) -> Result<Vec<CurveSurfaceHit>> {
         intersect_line_cone(&self.line, self.t_min, self.t_max, cone)
     }
@@ -134,6 +154,9 @@ fn intersect_line_sphere(
 }
 
 /// Line-Cone intersection: solve the cone equation.
+// Quadratic-coefficient math reads clearest in textbook a/b/c notation;
+// `d_dot_a` / `dp_dot_a` mirror the derivation's symbols.
+#[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn intersect_line_cone(
     line: &Line,
     t_min: f64,
@@ -201,6 +224,8 @@ fn intersect_line_cone(
 }
 
 /// Solves a quadratic `a*t^2 + b*t + c = 0` and returns intersection hits.
+// Quadratic-coefficient math reads clearest in textbook a/b/c notation.
+#[allow(clippy::many_single_char_names)]
 fn solve_quadratic_hits(
     line: &Line,
     t_min: f64,

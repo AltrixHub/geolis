@@ -264,8 +264,16 @@ fn loop_is_domain_rectangle(surface: &NurbsSurface, loop_: &TrimLoop) -> bool {
 
 /// Constrained-Delaunay tessellation of a NURBS surface from pre-sampled UV
 /// outer/hole loops. Interior grid samples (from the shared adaptive refinement)
-/// that fall strictly inside the trim region are added as Steiner points;
-/// triangles whose centroid is outside the region are discarded.
+/// that fall strictly inside the trim region are added as Steiner points.
+///
+/// Triangles are kept by TOPOLOGICAL parity classification (flood fill from
+/// spade's outer face, flipping at constraint edges — the same classifier the
+/// planar CDT path uses), not by a geometric centroid-in-polygon test. The
+/// geometric test is a coin flip for the degenerate sliver triangles that
+/// arise when a trim polyline is straight up to floating-point noise (e.g. a
+/// planar tool's SSI rim, constant `v` up to ~1e-16): the zigzag spawns
+/// zero-area triangles just outside the constraint chain whose centroids sit
+/// ON the boundary. Parity classifies them robustly as exterior.
 fn tessellate_cdt(
     surface: &NurbsSurface,
     outer: &[Point2],
@@ -301,7 +309,7 @@ fn tessellate_cdt(
         }
     }
 
-    // 4. Keep triangles whose centroid is inside the trim region; map to 3D.
+    // 4. Keep interior triangles (parity flood fill); map to 3D.
     let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
     let u_span = u_max - u_min;
     let v_span = v_max - v_min;
@@ -309,17 +317,12 @@ fn tessellate_cdt(
     let mut mesh = TriangleMesh::default();
     let mut vertex_map: HashMap<usize, u32> = HashMap::new();
 
+    let interior_faces = super::tessellate_face::classify_interior_faces(&cdt);
     for face in cdt.inner_faces() {
-        let verts = face.vertices();
-        let centroid = {
-            let p0 = verts[0].position();
-            let p1 = verts[1].position();
-            let p2 = verts[2].position();
-            Point2::new((p0.x + p1.x + p2.x) / 3.0, (p0.y + p1.y + p2.y) / 3.0)
-        };
-        if !point_in_region(&centroid, outer, holes) {
+        if !interior_faces.contains(&face.fix().index()) {
             continue;
         }
+        let verts = face.vertices();
 
         let mut tri = [0u32; 3];
         for (slot, vh) in verts.iter().enumerate() {

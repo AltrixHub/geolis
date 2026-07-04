@@ -41,9 +41,9 @@ impl ClosestPointOnSurface {
         let face = store.face(self.face)?;
         match &face.surface {
             FaceSurface::Plane(plane) => closest_on_plane(plane, &self.query),
-            FaceSurface::Cylinder(cyl) => closest_on_cylinder(cyl, &self.query),
-            FaceSurface::Sphere(sph) => closest_on_sphere(sph, &self.query),
-            FaceSurface::Cone(cone) => closest_on_cone(cone, &self.query),
+            FaceSurface::Cylinder(cyl) => Ok(closest_on_cylinder(cyl, &self.query)),
+            FaceSurface::Sphere(sph) => Ok(closest_on_sphere(sph, &self.query)),
+            FaceSurface::Cone(cone) => Ok(closest_on_cone(cone, &self.query)),
             FaceSurface::Torus(torus) => closest_on_torus(torus, &self.query),
             FaceSurface::Nurbs(nurbs) => closest_on_nurbs(nurbs, &self.query),
         }
@@ -81,10 +81,7 @@ fn closest_on_plane(
     })
 }
 
-fn closest_on_cylinder(
-    cyl: &crate::geometry::surface::Cylinder,
-    query: &Point3,
-) -> Result<SurfacePoint> {
+fn closest_on_cylinder(cyl: &crate::geometry::surface::Cylinder, query: &Point3) -> SurfacePoint {
     let dp = query - cyl.center();
     let v = dp.dot(cyl.axis());
     let foot = cyl.center() + cyl.axis() * v;
@@ -100,18 +97,15 @@ fn closest_on_cylinder(
 
     let (u, v_param) = cyl.inverse(&point);
     let distance = (query - point).norm();
-    Ok(SurfacePoint {
+    SurfacePoint {
         u,
         v: v_param,
         point,
         distance,
-    })
+    }
 }
 
-fn closest_on_sphere(
-    sph: &crate::geometry::surface::Sphere,
-    query: &Point3,
-) -> Result<SurfacePoint> {
+fn closest_on_sphere(sph: &crate::geometry::surface::Sphere, query: &Point3) -> SurfacePoint {
     let dp = query - sph.center();
     let dp_len = dp.norm();
 
@@ -124,15 +118,15 @@ fn closest_on_sphere(
 
     let (u, v) = sph.inverse(&point);
     let distance = (query - point).norm();
-    Ok(SurfacePoint {
+    SurfacePoint {
         u,
         v,
         point,
         distance,
-    })
+    }
 }
 
-fn closest_on_cone(cone: &crate::geometry::surface::Cone, query: &Point3) -> Result<SurfacePoint> {
+fn closest_on_cone(cone: &crate::geometry::surface::Cone, query: &Point3) -> SurfacePoint {
     let dp = query - cone.apex();
     let axis_proj = dp.dot(cone.axis());
     let radial = dp - *cone.axis() * axis_proj;
@@ -160,12 +154,12 @@ fn closest_on_cone(cone: &crate::geometry::surface::Cone, query: &Point3) -> Res
     let point = *cone.apex() + gen_dir * v;
 
     let distance = (query - point).norm();
-    Ok(SurfacePoint {
+    SurfacePoint {
         u,
         v,
         point,
         distance,
-    })
+    }
 }
 
 fn closest_on_torus(

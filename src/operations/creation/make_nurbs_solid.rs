@@ -118,7 +118,12 @@ impl MakeNurbsPrism {
 }
 
 /// Registers a creation-op face name.
-fn bind_created_face(store: &mut TopologyStore, face: FaceId, op: &OpId, role: FaceRole) {
+pub(crate) fn bind_created_face(
+    store: &mut TopologyStore,
+    face: FaceId,
+    op: &OpId,
+    role: FaceRole,
+) {
     store.names_mut().bind_face(
         face,
         FaceName::Created {
@@ -155,7 +160,7 @@ fn closed_ring_edge(store: &mut TopologyStore, curve: NurbsCurve3D) -> Result<Ed
 
 /// Degree-1 pcurve mapping a ring edge's parameter onto the `u` axis at a
 /// fixed `v` (`t → (t, v)` over `[u0, u1]`).
-fn iso_pcurve_u(u0: f64, u1: f64, v: f64) -> Result<NurbsCurve2D> {
+pub(crate) fn iso_pcurve_u(u0: f64, u1: f64, v: f64) -> Result<NurbsCurve2D> {
     NurbsCurve2D::from_unweighted(
         vec![Point2::new(u0, v), Point2::new(u1, v)],
         KnotVector::new(vec![u0, u0, u1, u1])?,
@@ -604,7 +609,7 @@ impl MakeRevolvedSolid {
         }
     }
 
-    /// Registers persistent names (Wall, CapStart / CapEnd, ring edges)
+    /// Registers persistent names (`Wall`, `CapStart` / `CapEnd`, ring edges)
     /// under the caller-supplied operation identity.
     #[must_use]
     pub fn with_op_id(mut self, op: OpId) -> Self {
@@ -713,7 +718,7 @@ pub(crate) fn finish_solid(store: &mut TopologyStore, faces: Vec<FaceId>) -> Sol
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::tessellation::{TessellateSolid, TessellationParams};
@@ -817,7 +822,7 @@ mod tests {
         ] {
             let name = FaceName::Created {
                 op: OpId::new("slab1"),
-                role,
+                role: role.clone(),
             };
             assert!(
                 store.names().face(&name).is_some(),
@@ -840,7 +845,7 @@ mod tests {
         ] {
             let name = FaceName::Created {
                 op: OpId::new("wall1"),
-                role,
+                role: role.clone(),
             };
             assert!(
                 store.names().face(&name).is_some(),
@@ -862,7 +867,7 @@ mod tests {
         for role in [FaceRole::Wall, FaceRole::CapStart, FaceRole::CapEnd] {
             let name = FaceName::Created {
                 op: OpId::new("vase1"),
-                role,
+                role: role.clone(),
             };
             assert!(store.names().face(&name).is_some(), "{role:?} named");
         }

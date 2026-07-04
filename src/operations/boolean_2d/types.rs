@@ -45,6 +45,7 @@ pub struct PolygonWithHoles {
 }
 
 impl PolygonWithHoles {
+    #[must_use]
     pub fn into_parts(self) -> (Polygon, Vec<Polygon>) {
         (self.outer, self.holes)
     }
