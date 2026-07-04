@@ -36,6 +36,14 @@
 //! `Split` fragments sharing those exact edges — a genuinely open,
 //! watertight doorway. A window cut follows on the same wall (the R2
 //! cascade: a later cut on an already-notched face).
+//!
+//! Variant 6 (F6 Phase R3) cuts FLUSH doors: the first cutter's sill plane
+//! is EXACTLY coplanar with the wall's bottom cap (`z0 == 0.0`) and the
+//! second is flush with BOTH caps (`z0 == 0.0`, `z1 == 3.0`). The sill /
+//! head faces' tangential along-boundary SSI branches are dropped and the
+//! jamb corner terminals are accepted as target-boundary terminals, so the
+//! degenerate contacts cleanly reduce to the R2 notch / sever cuts — no
+//! sliver geometry, watertight by construction.
 
 use std::f64::consts::FRAC_PI_2;
 
@@ -56,6 +64,7 @@ const CUT_WALL_COLOR: Color = Color::rgb(150, 180, 210);
 const KINK_WALL_COLOR: Color = Color::rgb(170, 210, 160);
 const CASCADE_WALL_COLOR: Color = Color::rgb(210, 160, 190);
 const DOOR_WALL_COLOR: Color = Color::rgb(160, 200, 200);
+const FLUSH_WALL_COLOR: Color = Color::rgb(220, 200, 150);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
 /// Wall thickness in plan.
@@ -65,111 +74,48 @@ const HEIGHT: f64 = 3.0;
 /// Radius of the rounded outer corner arc.
 const CORNER_RADIUS: f64 = 0.4;
 
+/// One demo variant builder: builds the solid into a fresh store.
+type WallBuilder = fn(&mut TopologyStore) -> geolis::Result<SolidId>;
+
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
-    register_label(storage, -1.5, 8.0, "1", LABEL_SIZE, LABEL_COLOR);
+    let variants: [(f64, &str, Color, WallBuilder); 6] = [
+        (8.0, "1", WALL_COLOR, build_l_wall),
+        (13.0, "2", CUT_WALL_COLOR, build_window_wall),
+        (18.0, "3", KINK_WALL_COLOR, build_kink_window_wall),
+        (23.0, "4", CASCADE_WALL_COLOR, build_cascade_wall),
+        (28.0, "5", DOOR_WALL_COLOR, build_full_height_door_wall),
+        (33.0, "6", FLUSH_WALL_COLOR, build_flush_door_wall),
+    ];
+    for (label_y, label, color, build) in variants {
+        register_label(storage, -1.5, label_y, label, LABEL_SIZE, LABEL_COLOR);
+        if !register_variant(storage, bounds, color, build) {
+            return;
+        }
+    }
+}
 
+/// Builds one variant into a fresh store, tessellates it, and registers
+/// its face mesh and shared `BRep` edges. Returns `false` when the build
+/// or tessellation fails (the caller stops registering further variants).
+fn register_variant(
+    storage: &MeshStorage,
+    bounds: &mut SceneBounds,
+    color: Color,
+    build: WallBuilder,
+) -> bool {
     let mut store = TopologyStore::new();
-    let Ok(solid) = build_l_wall(&mut store) else {
-        return;
+    let Ok(solid) = build(&mut store) else {
+        return false;
     };
-
     let Ok(mesh) = TessellateSolid::new(solid, TessellationParams::default()).execute(&store)
     else {
-        return;
+        return false;
     };
-    register_face(storage, bounds, mesh, WALL_COLOR);
-
+    register_face(storage, bounds, mesh, color);
     if let Ok(solid_data) = store.solid(solid) {
         register_edges(storage, bounds, &store, solid_data.outer_shell, EDGE_COLOR);
     }
-
-    register_label(storage, -1.5, 13.0, "2", LABEL_SIZE, LABEL_COLOR);
-
-    let mut cut_store = TopologyStore::new();
-    let Ok(cut_solid) = build_window_wall(&mut cut_store) else {
-        return;
-    };
-    let Ok(cut_mesh) =
-        TessellateSolid::new(cut_solid, TessellationParams::default()).execute(&cut_store)
-    else {
-        return;
-    };
-    register_face(storage, bounds, cut_mesh, CUT_WALL_COLOR);
-    if let Ok(solid_data) = cut_store.solid(cut_solid) {
-        register_edges(
-            storage,
-            bounds,
-            &cut_store,
-            solid_data.outer_shell,
-            EDGE_COLOR,
-        );
-    }
-
-    register_label(storage, -1.5, 18.0, "3", LABEL_SIZE, LABEL_COLOR);
-
-    let mut kink_store = TopologyStore::new();
-    let Ok(kink_solid) = build_kink_window_wall(&mut kink_store) else {
-        return;
-    };
-    let Ok(kink_mesh) =
-        TessellateSolid::new(kink_solid, TessellationParams::default()).execute(&kink_store)
-    else {
-        return;
-    };
-    register_face(storage, bounds, kink_mesh, KINK_WALL_COLOR);
-    if let Ok(solid_data) = kink_store.solid(kink_solid) {
-        register_edges(
-            storage,
-            bounds,
-            &kink_store,
-            solid_data.outer_shell,
-            EDGE_COLOR,
-        );
-    }
-
-    register_label(storage, -1.5, 23.0, "4", LABEL_SIZE, LABEL_COLOR);
-
-    let mut cascade_store = TopologyStore::new();
-    let Ok(cascade_solid) = build_cascade_wall(&mut cascade_store) else {
-        return;
-    };
-    let Ok(cascade_mesh) =
-        TessellateSolid::new(cascade_solid, TessellationParams::default()).execute(&cascade_store)
-    else {
-        return;
-    };
-    register_face(storage, bounds, cascade_mesh, CASCADE_WALL_COLOR);
-    if let Ok(solid_data) = cascade_store.solid(cascade_solid) {
-        register_edges(
-            storage,
-            bounds,
-            &cascade_store,
-            solid_data.outer_shell,
-            EDGE_COLOR,
-        );
-    }
-
-    register_label(storage, -1.5, 28.0, "5", LABEL_SIZE, LABEL_COLOR);
-
-    let mut door_store = TopologyStore::new();
-    let Ok(door_solid) = build_full_height_door_wall(&mut door_store) else {
-        return;
-    };
-    let Ok(door_mesh) =
-        TessellateSolid::new(door_solid, TessellationParams::default()).execute(&door_store)
-    else {
-        return;
-    };
-    register_face(storage, bounds, door_mesh, DOOR_WALL_COLOR);
-    if let Ok(solid_data) = door_store.solid(door_solid) {
-        register_edges(
-            storage,
-            bounds,
-            &door_store,
-            solid_data.outer_shell,
-            EDGE_COLOR,
-        );
-    }
+    true
 }
 
 /// Builds the L-shaped segmented-prism wall: an L footprint (legs 6 m and
@@ -436,6 +382,84 @@ fn build_cascade_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
         ("demo-cascade-door", 0.6, 1.5, 0.15, 2.25),
         ("demo-cascade-win-a", 2.2, 3.4, 1.0, 2.0),
         ("demo-cascade-win-b", 4.2, 5.4, 1.0, 2.0),
+    ];
+    let mut current = wall;
+    for (op, x0, x1, z0, z1) in openings {
+        let q = |x: f64, z: f64| Point3::new(x, Y0 - 1.0, z);
+        let cutter_profile = vec![
+            ProfileSegment::Line {
+                start: q(x0, z0),
+                end: q(x1, z0),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z0),
+                end: q(x1, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z1),
+                end: q(x0, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x0, z1),
+                end: q(x0, z0),
+            },
+        ];
+        let cutter_tags = ["sill", "jamb-right", "head", "jamb-left"]
+            .iter()
+            .map(|t| SegmentTag::new(*t))
+            .collect();
+        let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 2.4, 0.0))
+            .with_op_id(OpId::new(format!("{op}-box")))
+            .with_segment_tags(cutter_tags)
+            .execute(store)?;
+        current = Subtract::new(current, cutter)
+            .with_op_id(OpId::new(op))
+            .execute(store)?;
+    }
+    Ok(current)
+}
+
+/// Builds the F6 Phase R3 variant: one straight tagged wall minus a
+/// FLUSH-SILL door (`z0 == 0.0`, sill exactly coplanar with the bottom
+/// cap) and a door flush with BOTH caps (`z0 == 0.0`, `z1 == 3.0`) —
+/// exact degenerate contacts that cleanly reduce to the R2 notch / sever
+/// cuts.
+fn build_flush_door_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
+    const Y0: f64 = 28.0;
+    let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+
+    let wall_profile = vec![
+        ProfileSegment::Line {
+            start: p(0.0, Y0),
+            end: p(6.0, Y0),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0),
+            end: p(6.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0 + THICKNESS),
+            end: p(0.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(0.0, Y0 + THICKNESS),
+            end: p(0.0, Y0),
+        },
+    ];
+    let wall_tags = ["outer", "end-east", "inner", "end-west"]
+        .iter()
+        .map(|t| SegmentTag::new(*t))
+        .collect();
+    let wall = MakeSegmentedPrism::new(wall_profile, Vector3::new(0.0, 0.0, HEIGHT))
+        .with_op_id(OpId::new("demo-flush-wall"))
+        .with_segment_tags(wall_tags)
+        .execute(store)?;
+
+    // Flush-sill door (coplanar with the bottom cap) then a door flush
+    // with both caps, sequentially.
+    let openings: [(&str, f64, f64, f64, f64); 2] = [
+        ("demo-flush-door", 0.8, 1.7, 0.0, 2.25),
+        ("demo-flush-tall-door", 3.2, 4.1, 0.0, HEIGHT),
     ];
     let mut current = wall;
     for (op, x0, x1, z0, z1) in openings {
