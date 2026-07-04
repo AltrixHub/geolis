@@ -97,6 +97,15 @@ fn sample_edge(
             t_end,
             sagitta_segments(ellipse.semi_major(), t_start, t_end, params),
         ),
+        // A degree-1 NURBS curve IS its control polygon: sampling exactly at
+        // the knot breakpoints reproduces the curve losslessly (the same rule
+        // the trim-loop sampler applies to degree-1 pcurves). This keeps SSI
+        // trace edges — degree-1 polylines through the marcher's samples —
+        // conformal with the faces whose trim loops carry the identical
+        // sample points.
+        EdgeCurve::Nurbs(nurbs) if nurbs.degree() == 1 => {
+            clip_params(breakpoint_params(nurbs.knots()), t_start, t_end)
+        }
         EdgeCurve::Nurbs(nurbs) => {
             let options = CurveTessellationOptions {
                 chord_tolerance: BOUNDARY_CHORD_TOLERANCE,
@@ -126,6 +135,18 @@ fn evaluate(curve: &EdgeCurve, t: f64) -> Result<Point3> {
         EdgeCurve::Ellipse(c) => c.evaluate(t),
         EdgeCurve::Nurbs(c) => c.point_at(t),
     }
+}
+
+/// The distinct knot values of a knot vector — the breakpoints of a degree-1
+/// curve, where its control polygon vertices sit.
+fn breakpoint_params(knots: &crate::geometry::nurbs::KnotVector) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    for &k in knots.as_slice() {
+        if out.last().is_none_or(|&last| k > last) {
+            out.push(k);
+        }
+    }
+    out
 }
 
 /// `n + 1` uniformly spaced parameters from `t_start` to `t_end` inclusive.
@@ -232,6 +253,35 @@ mod tests {
         let first: Vec<f64> = cache.get(&store, edge).unwrap().params.clone();
         let second: Vec<f64> = cache.get(&store, edge).unwrap().params.clone();
         assert_eq!(first, second);
+    }
+
+    /// A degree-1 NURBS polyline edge samples exactly at its breakpoints
+    /// (the control polygon vertices) — losslessly and deterministically, so
+    /// SSI trace edges conform with trim loops built from the same points.
+    #[test]
+    fn degree_one_nurbs_edge_samples_at_breakpoints() {
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.5, 0.0),
+            Point3::new(2.0, 0.2, 0.3),
+            Point3::new(3.0, 1.0, 0.1),
+        ];
+        let poly = NurbsCurve3D::polyline(&pts).unwrap();
+        let (t0, t1) = poly.parameter_domain();
+        let (store, edge) = store_with_edge(EdgeCurve::Nurbs(poly), t0, t1);
+        let mut cache = EdgeSampleCache::new(TessellationParams::default());
+        let samples = cache.get(&store, edge).unwrap();
+        assert_eq!(
+            samples.points.len(),
+            pts.len(),
+            "one sample per polyline vertex"
+        );
+        for (sample, expected) in samples.points.iter().zip(&pts) {
+            assert!(
+                (*sample - *expected).norm() < 1e-12,
+                "breakpoint sample must reproduce the polyline vertex"
+            );
+        }
     }
 
     #[test]

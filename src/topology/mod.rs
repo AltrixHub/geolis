@@ -10,7 +10,7 @@ pub mod wire;
 
 pub use edge::{EdgeCurve, EdgeData, EdgeId};
 pub use face::{FaceData, FaceId, FacePcurve, FaceSurface};
-pub use name::{EdgeName, EdgeRole, FaceName, FaceRole, NameRegistry, OpId, SegmentTag};
+pub use name::{EdgeName, EdgeRole, FaceName, FaceRole, NameRegistry, OpId, SegmentTag, SplitSide};
 pub use shell::{ShellData, ShellId};
 pub use solid::{SolidData, SolidId};
 pub use trim::{FaceTrim, TrimLoop};

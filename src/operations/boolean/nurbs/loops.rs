@@ -106,21 +106,14 @@ pub(crate) fn extract_cut_loops(
                 if branch.points.len() < 3 {
                     continue;
                 }
-                // An open branch is acceptable only when BOTH endpoints sit on
-                // a tool kink edge (chained across adjacent tool faces below);
-                // every other open branch keeps the pre-chaining typed error.
+                // An open branch is acceptable only when BOTH endpoints sit
+                // on a tool kink edge or a target face boundary (chained
+                // across adjacent faces below); every other open branch keeps
+                // the pre-chaining typed error.
                 if !branch.closed
-                    && !stitch::open_branch_on_tool_kinks(&branch, target_surf, tool_surf)
+                    && !stitch::open_branch_admissible(&branch, target_surf, tool_surf)
                 {
                     return Err(open_branch_error());
-                }
-                if crosses_target_seam(&branch, target_surf) {
-                    return Err(OperationError::Failed(
-                        "through-cut loop crosses the target face's parametric seam \
-                         (unsupported until general boolean face splitting)"
-                            .into(),
-                    )
-                    .into());
                 }
                 let cut = CutLoop {
                     target_face: *target_id,
@@ -137,7 +130,7 @@ pub(crate) fn extract_cut_loops(
     }
 
     let mut cuts = group_per_tool_face(&loops, tool_faces)?;
-    let chains = stitch::chain_open_segments(&open_segments, tool_faces)?;
+    let chains = stitch::chain_open_segments(&open_segments, target_faces, tool_faces)?;
     cuts.extend(group_chains(chains, tool_faces)?);
 
     if cuts.is_empty() {
@@ -231,6 +224,9 @@ fn group_chains(
             .map(|s| index_of(s.tool_face))
             .collect();
         key.sort_unstable();
+        // A chain may cross one tool face in several segments (split by
+        // target-face boundaries); the group identity is the face SET.
+        key.dedup();
         groups.entry(key).or_default().push(chain);
     }
 
@@ -263,15 +259,19 @@ fn group_chains(
     Ok(cuts)
 }
 
-/// Whether a closed loop's target-UV trace crosses the target face's own
-/// parametric seam: a geometrically closed target direction whose consecutive
-/// trace samples jump more than half the period.
+/// Whether a loop's target-UV trace crosses the target face's own parametric
+/// seam: a geometrically closed target direction whose consecutive trace
+/// samples jump more than half the period.
 ///
 /// Such a loop is genuinely closed in 3D, but its punch polygon would have to
-/// cross the edge of the target's unrolled UV rectangle — not a simple polygon.
-/// The caller rejects it with a typed error until general boolean face
-/// splitting can split the target at the seam.
-fn crosses_target_seam(branch: &SurfaceIntersectionCurve, target: &NurbsSurface) -> bool {
+/// cross the edge of the target's unrolled UV rectangle — not a simple
+/// polygon. The subtract path splits it at the exact seam samples and applies
+/// the halves as boundary notches (F3b); the intersect path still rejects it
+/// with a typed error.
+pub(crate) fn crosses_target_seam(
+    branch: &SurfaceIntersectionCurve,
+    target: &NurbsSurface,
+) -> bool {
     let ((u0, u1), (v0, v1)) = target.parameter_domain();
     let u_closed = target.is_closed_in_u();
     let v_closed = target.is_closed_in_v();
@@ -402,8 +402,11 @@ mod tests {
         );
     }
 
+    /// F5 Phase C (formerly the pinned F1 typed error): a loop straddling the
+    /// TARGET's parametric seam is extracted as a regular closed through-cut
+    /// loop — the subtract path splits it at its exact seam samples.
     #[test]
-    fn loop_crossing_target_seam_is_rejected() {
+    fn loop_crossing_target_seam_is_extracted() {
         use crate::geometry::nurbs::NurbsCurve3D;
         use crate::math::Vector3;
         use crate::operations::creation::{MakeNurbsPrism, MakeRevolvedSolid};
@@ -413,10 +416,8 @@ mod tests {
         let vase = MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.0, 3.0)])
             .execute(&mut store)
             .unwrap();
-        // Tube along +X: its entry hole straddles the revolved wall's
-        // parametric seam. Punching that hole would need a trim polygon that
-        // crosses the unrolled UV rectangle's edge — unsupported until general
-        // boolean face splitting.
+        // Tube along +X: its exit hole straddles the revolved wall's
+        // parametric seam.
         let circle =
             NurbsCurve3D::circle(Point3::new(-4.0, 0.0, 1.5), 0.4, Vector3::x(), Vector3::y())
                 .unwrap();
@@ -425,12 +426,27 @@ mod tests {
             .unwrap();
         let target = collect_nurbs_faces(&store, &solid_faces(&store, vase));
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
-        let result = extract_cut_loops(&target, &tool);
-        let err = result.expect_err("seam-straddling hole must be a typed error");
-        assert!(
-            err.to_string().contains("parametric seam"),
-            "error must name the target-seam limitation, got: {err}"
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
+        assert_eq!(cuts.len(), 1, "one tool side face");
+        let ToolFaceCut::Through { loops, .. } = &cuts[0] else {
+            panic!("expected a through cut, got {:?}", cuts[0]);
+        };
+        let wall_surf = &target
+            .iter()
+            .find(|(id, _)| *id == loops[0].target_face)
+            .unwrap()
+            .1;
+        let seam_loops = loops
+            .iter()
+            .filter(|l| crosses_target_seam(&l.branch, wall_surf))
+            .count();
+        assert_eq!(
+            seam_loops, 1,
+            "exactly one of the two loops straddles the wall seam"
         );
+        for l in loops {
+            assert!(l.branch.closed, "seam-straddling loop is genuinely closed");
+        }
     }
 
     #[test]
@@ -539,15 +555,123 @@ mod tests {
                 assert!((ua - ub).norm() == 0.0, "junction {i} target UV not welded");
             }
             // Every segment lies on the chain's single target face.
-            for seg in &chain.segments {
-                assert_eq!(seg.target_face, chain.target_face);
-            }
+            assert!(
+                chain.single_target_face().is_some(),
+                "mid-wall box chain stays on one target face"
+            );
         }
 
         // Entry (lower mean tool v) and exit land on the two opposite wall
         // faces, ordered by the same mean-v convention as the tube path.
-        assert_ne!(chains[0].target_face, chains[1].target_face);
+        assert_ne!(
+            chains[0].single_target_face(),
+            chains[1].single_target_face()
+        );
         assert!(chains[0].mean_v() < chains[1].mean_v());
+    }
+
+    /// F5 Phase C: a box window straddling a TARGET kink edge (two collinear
+    /// wall segments sharing a vertical joint). The entry-side SSI branches
+    /// end on the target faces' shared boundary and are chained ACROSS the
+    /// target faces into one closed loop with exactly welded junctions.
+    #[test]
+    fn window_across_target_kink_chains_across_target_faces() {
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeSegmentedPrism, ProfileSegment};
+
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+
+        let mut store = TopologyStore::new();
+        // Wall: 6 x 0.4 footprint, height 3; the OUTER side is segmented into
+        // two collinear pieces joined at x = 3 (a vertical target kink edge).
+        let wall = MakeSegmentedPrism::new(
+            vec![
+                line(p(0.0, 0.0, 0.0), p(3.0, 0.0, 0.0)), // outer-a
+                line(p(3.0, 0.0, 0.0), p(6.0, 0.0, 0.0)), // outer-b
+                line(p(6.0, 0.0, 0.0), p(6.0, 0.4, 0.0)), // end-east
+                line(p(6.0, 0.4, 0.0), p(0.0, 0.4, 0.0)), // inner
+                line(p(0.0, 0.4, 0.0), p(0.0, 0.0, 0.0)), // end-west
+            ],
+            Vector3::new(0.0, 0.0, 3.0),
+        )
+        .execute(&mut store)
+        .unwrap();
+        // Box window x in [2, 3.5], z in [1, 2]: straddles the x = 3 joint.
+        let cutter = MakeSegmentedPrism::new(
+            vec![
+                line(p(2.0, -1.0, 1.0), p(3.5, -1.0, 1.0)),
+                line(p(3.5, -1.0, 1.0), p(3.5, -1.0, 2.0)),
+                line(p(3.5, -1.0, 2.0), p(2.0, -1.0, 2.0)),
+                line(p(2.0, -1.0, 2.0), p(2.0, -1.0, 1.0)),
+            ],
+            Vector3::new(0.0, 2.4, 0.0),
+        )
+        .execute(&mut store)
+        .unwrap();
+
+        let target = collect_nurbs_faces(&store, &solid_faces(&store, wall));
+        let tool = collect_nurbs_faces(&store, &solid_faces(&store, cutter));
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
+        assert_eq!(cuts.len(), 1, "one multi-face through cut");
+        let ToolFaceCut::MultiFaceThrough { chains } = &cuts[0] else {
+            panic!("expected a multi-face through cut, got {:?}", cuts[0]);
+        };
+
+        // Entry (outer side, lower mean tool v): crosses BOTH outer faces —
+        // 6 segments (sill and head are split at the target kink).
+        let entry = &chains[0];
+        let exit = &chains[1];
+        assert!(entry.mean_v() < exit.mean_v());
+        assert!(
+            entry.crosses_target_faces(),
+            "entry chain crosses the two outer wall faces"
+        );
+        assert_eq!(entry.segments.len(), 6, "4 tool faces + 2 kink crossings");
+        let entry_targets: std::collections::HashSet<FaceId> =
+            entry.segments.iter().map(|s| s.target_face).collect();
+        assert_eq!(entry_targets.len(), 2, "entry spans exactly 2 target faces");
+
+        // Exit (inner side): a single unsegmented face — a plain 4-segment
+        // chained loop as in Phase B.
+        assert!(exit.single_target_face().is_some());
+        assert_eq!(exit.segments.len(), 4);
+
+        // Every junction (both kinds) is welded EXACTLY: same 3D point on
+        // both sides, and target-boundary junctions pin the target UV on its
+        // domain bound.
+        for chain in [entry, exit] {
+            let n = chain.segments.len();
+            for i in 0..n {
+                let a = &chain.segments[i];
+                let b = &chain.segments[(i + 1) % n];
+                let pa = *a.branch.points.last().unwrap();
+                let pb = *b.branch.points.first().unwrap();
+                assert!(
+                    (pa - pb).norm() == 0.0,
+                    "junction {i} not welded: {pa:?} vs {pb:?}"
+                );
+                if a.target_face != b.target_face {
+                    // Target-boundary junction: both target UVs pinned
+                    // exactly on their domain bounds.
+                    for (seg, uv) in [
+                        (a, *a.branch.uv_a.last().unwrap()),
+                        (b, *b.branch.uv_a.first().unwrap()),
+                    ] {
+                        let surf = &target
+                            .iter()
+                            .find(|(id, _)| *id == seg.target_face)
+                            .unwrap()
+                            .1;
+                        let ((u0, u1), _) = surf.parameter_domain();
+                        assert!(
+                            (uv.x - u0).abs() == 0.0 || (u1 - uv.x).abs() == 0.0,
+                            "target UV not pinned on its u bound: {uv:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

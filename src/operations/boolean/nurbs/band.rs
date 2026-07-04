@@ -198,10 +198,58 @@ pub(crate) struct BandFragment {
     pub face: FaceId,
 }
 
+/// One contiguous cyclic run of chain segments on a single tool side face.
+#[derive(Debug, Clone)]
+struct ToolRun {
+    face: FaceId,
+    /// Chain-order segment indices (cyclically contiguous).
+    indices: Vec<usize>,
+}
+
+impl ToolRun {
+    fn first(&self) -> usize {
+        self.indices[0]
+    }
+    fn last(&self) -> usize {
+        *self.indices.last().unwrap_or_else(|| unreachable!())
+    }
+}
+
+/// Groups a chain's segments into cyclic contiguous runs per tool face
+/// (the stitcher guarantees at most one run per face).
+fn tool_runs(chain: &CutChain) -> Result<Vec<ToolRun>> {
+    let n = chain.segments.len();
+    let Some(first_change) =
+        (0..n).find(|&i| chain.segments[i].tool_face != chain.segments[(i + n - 1) % n].tool_face)
+    else {
+        return Err(OperationError::Failed(
+            "multi-face band requires a chain crossing tool side faces".into(),
+        )
+        .into());
+    };
+    let mut runs: Vec<ToolRun> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        let start = (first_change + i) % n;
+        let face = chain.segments[start].tool_face;
+        let mut len = 1usize;
+        while len < n && chain.segments[(start + len) % n].tool_face == face {
+            len += 1;
+        }
+        runs.push(ToolRun {
+            face,
+            indices: (0..len).map(|k| (start + k) % n).collect(),
+        });
+        i += len;
+    }
+    Ok(runs)
+}
+
 /// Builds the band fragments of a multi-face through cut: ONE face per tool
-/// side face crossed by the chained loops, each trimmed to its segment of the
-/// entry and exit chains, sharing its entry / exit ring edges with the
-/// punched target faces and NEW kink-crossing edges with the adjacent
+/// side face crossed by the chained loops, each trimmed to that face's chain
+/// segments (possibly several, when the loop crosses target face boundaries
+/// on that tool face), sharing its entry / exit ring edges with the punched
+/// or split target faces and NEW kink-crossing edges with the adjacent
 /// fragments (F2 shared-edge topology).
 ///
 /// The kink-crossing edges are straight segments between the entry and exit
@@ -221,8 +269,10 @@ pub(crate) fn build_band_fragments(
     entry_ring: &ChainRing,
     exit_ring: &ChainRing,
 ) -> Result<Vec<BandFragment>> {
-    let n = entry.segments.len();
-    if n < 3 || exit.segments.len() != n {
+    let entry_runs = tool_runs(entry)?;
+    let exit_runs = tool_runs(exit)?;
+    let n_runs = entry_runs.len();
+    if n_runs < 3 || exit_runs.len() != n_runs {
         return Err(OperationError::Failed(
             "multi-face through cut requires entry and exit chains crossing \
              the same three or more tool side faces"
@@ -231,48 +281,37 @@ pub(crate) fn build_band_fragments(
         .into());
     }
 
-    // Face index within the ENTRY chain: normalizes junction face pairs.
-    let entry_index: HashMap<FaceId, usize> = entry
-        .segments
+    // Run index per face within the ENTRY chain: normalizes junction pairs.
+    let entry_index: HashMap<FaceId, usize> = entry_runs
         .iter()
         .enumerate()
-        .map(|(i, s)| (s.tool_face, i))
+        .map(|(i, r)| (r.face, i))
         .collect();
-    let exit_index_of = |face: FaceId| -> Result<usize> {
-        exit.segments
-            .iter()
-            .position(|s| s.tool_face == face)
-            .ok_or_else(|| {
-                OperationError::Failed(
-                    "entry and exit chained loops cross different tool side \
-                     faces"
-                        .into(),
-                )
-                .into()
-            })
+    let exit_run_of = |face: FaceId| -> Result<&ToolRun> {
+        exit_runs.iter().find(|r| r.face == face).ok_or_else(|| {
+            OperationError::Failed(
+                "entry and exit chained loops cross different tool side \
+                 faces"
+                    .into(),
+            )
+            .into()
+        })
     };
+    let kink_edges = build_run_kink_edges(
+        store,
+        entry,
+        exit,
+        &entry_runs,
+        &exit_runs,
+        &entry_index,
+        entry_ring,
+        exit_ring,
+    )?;
 
-    // One shared kink-crossing edge per junction face pair.
-    let mut kink_edges: HashMap<(usize, usize), EdgeId> = HashMap::new();
-    for i in 0..n {
-        let key = junction_key(entry, i, &entry_index)?;
-        let exit_j = matching_junction(exit, key, &entry_index)?;
-        let entry_point = entry.segments[i].branch.points[0];
-        let exit_point = exit.segments[exit_j].branch.points[0];
-        let edge = straight_edge(
-            store,
-            entry_ring.junctions[i],
-            exit_ring.junctions[exit_j],
-            entry_point,
-            exit_point,
-        )?;
-        kink_edges.insert(key, edge);
-    }
-
-    // One fragment per entry segment.
-    let mut fragments = Vec::with_capacity(n);
-    for (i, seg) in entry.segments.iter().enumerate() {
-        let tool_face = seg.tool_face;
+    // One fragment per entry run.
+    let mut fragments = Vec::with_capacity(n_runs);
+    for (i, run) in entry_runs.iter().enumerate() {
+        let tool_face = run.face;
         let surface = match &store.face(tool_face)?.surface {
             FaceSurface::Nurbs(s) => s.clone(),
             _ => {
@@ -282,24 +321,35 @@ pub(crate) fn build_band_fragments(
                 .into())
             }
         };
-        let j = exit_index_of(tool_face)?;
+        let exit_run = exit_run_of(tool_face)?;
 
-        let entry_trace = clamp_trace(&seg.branch.uv_b, &surface);
-        let exit_trace = clamp_trace(&exit.segments[j].branch.uv_b, &surface);
+        // Trim ribbon between the two concatenated tool-UV traces.
+        let mut entry_uv: Vec<Point2> = Vec::new();
+        for &k in &run.indices {
+            entry_uv.extend_from_slice(&entry.segments[k].branch.uv_b);
+        }
+        let mut exit_uv: Vec<Point2> = Vec::new();
+        for &k in &exit_run.indices {
+            exit_uv.extend_from_slice(&exit.segments[k].branch.uv_b);
+        }
+        let entry_trace = clamp_trace(&entry_uv, &surface);
+        let exit_trace = clamp_trace(&exit_uv, &surface);
         let outer = stitch_band_loop(&entry_trace, &exit_trace)?;
         let trim = FaceTrim::new(outer, Vec::new());
 
-        let key_start = junction_key(entry, i, &entry_index)?;
-        let key_end = junction_key(entry, (i + 1) % n, &entry_index)?;
-        let wire_edges = orient_cycle(
-            store,
-            &[
-                entry_ring.edges[i],
-                kink_edges[&key_end],
-                exit_ring.edges[j],
-                kink_edges[&key_start],
-            ],
-        )?;
+        let prev = &entry_runs[(i + n_runs - 1) % n_runs];
+        let next = &entry_runs[(i + 1) % n_runs];
+        let (kink_start, _) = kink_edges[&run_pair_key(&entry_index, prev, run)?];
+        let (kink_end, end_exit_vertex) = kink_edges[&run_pair_key(&entry_index, run, next)?];
+
+        let exit_edges =
+            exit_edges_from(exit_run, exit_ring, exit.segments.len(), end_exit_vertex)?;
+
+        let mut cycle: Vec<EdgeId> = run.indices.iter().map(|&k| entry_ring.edges[k]).collect();
+        cycle.push(kink_end);
+        cycle.extend(exit_edges);
+        cycle.push(kink_start);
+        let wire_edges = orient_cycle(store, &cycle)?;
         let wire = store.add_wire(WireData {
             edges: wire_edges,
             is_closed: true,
@@ -417,17 +467,46 @@ fn common_vertex(store: &TopologyStore, a: EdgeId, b: EdgeId) -> Result<VertexId
     Err(OperationError::Failed("adjacent buried ring edges share no corner vertex".into()).into())
 }
 
-/// The unordered tool-face pair of a chain's junction `i` (between segments
-/// `i - 1` and `i`), normalized through the entry chain's face indices.
-fn junction_key(
-    chain: &CutChain,
-    i: usize,
+/// The exit run's ring edges in cycle-adjacent order: after the end kink
+/// edge the boundary walk stands on the exit junction vertex; the exit run
+/// is traversed from whichever of its two ends that vertex is.
+fn exit_edges_from(
+    exit_run: &ToolRun,
+    exit_ring: &ChainRing,
+    n_exit: usize,
+    end_exit_vertex: VertexId,
+) -> Result<Vec<EdgeId>> {
+    let exit_start_vertex = exit_ring.junctions[exit_run.first()];
+    let exit_end_vertex = exit_ring.junctions[(exit_run.last() + 1) % n_exit];
+    if end_exit_vertex == exit_start_vertex {
+        Ok(exit_run
+            .indices
+            .iter()
+            .map(|&k| exit_ring.edges[k])
+            .collect())
+    } else if end_exit_vertex == exit_end_vertex {
+        Ok(exit_run
+            .indices
+            .iter()
+            .rev()
+            .map(|&k| exit_ring.edges[k])
+            .collect())
+    } else {
+        Err(OperationError::Failed(
+            "entry and exit chained loops disagree on tool kink crossings".into(),
+        )
+        .into())
+    }
+}
+
+/// The unordered entry-run-index pair identifying the junction between two
+/// adjacent tool-face runs.
+fn run_pair_key(
     entry_index: &HashMap<FaceId, usize>,
+    prev: &ToolRun,
+    next: &ToolRun,
 ) -> Result<(usize, usize)> {
-    let n = chain.segments.len();
-    let prev_face = chain.segments[(i + n - 1) % n].tool_face;
-    let next_face = chain.segments[i].tool_face;
-    let (Some(&a), Some(&b)) = (entry_index.get(&prev_face), entry_index.get(&next_face)) else {
+    let (Some(&a), Some(&b)) = (entry_index.get(&prev.face), entry_index.get(&next.face)) else {
         return Err(OperationError::Failed(
             "entry and exit chained loops cross different tool side faces".into(),
         )
@@ -436,21 +515,58 @@ fn junction_key(
     Ok((a.min(b), a.max(b)))
 }
 
-/// Finds the junction of `chain` whose face pair equals `key`.
-fn matching_junction(
-    chain: &CutChain,
-    key: (usize, usize),
+/// Builds one shared kink-crossing edge per junction face pair, recording
+/// the exit junction vertex it lands on (for exit-run direction resolution).
+#[allow(clippy::too_many_arguments)]
+fn build_run_kink_edges(
+    store: &mut TopologyStore,
+    entry: &CutChain,
+    exit: &CutChain,
+    entry_runs: &[ToolRun],
+    exit_runs: &[ToolRun],
     entry_index: &HashMap<FaceId, usize>,
-) -> Result<usize> {
-    for j in 0..chain.segments.len() {
-        if junction_key(chain, j, entry_index)? == key {
-            return Ok(j);
+    entry_ring: &ChainRing,
+    exit_ring: &ChainRing,
+) -> Result<HashMap<(usize, usize), (EdgeId, VertexId)>> {
+    let n_runs = entry_runs.len();
+    let mut kink_edges: HashMap<(usize, usize), (EdgeId, VertexId)> = HashMap::new();
+    for i in 0..n_runs {
+        let prev = &entry_runs[(i + n_runs - 1) % n_runs];
+        let next = &entry_runs[i];
+        let key = run_pair_key(entry_index, prev, next)?;
+
+        // The matching exit junction: the exit run boundary between the same
+        // two tool faces.
+        let mut exit_vertex: Option<(usize, VertexId)> = None;
+        for j in 0..n_runs {
+            let e_prev = &exit_runs[(j + n_runs - 1) % n_runs];
+            let e_next = &exit_runs[j];
+            if run_pair_key(entry_index, e_prev, e_next)? == key {
+                let idx = e_next.first();
+                exit_vertex = Some((idx, exit_ring.junctions[idx]));
+                break;
+            }
         }
+        let Some((exit_idx, exit_v)) = exit_vertex else {
+            return Err(OperationError::Failed(
+                "entry and exit chained loops disagree on tool kink crossings".into(),
+            )
+            .into());
+        };
+
+        let entry_idx = next.first();
+        let entry_point = entry.segments[entry_idx].branch.points[0];
+        let exit_point = exit.segments[exit_idx].branch.points[0];
+        let edge = straight_edge(
+            store,
+            entry_ring.junctions[entry_idx],
+            exit_v,
+            entry_point,
+            exit_point,
+        )?;
+        kink_edges.insert(key, (edge, exit_v));
     }
-    Err(OperationError::Failed(
-        "entry and exit chained loops disagree on tool kink crossings".into(),
-    )
-    .into())
+    Ok(kink_edges)
 }
 
 /// A straight (degree-1) 3D edge between two existing vertices.
