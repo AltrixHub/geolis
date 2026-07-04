@@ -34,6 +34,9 @@ pub(crate) mod caps;
 mod cascade_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod curved_opening_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod degenerate_tests;
 pub(crate) mod intersect;
 pub(crate) mod loops;

@@ -44,8 +44,16 @@
 //! jamb corner terminals are accepted as target-boundary terminals, so the
 //! degenerate contacts cleanly reduce to the R2 notch / sever cuts — no
 //! sliver geometry, watertight by construction.
+//!
+//! Variant 7 (F6 Phase R3b) is a plan-ARC curved wall: an annular
+//! segmented-prism strip (outer arc + end lines + inner arc, exact
+//! rational `Arc` profile segments) minus a FULL-HEIGHT door and a window,
+//! both cut through the curved faces by radial 4-side-face box cutters.
+//! The door notches the annular bottom cap along ARC sub-span edges shared
+//! with the curved wall faces; the window punches a chained hole through
+//! both cylindrical faces. Both cuts are clean and watertight.
 
-use std::f64::consts::FRAC_PI_2;
+use std::f64::consts::{FRAC_PI_2, PI};
 
 use geolis::math::{Point3, Vector3};
 use geolis::operations::boolean::Subtract;
@@ -65,6 +73,7 @@ const KINK_WALL_COLOR: Color = Color::rgb(170, 210, 160);
 const CASCADE_WALL_COLOR: Color = Color::rgb(210, 160, 190);
 const DOOR_WALL_COLOR: Color = Color::rgb(160, 200, 200);
 const FLUSH_WALL_COLOR: Color = Color::rgb(220, 200, 150);
+const CURVED_WALL_COLOR: Color = Color::rgb(180, 170, 220);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
 /// Wall thickness in plan.
@@ -78,13 +87,14 @@ const CORNER_RADIUS: f64 = 0.4;
 type WallBuilder = fn(&mut TopologyStore) -> geolis::Result<SolidId>;
 
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
-    let variants: [(f64, &str, Color, WallBuilder); 6] = [
+    let variants: [(f64, &str, Color, WallBuilder); 7] = [
         (8.0, "1", WALL_COLOR, build_l_wall),
         (13.0, "2", CUT_WALL_COLOR, build_window_wall),
         (18.0, "3", KINK_WALL_COLOR, build_kink_window_wall),
         (23.0, "4", CASCADE_WALL_COLOR, build_cascade_wall),
         (28.0, "5", DOOR_WALL_COLOR, build_full_height_door_wall),
         (33.0, "6", FLUSH_WALL_COLOR, build_flush_door_wall),
+        (38.0, "7", CURVED_WALL_COLOR, build_curved_opening_wall),
     ];
     for (label_y, label, color, build) in variants {
         register_label(storage, -1.5, label_y, label, LABEL_SIZE, LABEL_COLOR);
@@ -487,6 +497,99 @@ fn build_flush_door_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
             .map(|t| SegmentTag::new(*t))
             .collect();
         let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 2.4, 0.0))
+            .with_op_id(OpId::new(format!("{op}-box")))
+            .with_segment_tags(cutter_tags)
+            .execute(store)?;
+        current = Subtract::new(current, cutter)
+            .with_op_id(OpId::new(op))
+            .execute(store)?;
+    }
+    Ok(current)
+}
+
+/// Builds the F6 Phase R3b variant: a plan-ARC curved wall — an annular
+/// segmented-prism strip (outer arc r = 8.4, inner arc r = 8.0, azimuth
+/// 60..120 degrees about a center at plan `y = 30`) minus a FULL-HEIGHT
+/// door through the arc faces (the bottom cap notched along arc sub-span
+/// edges) and a window punched through both cylindrical faces.
+fn build_curved_opening_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
+    const CENTER_Y: f64 = 30.0;
+    const R_OUTER: f64 = 8.4;
+    const R_INNER: f64 = 8.0;
+    let deg = |d: f64| d * PI / 180.0;
+    let at = |r: f64, a: f64| Point3::new(r * a.cos(), CENTER_Y + r * a.sin(), 0.0);
+    let center = Point3::new(0.0, CENTER_Y, 0.0);
+
+    // Annular wall strip; the inner arc is traversed backwards via the -Z
+    // normal (the Phase A fillet convention).
+    let wall_profile = vec![
+        ProfileSegment::Arc {
+            center,
+            radius: R_OUTER,
+            normal: Vector3::z(),
+            ref_dir: Vector3::x(),
+            start_angle: deg(60.0),
+            end_angle: deg(120.0),
+        },
+        ProfileSegment::Line {
+            start: at(R_OUTER, deg(120.0)),
+            end: at(R_INNER, deg(120.0)),
+        },
+        ProfileSegment::Arc {
+            center,
+            radius: R_INNER,
+            normal: -Vector3::z(),
+            ref_dir: Vector3::x(),
+            start_angle: deg(-120.0),
+            end_angle: deg(-60.0),
+        },
+        ProfileSegment::Line {
+            start: at(R_INNER, deg(60.0)),
+            end: at(R_OUTER, deg(60.0)),
+        },
+    ];
+    let wall_tags = ["convex", "end-west", "concave", "end-east"]
+        .iter()
+        .map(|t| SegmentTag::new(*t))
+        .collect();
+    let wall = MakeSegmentedPrism::new(wall_profile, Vector3::new(0.0, 0.0, HEIGHT))
+        .with_op_id(OpId::new("demo-curved-wall"))
+        .with_segment_tags(wall_tags)
+        .execute(store)?;
+
+    // Full-height door through the arc apex, then a window east of it.
+    // Both cutters extrude along +Y from inside the annulus, crossing the
+    // concave face first and exiting through the convex face.
+    let openings: [(&str, f64, f64, f64, f64); 2] = [
+        ("demo-curved-door", -0.45, 0.45, -0.5, 2.25),
+        ("demo-curved-win", 1.4, 2.6, 1.0, 2.0),
+    ];
+    let mut current = wall;
+    for (op, x0, x1, z0, z1) in openings {
+        let q = |x: f64, z: f64| Point3::new(x, CENTER_Y + 6.0, z);
+        let cutter_profile = vec![
+            ProfileSegment::Line {
+                start: q(x0, z0),
+                end: q(x1, z0),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z0),
+                end: q(x1, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z1),
+                end: q(x0, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x0, z1),
+                end: q(x0, z0),
+            },
+        ];
+        let cutter_tags = ["sill", "jamb-right", "head", "jamb-left"]
+            .iter()
+            .map(|t| SegmentTag::new(*t))
+            .collect();
+        let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 3.5, 0.0))
             .with_op_id(OpId::new(format!("{op}-box")))
             .with_segment_tags(cutter_tags)
             .execute(store)?;
