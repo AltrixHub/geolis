@@ -250,6 +250,131 @@ pub(crate) fn trace_runs(
     Ok(runs)
 }
 
+/// Splits a CLOSED cut loop that crosses the target face's parametric seam
+/// into per-side trace runs (F3b seam consumer).
+///
+/// The marcher emits exact seam sample pairs at every crossing (the same 3D
+/// point at both parametric bounds), so the loop is cut at those pairs into
+/// open segments whose endpoints are pinned exactly on the target's seam
+/// bounds. Each segment becomes one boundary-to-boundary [`TraceRun`] on the
+/// same face; the splitter then applies each hole half as a boundary notch.
+///
+/// # Errors
+///
+/// Returns a typed error when the loop lacks exact seam samples (a crossing
+/// pair whose 3D points disagree beyond the marcher's junction bound) or the
+/// crossing count is odd.
+pub(crate) fn split_seam_loop(
+    store: &mut TopologyStore,
+    cut: &CutLoop,
+    target: &NurbsSurface,
+    loop_index: u32,
+) -> Result<(ChainTopology, Vec<TraceRun>)> {
+    const JUNCTION_TOLERANCE: f64 = super::stitch::JUNCTION_TOLERANCE;
+
+    let branch = &cut.branch;
+    let n = branch.points.len();
+    let ((u0, u1), (v0, v1)) = target.parameter_domain();
+    let crossing_after = |i: usize| -> bool {
+        let j = (i + 1) % n;
+        let du = (branch.uv_a[j].x - branch.uv_a[i].x).abs();
+        let dv = (branch.uv_a[j].y - branch.uv_a[i].y).abs();
+        (target.is_closed_in_u() && du > 0.5 * (u1 - u0))
+            || (target.is_closed_in_v() && dv > 0.5 * (v1 - v0))
+    };
+    let crossings: Vec<usize> = (0..n).filter(|&i| crossing_after(i)).collect();
+    if crossings.is_empty() || !crossings.len().is_multiple_of(2) {
+        return Err(OperationError::Failed(format!(
+            "seam-straddling loop must cross the target seam an even number \
+             of times; found {} crossings",
+            crossings.len()
+        ))
+        .into());
+    }
+
+    // One shared junction vertex per crossing: the exact seam sample pair
+    // (near at crossings[k], far at crossings[k] + 1) is the same 3D point.
+    let m = crossings.len();
+    let mut junctions = Vec::with_capacity(m);
+    for &c in &crossings {
+        let near = branch.points[c];
+        let far = branch.points[(c + 1) % n];
+        if (near - far).norm() > JUNCTION_TOLERANCE {
+            return Err(OperationError::Failed(
+                "seam crossing without exact seam samples (marcher pair \
+                 disagrees in 3D)"
+                    .into(),
+            )
+            .into());
+        }
+        junctions.push(store.add_vertex(VertexData::new(near)));
+    }
+
+    // Segments between consecutive crossings (cyclic): segment k runs from
+    // the far sample of crossing k to the near sample of crossing k + 1.
+    let mut edges = Vec::with_capacity(m);
+    let mut pcurves = Vec::with_capacity(m);
+    let mut segments: Vec<CutLoop> = Vec::with_capacity(m);
+    for k in 0..m {
+        let start = (crossings[k] + 1) % n;
+        let end = crossings[(k + 1) % m];
+        let mut idxs = Vec::new();
+        let mut i = start;
+        loop {
+            idxs.push(i);
+            if i == end {
+                break;
+            }
+            i = (i + 1) % n;
+        }
+        let mut pts: Vec<Point3> = idxs.iter().map(|&i| branch.points[i]).collect();
+        let uva: Vec<Point2> = idxs.iter().map(|&i| branch.uv_a[i]).collect();
+        let uvb: Vec<Point2> = idxs.iter().map(|&i| branch.uv_b[i]).collect();
+        // Pin the segment ends exactly onto the shared junction points.
+        let first_junction = store.vertex(junctions[k])?.point;
+        let last_junction = store.vertex(junctions[(k + 1) % m])?.point;
+        if let Some(first) = pts.first_mut() {
+            *first = first_junction;
+        }
+        if let Some(last) = pts.last_mut() {
+            *last = last_junction;
+        }
+        let (edge, pcurve) = trace_edge(store, &pts, &uva, junctions[k], junctions[(k + 1) % m])?;
+        edges.push(edge);
+        pcurves.push(pcurve);
+        segments.push(CutLoop {
+            target_face: cut.target_face,
+            tool_face: cut.tool_face,
+            branch: crate::geometry::nurbs::SurfaceIntersectionCurve {
+                points: pts,
+                uv_a: uva,
+                uv_b: uvb,
+                closed: false,
+            },
+        });
+    }
+
+    let topo = ChainTopology {
+        edges: edges.clone(),
+        junctions: junctions.clone(),
+        pcurves: pcurves.clone(),
+    };
+    let runs = segments
+        .iter()
+        .enumerate()
+        .map(|(k, seg)| TraceRun {
+            target_face: cut.target_face,
+            segments: vec![seg.clone()],
+            edges: vec![edges[k]],
+            pcurves: vec![pcurves[k].clone()],
+            loop_index,
+            start_vertex: junctions[k],
+            end_vertex: junctions[(k + 1) % m],
+        })
+        .collect();
+    Ok((topo, runs))
+}
+
 /// One kept fragment of a split target face.
 #[derive(Debug, Clone)]
 pub(crate) struct Fragment {

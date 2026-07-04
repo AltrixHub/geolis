@@ -73,18 +73,15 @@ pub(crate) fn subtract_through_cut(
     for (ci, cut) in cuts.iter().enumerate() {
         match cut {
             super::loops::ToolFaceCut::Through { tool_face, loops } => {
-                let entry_face = lookup.resolve_loop(&loops[0])?;
-                let exit_face = lookup.resolve_loop(&loops[1])?;
-                let entry = punch_onto(store, &loops[0], entry_face)?;
-                let exit = punch_onto(store, &loops[1], exit_face)?;
-                let band =
-                    build_band_face(store, *tool_face, loops, BandRingWires { entry, exit })?;
-                result_faces.push(band);
-                if let Some(op) = op_id {
-                    name_band(store, op, *tool_face, band);
-                    name_rim(store, op, entry_face, entry, 0);
-                    name_rim(store, op, exit_face, exit, 1);
-                }
+                assemble_through(
+                    store,
+                    *tool_face,
+                    loops,
+                    [topos.get(&(ci, 0)), topos.get(&(ci, 1))],
+                    &lookup,
+                    &mut result_faces,
+                    op_id,
+                )?;
             }
             super::loops::ToolFaceCut::Pocket { tool_face, entry } => {
                 // Punch the entry hole, band down to the buried ring, and keep
@@ -196,12 +193,52 @@ fn plan_face_splits(
     HashMap<(usize, usize), ChainTopology>,
     Vec<(FaceId, Vec<TraceRun>)>,
 )> {
+    let seam_crossing = |store: &TopologyStore, loop_: &super::loops::CutLoop| -> Result<bool> {
+        let FaceSurface::Nurbs(surf) = &store.face(loop_.target_face)?.surface else {
+            return Ok(false);
+        };
+        Ok(super::loops::crosses_target_seam(&loop_.branch, surf))
+    };
+
     let mut topos: HashMap<(usize, usize), ChainTopology> = HashMap::new();
     let mut runs_by_face: HashMap<FaceId, Vec<TraceRun>> = HashMap::new();
     for (ci, cut) in cuts.iter().enumerate() {
         match cut {
+            super::loops::ToolFaceCut::Through { loops, .. } => {
+                // A closed loop straddling the target's parametric seam is
+                // split at its exact seam samples; the halves become
+                // boundary-notch trace runs on the (single) target face.
+                for (li, loop_) in loops.iter().enumerate() {
+                    if seam_crossing(store, loop_)? {
+                        let FaceSurface::Nurbs(surf) =
+                            store.face(loop_.target_face)?.surface.clone()
+                        else {
+                            return Err(OperationError::Failed(
+                                "seam-straddling loop on a non-NURBS target face".into(),
+                            )
+                            .into());
+                        };
+                        #[allow(clippy::cast_possible_truncation)]
+                        let (topo, runs) = split::split_seam_loop(store, loop_, &surf, li as u32)?;
+                        for run in runs {
+                            runs_by_face.entry(run.target_face).or_default().push(run);
+                        }
+                        topos.insert((ci, li), topo);
+                    }
+                }
+            }
             super::loops::ToolFaceCut::MultiFaceThrough { chains } => {
                 for (li, chain) in chains.iter().enumerate() {
+                    for seg in &chain.segments {
+                        if seam_crossing(store, seg)? {
+                            return Err(OperationError::Failed(
+                                "chained cut loop crossing the target face's \
+                                 parametric seam is unsupported"
+                                    .into(),
+                            )
+                            .into());
+                        }
+                    }
                     if chain.crosses_target_faces() {
                         let topo = split::build_chain_topology(store, chain)?;
                         #[allow(clippy::cast_possible_truncation)]
@@ -213,17 +250,36 @@ fn plan_face_splits(
                     }
                 }
             }
-            super::loops::ToolFaceCut::MultiFacePocket { entry }
-                if entry.crosses_target_faces() =>
-            {
-                return Err(OperationError::Failed(
-                    "pocket cut crossing target face boundaries is unsupported \
-                     (a blind cut must enter through a single face)"
-                        .into(),
-                )
-                .into());
+            super::loops::ToolFaceCut::Pocket { entry, .. } => {
+                if seam_crossing(store, entry)? {
+                    return Err(OperationError::Failed(
+                        "pocket entry loop crossing the target face's \
+                         parametric seam is unsupported"
+                            .into(),
+                    )
+                    .into());
+                }
             }
-            _ => {}
+            super::loops::ToolFaceCut::MultiFacePocket { entry } => {
+                if entry.crosses_target_faces() {
+                    return Err(OperationError::Failed(
+                        "pocket cut crossing target face boundaries is unsupported \
+                         (a blind cut must enter through a single face)"
+                            .into(),
+                    )
+                    .into());
+                }
+                for seg in &entry.segments {
+                    if seam_crossing(store, seg)? {
+                        return Err(OperationError::Failed(
+                            "pocket entry loop crossing the target face's \
+                             parametric seam is unsupported"
+                                .into(),
+                        )
+                        .into());
+                    }
+                }
+            }
         }
     }
     // Deterministic order: the target solid's face order.
@@ -263,6 +319,53 @@ fn name_fragment_rims(
             );
         }
     }
+}
+
+/// Assembles one single-tool-face through cut: a seam-straddling loop's ring
+/// is the wire of its shared trace edges (the fragment already carries the
+/// notch in its outer trim); an interior loop is punched as a trim hole. The
+/// band face joins the two rings.
+fn assemble_through(
+    store: &mut TopologyStore,
+    tool_face: FaceId,
+    loops: &[super::loops::CutLoop; 2],
+    topos: [Option<&ChainTopology>; 2],
+    lookup: &ResultLookup<'_>,
+    result_faces: &mut Vec<FaceId>,
+    op_id: Option<&crate::topology::OpId>,
+) -> Result<()> {
+    let mut rings: [Option<crate::topology::WireId>; 2] = [None, None];
+    for (li, loop_) in loops.iter().enumerate() {
+        if let Some(topo) = topos[li] {
+            rings[li] = Some(
+                store.add_wire(WireData {
+                    edges: topo
+                        .edges
+                        .iter()
+                        .map(|&e| OrientedEdge::new(e, true))
+                        .collect(),
+                    is_closed: true,
+                }),
+            );
+        } else {
+            let face = lookup.resolve_loop(loop_)?;
+            let ring = punch_onto(store, loop_, face)?;
+            if let Some(op) = op_id {
+                #[allow(clippy::cast_possible_truncation)]
+                name_rim(store, op, face, ring, li as u32);
+            }
+            rings[li] = Some(ring);
+        }
+    }
+    let (Some(entry), Some(exit)) = (rings[0], rings[1]) else {
+        return Err(OperationError::Failed("through cut without two rings".into()).into());
+    };
+    let band = build_band_face(store, tool_face, loops, BandRingWires { entry, exit })?;
+    result_faces.push(band);
+    if let Some(op) = op_id {
+        name_band(store, op, tool_face, band);
+    }
+    Ok(())
 }
 
 /// Resolves original target faces to result faces: unaffected faces map to
@@ -2072,6 +2175,110 @@ mod tests {
                 "moved window: {tag} still resolves"
             );
         }
+    }
+
+    /// Acceptance C3 (the flipped F1 seam guard): a revolved (closed) wall
+    /// cut by a tube ACROSS its own parametric seam now succeeds — the
+    /// seam-straddling hole is applied as two boundary notches on the
+    /// unrolled wall face — and the result is manifold with the hole
+    /// genuinely open.
+    #[test]
+    fn revolved_wall_cut_across_its_seam_is_manifold_with_hole() {
+        use crate::geometry::nurbs::NurbsCurve3D;
+        use crate::math::Vector3;
+        use crate::operations::creation::{MakeNurbsPrism, MakeRevolvedSolid};
+        use crate::topology::{FaceName, FaceRole, OpId};
+
+        let build = || -> (TopologyStore, SolidId) {
+            let mut store = TopologyStore::new();
+            // Plain cylindrical revolved wall (closed in u, seam at +X).
+            let vase = MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.0, 3.0)])
+                .with_op_id(OpId::new("vase1"))
+                .execute(&mut store)
+                .unwrap();
+            // Tube along +X through both walls: the +X hole straddles the
+            // wall's parametric seam; the -X hole is a plain interior hole.
+            let circle =
+                NurbsCurve3D::circle(Point3::new(-4.0, 0.0, 1.5), 0.4, Vector3::x(), Vector3::y())
+                    .unwrap();
+            let tube = MakeNurbsPrism::new(circle, Vector3::new(8.0, 0.0, 0.0))
+                .with_op_id(OpId::new("win1"))
+                .execute(&mut store)
+                .unwrap();
+            let result =
+                subtract_through_cut(&mut store, vase, tube, Some(&OpId::new("cut1"))).unwrap();
+            (store, result)
+        };
+        let (store, result) = build();
+
+        let shell = store
+            .shell(store.solid(result).unwrap().outer_shell)
+            .unwrap();
+        // 2 caps + the notched wall fragment + 1 band = 4 faces.
+        assert_eq!(shell.faces.len(), 4, "got {}", shell.faces.len());
+
+        // The wall keeps its persistent name (one kept fragment = the wall
+        // face itself, now notched at the seam) and carries the interior
+        // hole as an inner wire while the seam hole lives in the outer trim.
+        let wall_name = FaceName::Created {
+            op: OpId::new("vase1"),
+            role: FaceRole::Wall,
+        };
+        let wall = store.names().face(&wall_name).expect("wall resolves");
+        assert!(shell.faces.contains(&wall), "named wall is in the result");
+        let wall_face = store.face(wall).unwrap();
+        assert_eq!(
+            wall_face.inner_wires.len(),
+            1,
+            "interior (-X) hole is an inner wire; the seam (+X) hole is a \
+             boundary notch"
+        );
+        assert_eq!(
+            wall_face.trim.as_ref().unwrap().holes.len(),
+            1,
+            "one interior trim hole"
+        );
+
+        // Manifold: the result position-welds watertight (the unrolled
+        // wall's seam sides weld against each other; the notches weld
+        // against the band).
+        let boundary = welded_boundary_edges(&store, result);
+        assert_eq!(
+            boundary, 0,
+            "seam-straddling cut must position-weld watertight \
+             (found {boundary} boundary edges)"
+        );
+
+        // The hole is genuinely open at the seam: no mesh vertex intrudes
+        // into the tube interior around the +X wall crossing.
+        let mesh = TessellateSolid::new(result, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        for v in &mesh.vertices {
+            if v.x > 1.6 && v.x < 2.4 {
+                let d = (v.y * v.y + (v.z - 1.5) * (v.z - 1.5)).sqrt();
+                assert!(
+                    d > 0.32,
+                    "vertex ({:.3},{:.3},{:.3}) intrudes into the seam hole",
+                    v.x,
+                    v.y,
+                    v.z
+                );
+            }
+        }
+
+        // Rebuild stability: the notched wall resolves to identical geometry
+        // in a from-scratch rebuild.
+        let (store_b, _) = build();
+        let wall_b = store_b.names().face(&wall_name).expect("wall resolves B");
+        let sample = |store: &TopologyStore, f: FaceId| match &store.face(f).unwrap().surface {
+            FaceSurface::Nurbs(s) => s.point_at(0.31, 0.62).unwrap(),
+            other => panic!("wall must be NURBS, got {other:?}"),
+        };
+        assert!(
+            (sample(&store, wall) - sample(&store_b, wall_b)).norm() < 1e-9,
+            "wall moved across rebuilds"
+        );
     }
 
     /// Builds a 3-outer-segment wall (narrow tagged `outer-mid` piece,

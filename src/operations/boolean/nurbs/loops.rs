@@ -115,14 +115,6 @@ pub(crate) fn extract_cut_loops(
                 {
                     return Err(open_branch_error());
                 }
-                if crosses_target_seam(&branch, target_surf) {
-                    return Err(OperationError::Failed(
-                        "through-cut loop crosses the target face's parametric seam \
-                         (unsupported until general boolean face splitting)"
-                            .into(),
-                    )
-                    .into());
-                }
                 let cut = CutLoop {
                     target_face: *target_id,
                     tool_face: *tool_id,
@@ -267,15 +259,19 @@ fn group_chains(
     Ok(cuts)
 }
 
-/// Whether a closed loop's target-UV trace crosses the target face's own
-/// parametric seam: a geometrically closed target direction whose consecutive
-/// trace samples jump more than half the period.
+/// Whether a loop's target-UV trace crosses the target face's own parametric
+/// seam: a geometrically closed target direction whose consecutive trace
+/// samples jump more than half the period.
 ///
 /// Such a loop is genuinely closed in 3D, but its punch polygon would have to
-/// cross the edge of the target's unrolled UV rectangle — not a simple polygon.
-/// The caller rejects it with a typed error until general boolean face
-/// splitting can split the target at the seam.
-fn crosses_target_seam(branch: &SurfaceIntersectionCurve, target: &NurbsSurface) -> bool {
+/// cross the edge of the target's unrolled UV rectangle — not a simple
+/// polygon. The subtract path splits it at the exact seam samples and applies
+/// the halves as boundary notches (F3b); the intersect path still rejects it
+/// with a typed error.
+pub(crate) fn crosses_target_seam(
+    branch: &SurfaceIntersectionCurve,
+    target: &NurbsSurface,
+) -> bool {
     let ((u0, u1), (v0, v1)) = target.parameter_domain();
     let u_closed = target.is_closed_in_u();
     let v_closed = target.is_closed_in_v();
@@ -406,8 +402,11 @@ mod tests {
         );
     }
 
+    /// F5 Phase C (formerly the pinned F1 typed error): a loop straddling the
+    /// TARGET's parametric seam is extracted as a regular closed through-cut
+    /// loop — the subtract path splits it at its exact seam samples.
     #[test]
-    fn loop_crossing_target_seam_is_rejected() {
+    fn loop_crossing_target_seam_is_extracted() {
         use crate::geometry::nurbs::NurbsCurve3D;
         use crate::math::Vector3;
         use crate::operations::creation::{MakeNurbsPrism, MakeRevolvedSolid};
@@ -417,10 +416,8 @@ mod tests {
         let vase = MakeRevolvedSolid::new(vec![(2.0, 0.0), (2.0, 3.0)])
             .execute(&mut store)
             .unwrap();
-        // Tube along +X: its entry hole straddles the revolved wall's
-        // parametric seam. Punching that hole would need a trim polygon that
-        // crosses the unrolled UV rectangle's edge — unsupported until general
-        // boolean face splitting.
+        // Tube along +X: its exit hole straddles the revolved wall's
+        // parametric seam.
         let circle =
             NurbsCurve3D::circle(Point3::new(-4.0, 0.0, 1.5), 0.4, Vector3::x(), Vector3::y())
                 .unwrap();
@@ -429,12 +426,27 @@ mod tests {
             .unwrap();
         let target = collect_nurbs_faces(&store, &solid_faces(&store, vase));
         let tool = collect_nurbs_faces(&store, &solid_faces(&store, tube));
-        let result = extract_cut_loops(&target, &tool);
-        let err = result.expect_err("seam-straddling hole must be a typed error");
-        assert!(
-            err.to_string().contains("parametric seam"),
-            "error must name the target-seam limitation, got: {err}"
+        let cuts = extract_cut_loops(&target, &tool).unwrap();
+        assert_eq!(cuts.len(), 1, "one tool side face");
+        let ToolFaceCut::Through { loops, .. } = &cuts[0] else {
+            panic!("expected a through cut, got {:?}", cuts[0]);
+        };
+        let wall_surf = &target
+            .iter()
+            .find(|(id, _)| *id == loops[0].target_face)
+            .unwrap()
+            .1;
+        let seam_loops = loops
+            .iter()
+            .filter(|l| crosses_target_seam(&l.branch, wall_surf))
+            .count();
+        assert_eq!(
+            seam_loops, 1,
+            "exactly one of the two loops straddles the wall seam"
         );
+        for l in loops {
+            assert!(l.branch.closed, "seam-straddling loop is genuinely closed");
+        }
     }
 
     #[test]

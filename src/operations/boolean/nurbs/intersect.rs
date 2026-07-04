@@ -90,6 +90,18 @@ pub(crate) fn intersect_through_cut(
             .into());
         };
         for l in loops {
+            // Seam-straddling loops are an F3b subtract feature; the
+            // keep-inside disc cannot cross the target's unrolled rectangle.
+            if let Some((_, surf)) = target_nurbs.iter().find(|(id, _)| *id == l.target_face) {
+                if super::loops::crosses_target_seam(&l.branch, surf) {
+                    return Err(OperationError::Failed(
+                        "through-cut loop crosses the target face's parametric seam \
+                         (unsupported until general boolean face splitting)"
+                            .into(),
+                    )
+                    .into());
+                }
+            }
             if !faces_with_loops.insert(l.target_face) {
                 return Err(OperationError::Failed(
                     "keep-inside intersect requires at most one loop per target \

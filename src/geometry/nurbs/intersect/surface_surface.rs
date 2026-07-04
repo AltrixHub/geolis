@@ -432,7 +432,8 @@ fn march_direction(
         // the low and high boundary) so downstream consumers sorting by the
         // wrapped parameter span the full domain with no wedge gap. Inserted
         // before the closure check so a crossing on the closing step is kept.
-        if let Some(crossing) = seam_crossing(pair, cur, next) {
+        let step_crossing = seam_crossing(pair, cur, next);
+        if let Some(crossing) = step_crossing {
             if let Some((near, far)) = seam_samples(pair, crossing, cur, options)? {
                 pts.push(near);
                 pts.push(far);
@@ -441,6 +442,18 @@ fn march_direction(
 
         // Closure.
         if pts.len() > 3 && (np - seed_point).norm() < step * 0.75 {
+            // The closing wrap back to the seed may itself cross a seam that
+            // the dropped `next` step would have carried (the seed sits just
+            // past the seam): insert the exact pair so closed loops carry
+            // seam samples at EVERY crossing, including the last.
+            if step_crossing.is_none() {
+                if let Some(crossing) = seam_crossing(pair, cur, seed) {
+                    if let Some((near, far)) = seam_samples(pair, crossing, cur, options)? {
+                        pts.push(near);
+                        pts.push(far);
+                    }
+                }
+            }
             return Ok((pts, true));
         }
 
