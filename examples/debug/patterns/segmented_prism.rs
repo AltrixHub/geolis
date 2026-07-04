@@ -13,6 +13,15 @@
 //! entry/exit window loops, and the subtract emits one named band fragment
 //! per box side face. The face mesh and the shared `BRep` edges are both
 //! registered so kink and rim edges are visible in the viewport.
+//!
+//! Variant 3 (Phase C) slides the window ACROSS a wall joint: the outer and
+//! inner sides are each segmented into two collinear tagged pieces sharing a
+//! vertical kink edge at mid-span, and the box cutter straddles that joint.
+//! The SSI branches end on the TARGET faces' shared boundary, the stitcher
+//! chains them across the target kink, and the F3b splitter applies each
+//! hole half as a boundary notch — the notched faces keep their tagged
+//! names, and the split kink sub-edges (above and below the window) are
+//! shared by the neighboring fragments.
 
 use std::f64::consts::FRAC_PI_2;
 
@@ -30,6 +39,7 @@ const LABEL_SIZE: f64 = 1.2;
 const LABEL_COLOR: Color = Color::rgb(255, 220, 80);
 const WALL_COLOR: Color = Color::rgb(200, 170, 130);
 const CUT_WALL_COLOR: Color = Color::rgb(150, 180, 210);
+const KINK_WALL_COLOR: Color = Color::rgb(170, 210, 160);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
 /// Wall thickness in plan.
@@ -74,6 +84,28 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
             storage,
             bounds,
             &cut_store,
+            solid_data.outer_shell,
+            EDGE_COLOR,
+        );
+    }
+
+    register_label(storage, -1.5, 18.0, "3", LABEL_SIZE, LABEL_COLOR);
+
+    let mut kink_store = TopologyStore::new();
+    let Ok(kink_solid) = build_kink_window_wall(&mut kink_store) else {
+        return;
+    };
+    let Ok(kink_mesh) =
+        TessellateSolid::new(kink_solid, TessellationParams::default()).execute(&kink_store)
+    else {
+        return;
+    };
+    register_face(storage, bounds, kink_mesh, KINK_WALL_COLOR);
+    if let Ok(solid_data) = kink_store.solid(kink_solid) {
+        register_edges(
+            storage,
+            bounds,
+            &kink_store,
             solid_data.outer_shell,
             EDGE_COLOR,
         );
@@ -214,5 +246,91 @@ fn build_window_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
 
     Subtract::new(wall, cutter)
         .with_op_id(OpId::new("demo-window-cut"))
+        .execute(store)
+}
+
+/// Builds the Phase C variant: a straight wall whose outer and inner sides
+/// are each segmented into two collinear tagged pieces joined at mid-span
+/// (x = 3), minus a box window straddling that joint. The window's hole
+/// halves become boundary notches on the four adjacent wall faces, which
+/// keep their tagged names; the split joint edges above and below the
+/// window are shared by the neighboring fragments.
+fn build_kink_window_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
+    const Y0: f64 = 13.0;
+    let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+
+    let wall_profile = vec![
+        ProfileSegment::Line {
+            start: p(0.0, Y0),
+            end: p(3.0, Y0),
+        },
+        ProfileSegment::Line {
+            start: p(3.0, Y0),
+            end: p(6.0, Y0),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0),
+            end: p(6.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(6.0, Y0 + THICKNESS),
+            end: p(3.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(3.0, Y0 + THICKNESS),
+            end: p(0.0, Y0 + THICKNESS),
+        },
+        ProfileSegment::Line {
+            start: p(0.0, Y0 + THICKNESS),
+            end: p(0.0, Y0),
+        },
+    ];
+    let wall_tags = [
+        "outer-west",
+        "outer-east",
+        "end-east",
+        "inner-east",
+        "inner-west",
+        "end-west",
+    ]
+    .iter()
+    .map(|t| SegmentTag::new(*t))
+    .collect();
+    let wall = MakeSegmentedPrism::new(wall_profile, Vector3::new(0.0, 0.0, HEIGHT))
+        .with_op_id(OpId::new("demo-kink-wall"))
+        .with_segment_tags(wall_tags)
+        .execute(store)?;
+
+    // Window straddling the x = 3 joint, extruded through the wall.
+    let q = |x: f64, z: f64| Point3::new(x, Y0 - 1.0, z);
+    let cutter_profile = vec![
+        ProfileSegment::Line {
+            start: q(2.2, 1.0),
+            end: q(3.8, 1.0),
+        },
+        ProfileSegment::Line {
+            start: q(3.8, 1.0),
+            end: q(3.8, 2.2),
+        },
+        ProfileSegment::Line {
+            start: q(3.8, 2.2),
+            end: q(2.2, 2.2),
+        },
+        ProfileSegment::Line {
+            start: q(2.2, 2.2),
+            end: q(2.2, 1.0),
+        },
+    ];
+    let cutter_tags = ["sill", "jamb-right", "head", "jamb-left"]
+        .iter()
+        .map(|t| SegmentTag::new(*t))
+        .collect();
+    let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 2.4, 0.0))
+        .with_op_id(OpId::new("demo-kink-window-box"))
+        .with_segment_tags(cutter_tags)
+        .execute(store)?;
+
+    Subtract::new(wall, cutter)
+        .with_op_id(OpId::new("demo-kink-window-cut"))
         .execute(store)
 }
