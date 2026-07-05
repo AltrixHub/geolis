@@ -23,9 +23,7 @@ use crate::math::{Point3, Vector3};
 use crate::operations::boolean::Subtract;
 use crate::operations::creation::{MakeSegmentedPrism, ProfileSegment};
 use crate::tessellation::{TessellateSolid, TessellationParams};
-use crate::topology::{
-    FaceName, FaceRole, OpId, SegmentTag, SolidId, SplitSide, TopologyStore,
-};
+use crate::topology::{FaceName, FaceRole, OpId, SegmentTag, SolidId, SplitSide, TopologyStore};
 
 use super::test_support::welded_boundary_edges;
 
@@ -56,31 +54,37 @@ fn tags(names: [&str; 4]) -> Vec<SegmentTag> {
 /// 0.5), one annulus segmented prism. The hole winds clockwise (the
 /// natural annulus footprint convention), and both rings are tagged.
 fn room_wall(store: &mut TopologyStore) -> SolidId {
-    MakeSegmentedPrism::new(rect_ring(0.0, 0.0, 6.0, 6.0, true), Vector3::new(0.0, 0.0, HEIGHT))
-        .with_holes(vec![rect_ring(0.5, 0.5, 5.5, 5.5, false)])
-        .with_op_id(OpId::new("room1"))
-        .with_segment_tags(tags(["outer-s", "outer-e", "outer-n", "outer-w"]))
-        .with_hole_tags(vec![tags(["inner-w", "inner-n", "inner-e", "inner-s"])])
-        .execute(store)
-        .unwrap()
+    MakeSegmentedPrism::new(
+        rect_ring(0.0, 0.0, 6.0, 6.0, true),
+        Vector3::new(0.0, 0.0, HEIGHT),
+    )
+    .with_holes(vec![rect_ring(0.5, 0.5, 5.5, 5.5, false)])
+    .with_op_id(OpId::new("room1"))
+    .with_segment_tags(tags(["outer-s", "outer-e", "outer-n", "outer-w"]))
+    .with_hole_tags(vec![tags(["inner-w", "inner-n", "inner-e", "inner-s"])])
+    .execute(store)
+    .unwrap()
 }
 
 /// A duplex: outer 9 × 6 footprint with TWO courtyards (A west, B east)
 /// separated by a partition wall.
 fn duplex_wall(store: &mut TopologyStore) -> SolidId {
-    MakeSegmentedPrism::new(rect_ring(0.0, 0.0, 9.0, 6.0, true), Vector3::new(0.0, 0.0, HEIGHT))
-        .with_holes(vec![
-            rect_ring(0.5, 0.5, 4.0, 5.5, false),
-            rect_ring(5.0, 0.5, 8.5, 5.5, false),
-        ])
-        .with_op_id(OpId::new("duplex1"))
-        .with_segment_tags(tags(["outer-s", "outer-e", "outer-n", "outer-w"]))
-        .with_hole_tags(vec![
-            tags(["a-w", "a-n", "a-e", "a-s"]),
-            tags(["b-w", "b-n", "b-e", "b-s"]),
-        ])
-        .execute(store)
-        .unwrap()
+    MakeSegmentedPrism::new(
+        rect_ring(0.0, 0.0, 9.0, 6.0, true),
+        Vector3::new(0.0, 0.0, HEIGHT),
+    )
+    .with_holes(vec![
+        rect_ring(0.5, 0.5, 4.0, 5.5, false),
+        rect_ring(5.0, 0.5, 8.5, 5.5, false),
+    ])
+    .with_op_id(OpId::new("duplex1"))
+    .with_segment_tags(tags(["outer-s", "outer-e", "outer-n", "outer-w"]))
+    .with_hole_tags(vec![
+        tags(["a-w", "a-n", "a-e", "a-s"]),
+        tags(["b-w", "b-n", "b-e", "b-s"]),
+    ])
+    .execute(store)
+    .unwrap()
 }
 
 /// One opening cutter through the SOUTH wall (`y in [0, 0.5]`): profile in
@@ -455,39 +459,45 @@ fn door_preserves_untouched_courtyard_wire() {
     );
 }
 
-/// R2-style cascade on the annulus: door THEN window — the window punches
-/// the already-notched ring faces of a wall whose caps carry inner wires.
+/// R2-style cascade on the annulus in BOTH cut orders: door → window
+/// punches the already-notched ring faces; window → door notches the
+/// already-punched faces (the hole transfers onto the kept fragment).
 #[test]
-fn door_then_window_cascade_on_annulus_is_watertight() {
-    let mut store = TopologyStore::new();
-    let wall = room_wall(&mut store);
-    let doored = subtract(&mut store, wall, &DOOR);
-    let result = subtract(&mut store, doored, &WINDOW);
+fn door_and_window_cascade_on_annulus_in_both_orders() {
+    for order in [[&DOOR, &WINDOW], [&WINDOW, &DOOR]] {
+        let mut store = TopologyStore::new();
+        let mut current = room_wall(&mut store);
+        for cut in order {
+            current = subtract(&mut store, current, cut);
+        }
+        let label = format!("{} then {}", order[0].op, order[1].op);
 
-    assert_eq!(
-        welded_boundary_edges(&store, result),
-        0,
-        "door + window room must weld watertight"
-    );
-    let mesh = TessellateSolid::new(result, TessellationParams::default())
-        .execute(&store)
-        .unwrap();
-    assert_open(&mesh, &DOOR);
-    assert_open(&mesh, &WINDOW);
-
-    // The notched ring faces keep their names and carry the window hole.
-    for tag in ["outer-s", "inner-s"] {
-        let face = resolve(&store, &tag_name("room1", tag));
         assert_eq!(
-            store.face(face).unwrap().inner_wires.len(),
-            1,
-            "{tag} carries the window hole"
+            welded_boundary_edges(&store, current),
+            0,
+            "{label}: door + window room must weld watertight"
         );
-    }
-    for tag in ["jamb-left", "head", "jamb-right"] {
-        assert!(store.names().face(&band_name(&DOOR, tag)).is_some());
-    }
-    for tag in ["sill", "jamb-right", "head", "jamb-left"] {
-        assert!(store.names().face(&band_name(&WINDOW, tag)).is_some());
+        let mesh = TessellateSolid::new(current, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert_open(&mesh, &DOOR);
+        assert_open(&mesh, &WINDOW);
+
+        // The notched ring faces keep their names and carry the window
+        // hole.
+        for tag in ["outer-s", "inner-s"] {
+            let face = resolve(&store, &tag_name("room1", tag));
+            assert_eq!(
+                store.face(face).unwrap().inner_wires.len(),
+                1,
+                "{label}: {tag} carries the window hole"
+            );
+        }
+        for tag in ["jamb-left", "head", "jamb-right"] {
+            assert!(store.names().face(&band_name(&DOOR, tag)).is_some());
+        }
+        for tag in ["sill", "jamb-right", "head", "jamb-left"] {
+            assert!(store.names().face(&band_name(&WINDOW, tag)).is_some());
+        }
     }
 }
