@@ -1,9 +1,15 @@
 pub(crate) mod polygon_union;
+mod provenance;
 mod stroke;
 
 use crate::error::{OperationError, Result};
 use crate::geometry::pline::{Pline, PlineVertex};
+use crate::operations::boolean_2d::union_all_with_holes_traced;
 use polygon_union::{point_in_polygon_class, seg_seg_intersect, PointClass, WALL_EPS, WALL_EPS_SQ};
+use provenance::{footprint_provenances, EdgeSource, InputEdgeSources};
+use stroke::{StrokeLabels, StrokeOrigin};
+
+pub use provenance::{CapEnd, FootprintProvenance, OffsetSide, SegmentOrigin, SegmentProvenance};
 
 /// A planar wall face described by an outer boundary and zero or more holes,
 /// as produced by [`WallOutline2D::execute_faces`] and consumed by downstream
@@ -369,10 +375,56 @@ impl WallOutline2D {
     ///   broken topology (ambiguous half-edge classification, witness on
     ///   another loop's boundary, orientation/depth mismatch).
     pub fn execute_faces(&self) -> Result<Vec<WallFootprint2D>> {
-        let valid: Vec<&Pline> = self
+        Ok(self
+            .execute_faces_with_provenance()?
+            .into_iter()
+            .map(|(footprint, _)| footprint)
+            .collect())
+    }
+
+    /// [`Self::execute_faces`] variant that additionally reports, per
+    /// boundary segment of every output footprint, **where that segment
+    /// came from in the input centerlines** (see [`SegmentProvenance`]).
+    ///
+    /// The returned [`FootprintProvenance`] is aligned 1:1 with the
+    /// footprint's rings: `provenance.outer()[k]` describes the outer
+    /// segment `outer[k] → outer[(k + 1) % n]`, and
+    /// `provenance.holes()[h][k]` likewise for hole `h`. Provenance is
+    /// threaded through the boolean pipeline (never recovered by
+    /// geometric matching), so it is exact and deterministic; see
+    /// [`provenance`](self::FootprintProvenance) for the stability
+    /// guarantees.
+    ///
+    /// # Worked example
+    ///
+    /// A T junction of two walls — bar `(0,0) → (4,0)` and stem
+    /// `(2,0) → (2,3)` — at half-width `0.15` unions into a single
+    /// T-shaped footprint. Its boundary segments report:
+    ///
+    /// - along `y = +0.15`, left of the stem: `pline: 0`,
+    ///   `Side { edge: 0, side: Left }`, `fragment: 0`;
+    /// - along `y = +0.15`, right of the stem: same origin,
+    ///   `fragment: 1` (the stem trimmed the bar's left side in two;
+    ///   fragments are numbered along the bar's direction);
+    /// - along `y = -0.15`: `pline: 0`, `Side { edge: 0, side: Right }`,
+    ///   `fragment: 0` (untrimmed — a single fragment);
+    /// - along `x = 1.85` / `x = 2.15` above the bar: `pline: 1`,
+    ///   `Side { edge: 0, side: Left }` / `Right`, `fragment: 0`;
+    /// - the three flat ends: `Cap { end: Start }` / `Cap { end: End }`
+    ///   of their respective polylines (the stem's start cap is
+    ///   swallowed by the bar's material and does not appear).
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::execute_faces`].
+    pub fn execute_faces_with_provenance(
+        &self,
+    ) -> Result<Vec<(WallFootprint2D, FootprintProvenance)>> {
+        let valid: Vec<(usize, &Pline)> = self
             .plines
             .iter()
-            .filter(|p| p.vertices.len() >= 2)
+            .enumerate()
+            .filter(|(_, p)| p.vertices.len() >= 2)
             .collect();
 
         if valid.is_empty() {
@@ -393,22 +445,36 @@ impl WallOutline2D {
             .into());
         }
 
-        // Step 1: Stroke-expand each polyline into a wall polygon.
+        // Step 1: Stroke-expand each polyline into a wall polygon,
+        // recording per-edge origins for provenance.
         let mut wall_polys: Vec<polygon_union::PolygonWithHoles> = Vec::new();
+        let mut wall_sources: Vec<InputEdgeSources> = Vec::new();
 
-        for pline in &valid {
+        for &(pline_idx, pline) in &valid {
             // Tessellate arc segments into line segments.
             // Tolerance scales with wall width for consistent arc resolution.
             let has_arcs = pline.vertices.iter().any(|v| v.bulge.abs() > 1e-12);
             let arc_tolerance = self.left_width.max(self.right_width) * 0.1;
-            let mut verts: Vec<(f64, f64)> = if has_arcs {
-                let pts = pline.to_points(arc_tolerance.max(polygon_union::WALL_EPS));
-                pts.iter().map(|p| (p.x, p.y)).collect()
+            // `seg_src[k]` = original pline segment index of stroke segment
+            // `k` (identity for line-only inputs; each tessellated arc
+            // chord maps back to its arc segment).
+            let (mut verts, mut seg_src): (Vec<(f64, f64)>, Vec<usize>) = if has_arcs {
+                let (pts, src) =
+                    pline.to_points_with_sources(arc_tolerance.max(polygon_union::WALL_EPS));
+                (pts.iter().map(|p| (p.x, p.y)).collect(), src)
             } else {
-                pline.vertices.iter().map(|v| (v.x, v.y)).collect()
+                let v: Vec<(f64, f64)> = pline.vertices.iter().map(|v| (v.x, v.y)).collect();
+                let seg_count = if pline.closed {
+                    v.len()
+                } else {
+                    v.len().saturating_sub(1)
+                };
+                (v, (0..seg_count).collect())
             };
             // For closed polylines, to_points() may duplicate the start point at
             // the end. Strip trailing duplicate to avoid a zero-length segment.
+            // The stripped path edge count then equals the closed ring's edge
+            // count, so `seg_src` stays aligned with the ring edges.
             if pline.closed && verts.len() >= 2 {
                 let first = verts[0];
                 let last = verts[verts.len() - 1];
@@ -418,9 +484,22 @@ impl WallOutline2D {
                     verts.pop();
                 }
             }
-            let pwh =
-                stroke::stroke_expand(&verts, pline.closed, self.left_width, self.right_width);
+            if pline.closed {
+                // Ring edge count is verts.len(); pad defensively in case the
+                // duplicate strip above did not fire (closing edge keeps the
+                // last path edge's source).
+                while seg_src.len() < verts.len() {
+                    seg_src.push(seg_src.last().copied().unwrap_or(0));
+                }
+            }
+            let (pwh, labels) = stroke::stroke_expand_labeled(
+                &verts,
+                pline.closed,
+                self.left_width,
+                self.right_width,
+            );
             if pwh.outer.len() >= 3 {
+                wall_sources.push(build_edge_sources(pline_idx, &pwh, &labels, &seg_src));
                 wall_polys.push(pwh);
             }
         }
@@ -429,23 +508,81 @@ impl WallOutline2D {
             return Err(OperationError::Failed("no valid wall polygons".to_owned()).into());
         }
 
-        // Step 2: Union all wall polygons into typed face topology.
-        let union_result = polygon_union::union_all_with_holes(&wall_polys)?;
+        // Step 2: Union all wall polygons into typed face topology,
+        // carrying per-edge source sites through the arrangement.
+        let traced = union_all_with_holes_traced(&wall_polys)?;
 
-        if union_result.faces.is_empty() {
+        if traced.is_empty() {
             return Err(OperationError::Failed(
                 "wall outline union produced no results".to_owned(),
             )
             .into());
         }
 
-        let footprints: Vec<WallFootprint2D> = union_result
-            .faces
-            .into_iter()
-            .map(WallFootprint2D::from_polygon_with_holes_unchecked)
-            .collect();
+        // Step 3: Resolve sites to centerline provenance and number
+        // fragments deterministically.
+        let provenances = footprint_provenances(&traced, &wall_sources);
 
-        Ok(footprints)
+        Ok(traced
+            .into_iter()
+            .zip(provenances)
+            .map(|(t, p)| {
+                (
+                    WallFootprint2D::from_polygon_with_holes_unchecked(t.face),
+                    p,
+                )
+            })
+            .collect())
+    }
+}
+
+/// Build the per-edge source table for one stroke-expanded input,
+/// composing the stroke's local origins with the tessellation map
+/// (`seg_src`: stroke segment → original pline segment).
+fn build_edge_sources(
+    pline: usize,
+    pwh: &polygon_union::PolygonWithHoles,
+    labels: &StrokeLabels,
+    seg_src: &[usize],
+) -> InputEdgeSources {
+    let ring = |pts: &[(f64, f64)], origins: &[StrokeOrigin]| -> Vec<EdgeSource> {
+        debug_assert_eq!(pts.len(), origins.len());
+        origins
+            .iter()
+            .enumerate()
+            .map(|(e, o)| {
+                let a = pts[e];
+                let b = pts[(e + 1) % pts.len()];
+                match *o {
+                    StrokeOrigin::Side { seg, side } => EdgeSource {
+                        pline,
+                        origin: SegmentOrigin::Side {
+                            edge: seg_src[seg],
+                            side,
+                        },
+                        tess_ord: seg,
+                        a,
+                        b,
+                    },
+                    StrokeOrigin::Cap { end } => EdgeSource {
+                        pline,
+                        origin: SegmentOrigin::Cap { end },
+                        tess_ord: 0,
+                        a,
+                        b,
+                    },
+                }
+            })
+            .collect()
+    };
+    InputEdgeSources {
+        outer: ring(&pwh.outer, &labels.outer),
+        holes: pwh
+            .holes
+            .iter()
+            .zip(&labels.holes)
+            .map(|(h, l)| ring(h, l))
+            .collect(),
     }
 }
 
@@ -1142,7 +1279,9 @@ mod tests {
             .iter()
             .filter_map(|p| {
                 let verts: Vec<(f64, f64)> = p.vertices.iter().map(|v| (v.x, v.y)).collect();
-                let pwh = super::stroke::stroke_expand(&verts, p.closed, half_width, half_width);
+                let pwh =
+                    super::stroke::stroke_expand_labeled(&verts, p.closed, half_width, half_width)
+                        .0;
                 if pwh.outer.len() >= 3 {
                     Some(pwh)
                 } else {

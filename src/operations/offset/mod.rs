@@ -9,5 +9,8 @@ pub use curve_offset_2d::CurveOffset2D;
 pub use face_offset::FaceOffset;
 pub use pline_offset::PlineOffset2D;
 pub use thicken_face::ThickenFace;
-pub use wall_outline::{WallFootprint2D, WallOutline2D};
+pub use wall_outline::{
+    CapEnd, FootprintProvenance, OffsetSide, SegmentOrigin, SegmentProvenance, WallFootprint2D,
+    WallOutline2D,
+};
 pub use wire_offset_2d::WireOffset2D;
