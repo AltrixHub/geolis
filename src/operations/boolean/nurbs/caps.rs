@@ -106,35 +106,9 @@ fn rebuild_cap(
         Point2::new(rel.dot(plane.u_dir()), rel.dot(plane.v_dir()))
     };
 
-    // Kept boundary pool: the cap's outer AND inner wires with every split
-    // parent edge replaced by its KEPT sub-edges, in traversal order and
-    // orientation.
-    let mut pool: Vec<OrientedEdge> = Vec::new();
-    let wire_ids: Vec<WireId> = std::iter::once(face.outer_wire)
-        .chain(face.inner_wires.iter().copied())
-        .collect();
-    for wire_id in wire_ids {
-        let wire = store.wire(wire_id)?.clone();
-        for oe in &wire.edges {
-            match sub_edges.get(&oe.edge) {
-                None => pool.push(*oe),
-                Some(subs) => {
-                    let ordered: Vec<EdgeId> = if oe.forward {
-                        subs.clone()
-                    } else {
-                        subs.iter().rev().copied().collect()
-                    };
-                    for sub in ordered {
-                        if kept_edges.contains(&sub) {
-                            pool.push(OrientedEdge::new(sub, oe.forward));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Chain the pool + closure edges into closed cycles by shared vertices.
+    // Chain the kept boundary pool + closure edges into closed cycles by
+    // shared vertices.
+    let pool = kept_boundary_pool(store, &face, sub_edges, kept_edges)?;
     let cycles = chain_cycles(store, &pool, closure_edges, used_closures)?;
 
     // Classify cycles by winding in the cap plane's 2D frame: cycles that
@@ -158,27 +132,7 @@ fn rebuild_cap(
         }
     }
 
-    // Re-attach each surviving hole loop to the fragment containing it.
-    let mut fragment_holes: Vec<Vec<WireId>> = vec![Vec::new(); fragment_cycles.len()];
-    for (cycle, polygon) in hole_cycles {
-        let sample = polygon.first().copied().ok_or_else(|| {
-            OperationError::Failed("notched cap hole loop has no boundary samples".into())
-        })?;
-        let containing = fragment_polygons
-            .iter()
-            .position(|frag| super::split::polygon_contains(frag, sample))
-            .ok_or_else(|| {
-                OperationError::Failed(
-                    "notched cap hole loop lies in no kept fragment \
-                     (inconsistent cap-touching cut)"
-                        .into(),
-                )
-            })?;
-        fragment_holes[containing].push(store.add_wire(WireData {
-            edges: cycle,
-            is_closed: true,
-        }));
-    }
+    let fragment_holes = assign_hole_cycles(store, hole_cycles, &fragment_polygons)?;
 
     // One planar fragment per outer cycle (same plane, same sense; the
     // planar tessellation is wire-driven, so no trim is carried).
@@ -222,6 +176,73 @@ fn rebuild_cap(
         )
         .into()),
     }
+}
+
+/// Builds the kept boundary pool: the cap's outer AND inner wires with
+/// every split parent edge replaced by its KEPT sub-edges, in traversal
+/// order and orientation.
+fn kept_boundary_pool(
+    store: &TopologyStore,
+    face: &FaceData,
+    sub_edges: &HashMap<EdgeId, Vec<EdgeId>>,
+    kept_edges: &HashSet<EdgeId>,
+) -> Result<Vec<OrientedEdge>> {
+    let mut pool: Vec<OrientedEdge> = Vec::new();
+    let wire_ids: Vec<WireId> = std::iter::once(face.outer_wire)
+        .chain(face.inner_wires.iter().copied())
+        .collect();
+    for wire_id in wire_ids {
+        let wire = store.wire(wire_id)?;
+        for oe in &wire.edges {
+            match sub_edges.get(&oe.edge) {
+                None => pool.push(*oe),
+                Some(subs) => {
+                    let ordered: Vec<EdgeId> = if oe.forward {
+                        subs.clone()
+                    } else {
+                        subs.iter().rev().copied().collect()
+                    };
+                    for sub in ordered {
+                        if kept_edges.contains(&sub) {
+                            pool.push(OrientedEdge::new(sub, oe.forward));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(pool)
+}
+
+/// Re-attaches each surviving hole cycle to the fragment containing it,
+/// returning one inner-wire list per fragment (parallel to
+/// `fragment_polygons`).
+fn assign_hole_cycles(
+    store: &mut TopologyStore,
+    hole_cycles: Vec<(Vec<OrientedEdge>, Vec<Point2>)>,
+    fragment_polygons: &[Vec<Point2>],
+) -> Result<Vec<Vec<WireId>>> {
+    let mut fragment_holes: Vec<Vec<WireId>> = vec![Vec::new(); fragment_polygons.len()];
+    for (cycle, polygon) in hole_cycles {
+        let sample = polygon.first().copied().ok_or_else(|| {
+            OperationError::Failed("notched cap hole loop has no boundary samples".into())
+        })?;
+        let containing = fragment_polygons
+            .iter()
+            .position(|frag| super::split::polygon_contains(frag, sample))
+            .ok_or_else(|| {
+                OperationError::Failed(
+                    "notched cap hole loop lies in no kept fragment \
+                     (inconsistent cap-touching cut)"
+                        .into(),
+                )
+            })?;
+        fragment_holes[containing].push(store.add_wire(WireData {
+            edges: cycle,
+            is_closed: true,
+        }));
+    }
+    Ok(fragment_holes)
 }
 
 /// Samples a cycle's oriented edges into a polygon in the cap plane's 2D

@@ -243,35 +243,48 @@ impl MakeSegmentedPrism {
         let bottom_cap = cap_over_rings(store, &bottom_rings, &reverse_holes, -self.direction)?;
         let top_cap = cap_over_rings(store, &top_rings, &reverse_holes, self.direction)?;
 
-        if let Some(op) = &self.op_id {
-            let mut named = side_faces.iter();
-            let mut global = 0usize;
-            for (ri, curves) in rings.iter().enumerate() {
-                let ring_tags: Option<&Vec<SegmentTag>> = if ri == 0 {
-                    self.segment_tags.as_ref()
-                } else {
-                    self.hole_tags.as_ref().map(|rings| &rings[ri - 1])
-                };
-                for k in 0..curves.len() {
-                    let &face = named.next().expect("ring sizes match side faces");
-                    let role = match ring_tags {
-                        Some(tags) => FaceRole::Tagged(tags[k].clone()),
-                        // Range validated up front in `validate`.
-                        #[allow(clippy::cast_possible_truncation)]
-                        None => FaceRole::Side(global as u8),
-                    };
-                    bind_created_face(store, face, op, role);
-                    global += 1;
-                }
-            }
-            bind_created_face(store, bottom_cap, op, FaceRole::CapStart);
-            bind_created_face(store, top_cap, op, FaceRole::CapEnd);
-        }
+        self.bind_names(store, &rings, &side_faces, bottom_cap, top_cap);
 
         let mut faces = side_faces;
         faces.push(bottom_cap);
         faces.push(top_cap);
         Ok(finish_solid(store, faces))
+    }
+
+    /// Binds the persistent face names when an op id is present: per-ring
+    /// tags where supplied, positional `Side(k)` continuing across rings
+    /// otherwise, and `CapStart` / `CapEnd` for the caps.
+    fn bind_names(
+        &self,
+        store: &mut TopologyStore,
+        rings: &[Vec<NurbsCurve3D>],
+        side_faces: &[FaceId],
+        bottom_cap: FaceId,
+        top_cap: FaceId,
+    ) {
+        let Some(op) = &self.op_id else {
+            return;
+        };
+        let mut global = 0usize;
+        for (ri, curves) in rings.iter().enumerate() {
+            let ring_tags: Option<&Vec<SegmentTag>> = if ri == 0 {
+                self.segment_tags.as_ref()
+            } else {
+                self.hole_tags.as_ref().map(|rings| &rings[ri - 1])
+            };
+            for k in 0..curves.len() {
+                let role = match ring_tags {
+                    Some(tags) => FaceRole::Tagged(tags[k].clone()),
+                    // Range validated up front in `validate`.
+                    #[allow(clippy::cast_possible_truncation)]
+                    None => FaceRole::Side(global as u8),
+                };
+                bind_created_face(store, side_faces[global], op, role);
+                global += 1;
+            }
+        }
+        bind_created_face(store, bottom_cap, op, FaceRole::CapStart);
+        bind_created_face(store, top_cap, op, FaceRole::CapEnd);
     }
 
     /// Validates the inputs and builds the per-segment curves of every
