@@ -52,6 +52,15 @@
 //! The door notches the annular bottom cap along ARC sub-span edges shared
 //! with the curved wall faces; the window punches a chained hole through
 //! both cylindrical faces. Both cuts are clean and watertight.
+//!
+//! Variant 8 (annulus prism) is a CLOSED square room: ONE segmented prism
+//! whose footprint is the outer ring plus a courtyard hole
+//! (`with_holes` / `with_hole_tags`), so every wall face — courtyard side
+//! included — is a named NURBS face and the caps are annulus faces with
+//! an inner wire. A window through-cuts the south wall (entering the
+//! outer ring face and exiting the INNER ring face) and a full-height
+//! door notches the bottom cap, merging the courtyard wire into the cap
+//! boundary. Watertight by construction.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -74,6 +83,7 @@ const CASCADE_WALL_COLOR: Color = Color::rgb(210, 160, 190);
 const DOOR_WALL_COLOR: Color = Color::rgb(160, 200, 200);
 const FLUSH_WALL_COLOR: Color = Color::rgb(220, 200, 150);
 const CURVED_WALL_COLOR: Color = Color::rgb(180, 170, 220);
+const ROOM_WALL_COLOR: Color = Color::rgb(230, 180, 140);
 const EDGE_COLOR: Color = Color::rgb(255, 255, 255);
 
 /// Wall thickness in plan.
@@ -87,7 +97,7 @@ const CORNER_RADIUS: f64 = 0.4;
 type WallBuilder = fn(&mut TopologyStore) -> geolis::Result<SolidId>;
 
 pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
-    let variants: [(f64, &str, Color, WallBuilder); 7] = [
+    let variants: [(f64, &str, Color, WallBuilder); 8] = [
         (8.0, "1", WALL_COLOR, build_l_wall),
         (13.0, "2", CUT_WALL_COLOR, build_window_wall),
         (18.0, "3", KINK_WALL_COLOR, build_kink_window_wall),
@@ -95,6 +105,7 @@ pub fn register(storage: &MeshStorage, bounds: &mut SceneBounds) {
         (28.0, "5", DOOR_WALL_COLOR, build_full_height_door_wall),
         (33.0, "6", FLUSH_WALL_COLOR, build_flush_door_wall),
         (38.0, "7", CURVED_WALL_COLOR, build_curved_opening_wall),
+        (44.0, "8", ROOM_WALL_COLOR, build_closed_room_wall),
     ];
     for (label_y, label, color, build) in variants {
         register_label(storage, -1.5, label_y, label, LABEL_SIZE, LABEL_COLOR);
@@ -592,6 +603,80 @@ fn build_curved_opening_wall(store: &mut TopologyStore) -> geolis::Result<SolidI
         let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 3.5, 0.0))
             .with_op_id(OpId::new(format!("{op}-box")))
             .with_segment_tags(cutter_tags)
+            .execute(store)?;
+        current = Subtract::new(current, cutter)
+            .with_op_id(OpId::new(op))
+            .execute(store)?;
+    }
+    Ok(current)
+}
+
+/// Builds the annulus variant: a CLOSED square room as ONE segmented
+/// prism (outer 6 × 6 ring + 5 × 5 courtyard hole, tagged on both rings)
+/// minus a window and a FULL-HEIGHT door through the south wall. The
+/// window through-cut enters the outer ring face and exits the courtyard
+/// face; the door notches BOTH bottom-cap wires, merging the courtyard
+/// wire into the cap's outer boundary.
+fn build_closed_room_wall(store: &mut TopologyStore) -> geolis::Result<SolidId> {
+    const Y0: f64 = 44.0;
+    let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64, ccw: bool| -> Vec<ProfileSegment> {
+        let corners = if ccw {
+            [p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)]
+        } else {
+            [p(x0, y0), p(x0, y1), p(x1, y1), p(x1, y0)]
+        };
+        (0..4)
+            .map(|i| ProfileSegment::Line {
+                start: corners[i],
+                end: corners[(i + 1) % 4],
+            })
+            .collect()
+    };
+    let tags = |names: [&str; 4]| -> Vec<SegmentTag> {
+        names.iter().map(|t| SegmentTag::new(*t)).collect()
+    };
+
+    let wall = MakeSegmentedPrism::new(
+        rect(0.0, Y0, 6.0, Y0 + 6.0, true),
+        Vector3::new(0.0, 0.0, HEIGHT),
+    )
+    .with_holes(vec![rect(0.5, Y0 + 0.5, 5.5, Y0 + 5.5, false)])
+    .with_op_id(OpId::new("demo-room-wall"))
+    .with_segment_tags(tags(["outer-s", "outer-e", "outer-n", "outer-w"]))
+    .with_hole_tags(vec![tags(["inner-w", "inner-n", "inner-e", "inner-s"])])
+    .execute(store)?;
+
+    // Window then full-height door, both through the south wall (the
+    // cutters end inside the courtyard air).
+    let openings: [(&str, f64, f64, f64, f64); 2] = [
+        ("demo-room-win", 2.0, 3.5, 1.0, 2.0),
+        ("demo-room-door", 0.8, 1.7, -0.5, 2.25),
+    ];
+    let mut current = wall;
+    for (op, x0, x1, z0, z1) in openings {
+        let q = |x: f64, z: f64| Point3::new(x, Y0 - 1.0, z);
+        let cutter_profile = vec![
+            ProfileSegment::Line {
+                start: q(x0, z0),
+                end: q(x1, z0),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z0),
+                end: q(x1, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x1, z1),
+                end: q(x0, z1),
+            },
+            ProfileSegment::Line {
+                start: q(x0, z1),
+                end: q(x0, z0),
+            },
+        ];
+        let cutter = MakeSegmentedPrism::new(cutter_profile, Vector3::new(0.0, 2.5, 0.0))
+            .with_op_id(OpId::new(format!("{op}-box")))
+            .with_segment_tags(tags(["sill", "jamb-right", "head", "jamb-left"]))
             .execute(store)?;
         current = Subtract::new(current, cutter)
             .with_op_id(OpId::new(op))

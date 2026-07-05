@@ -23,6 +23,9 @@
 //! 3. [`band`] — build the tool's hole-wall face(s) between each loop pair.
 //! 4. [`assemble`] — collect result faces into a new shell + solid.
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod annulus_tests;
 pub(crate) mod assemble;
 pub(crate) mod band;
 #[cfg(test)]
