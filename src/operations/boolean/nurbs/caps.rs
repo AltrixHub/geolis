@@ -7,8 +7,16 @@
 //! replaced by the sub-edges the kept wall fragments retained (the notched
 //! span simply disappears), and the band's closure edges bridge the notch —
 //! the SAME `EdgeId`s on both sides (F2 shared-edge convention), so the
-//! result is watertight by construction. The kept edge pool is then chained
-//! into connected cycles; each cycle becomes one planar cap fragment.
+//! result is watertight by construction. The kept edge pool (outer AND
+//! inner wires — annulus caps carry one inner wire per footprint hole) is
+//! then chained into connected cycles, classified by their winding in the
+//! cap plane's 2D frame: cycles winding like the original outer wire become
+//! planar cap fragments; opposite-winding cycles are hole loops (an
+//! untouched courtyard wire riding along, or a hole ring notched within
+//! itself) and are re-attached as inner wires of the fragment containing
+//! them. A doorway through an annulus wall consumes BOTH wires' kept
+//! sub-edges into one outer cycle — the courtyard hole merges into the
+//! fragment boundary and the inner wire disappears.
 //!
 //! Names follow the F5 split rule: one kept fragment transfers the cap's
 //! name; two bind [`FaceName::Split`] `Left` / `Right` by the canonical-
@@ -21,9 +29,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{OperationError, Result};
+use crate::geometry::curve::Curve;
 use crate::math::{Point2, Point3};
 use crate::topology::{
-    EdgeId, FaceData, FaceId, FaceSurface, OpId, OrientedEdge, TopologyStore, WireData,
+    EdgeCurve, EdgeId, FaceData, FaceId, FaceSurface, OpId, OrientedEdge, TopologyStore, WireData,
+    WireId,
 };
 
 /// Rebuilds every pending notched cap and returns the new cap fragment
@@ -37,9 +47,10 @@ use crate::topology::{
 ///
 /// # Errors
 ///
-/// Typed errors when a pending cap is not planar, carries inner wires,
-/// its notched boundary does not chain into closed cycles, it yields more
-/// than two fragments, or a closure edge remains unconsumed.
+/// Typed errors when a pending cap is not planar, its notched boundary
+/// does not chain into closed cycles, it yields more than two fragments,
+/// a surviving hole loop lies in no kept fragment, or a closure edge
+/// remains unconsumed.
 pub(crate) fn rebuild_notched_caps(
     store: &mut TopologyStore,
     pending: &[FaceId],
@@ -90,29 +101,33 @@ fn rebuild_cap(
             OperationError::Failed("cap-notch rebuild requires a planar cap face".into()).into(),
         );
     };
-    if !face.inner_wires.is_empty() {
-        return Err(OperationError::Failed(
-            "cap-notch rebuild does not support caps with inner wires".into(),
-        )
-        .into());
-    }
+    let to2d = |p: Point3| -> Point2 {
+        let rel = p - *plane.origin();
+        Point2::new(rel.dot(plane.u_dir()), rel.dot(plane.v_dir()))
+    };
 
-    // Kept boundary pool: the cap's wire with every split parent edge
-    // replaced by its KEPT sub-edges, in traversal order and orientation.
-    let wire = store.wire(face.outer_wire)?.clone();
+    // Kept boundary pool: the cap's outer AND inner wires with every split
+    // parent edge replaced by its KEPT sub-edges, in traversal order and
+    // orientation.
     let mut pool: Vec<OrientedEdge> = Vec::new();
-    for oe in &wire.edges {
-        match sub_edges.get(&oe.edge) {
-            None => pool.push(*oe),
-            Some(subs) => {
-                let ordered: Vec<EdgeId> = if oe.forward {
-                    subs.clone()
-                } else {
-                    subs.iter().rev().copied().collect()
-                };
-                for sub in ordered {
-                    if kept_edges.contains(&sub) {
-                        pool.push(OrientedEdge::new(sub, oe.forward));
+    let wire_ids: Vec<WireId> = std::iter::once(face.outer_wire)
+        .chain(face.inner_wires.iter().copied())
+        .collect();
+    for wire_id in wire_ids {
+        let wire = store.wire(wire_id)?.clone();
+        for oe in &wire.edges {
+            match sub_edges.get(&oe.edge) {
+                None => pool.push(*oe),
+                Some(subs) => {
+                    let ordered: Vec<EdgeId> = if oe.forward {
+                        subs.clone()
+                    } else {
+                        subs.iter().rev().copied().collect()
+                    };
+                    for sub in ordered {
+                        if kept_edges.contains(&sub) {
+                            pool.push(OrientedEdge::new(sub, oe.forward));
+                        }
                     }
                 }
             }
@@ -122,10 +137,53 @@ fn rebuild_cap(
     // Chain the pool + closure edges into closed cycles by shared vertices.
     let cycles = chain_cycles(store, &pool, closure_edges, used_closures)?;
 
-    // One planar fragment per cycle (same plane, same sense; the planar
-    // tessellation is wire-driven, so no trim is carried).
-    let mut fragment_faces = Vec::with_capacity(cycles.len());
-    for cycle in &cycles {
+    // Classify cycles by winding in the cap plane's 2D frame: cycles that
+    // wind like the ORIGINAL outer wire are fragment outer boundaries;
+    // opposite-winding cycles are hole loops that survived the notch (cap
+    // inner wires wind opposite the outer by construction, and wire
+    // surgery preserves traversal orientation).
+    let outer_edges = store.wire(face.outer_wire)?.edges.clone();
+    let outer_ccw = polygon_signed_area(&cycle_polygon(store, &outer_edges, &to2d)?) > 0.0;
+
+    let mut fragment_cycles: Vec<Vec<OrientedEdge>> = Vec::new();
+    let mut fragment_polygons: Vec<Vec<Point2>> = Vec::new();
+    let mut hole_cycles: Vec<(Vec<OrientedEdge>, Vec<Point2>)> = Vec::new();
+    for cycle in cycles {
+        let polygon = cycle_polygon(store, &cycle, &to2d)?;
+        if (polygon_signed_area(&polygon) > 0.0) == outer_ccw {
+            fragment_cycles.push(cycle);
+            fragment_polygons.push(polygon);
+        } else {
+            hole_cycles.push((cycle, polygon));
+        }
+    }
+
+    // Re-attach each surviving hole loop to the fragment containing it.
+    let mut fragment_holes: Vec<Vec<WireId>> = vec![Vec::new(); fragment_cycles.len()];
+    for (cycle, polygon) in hole_cycles {
+        let sample = polygon.first().copied().ok_or_else(|| {
+            OperationError::Failed("notched cap hole loop has no boundary samples".into())
+        })?;
+        let containing = fragment_polygons
+            .iter()
+            .position(|frag| super::split::polygon_contains(frag, sample))
+            .ok_or_else(|| {
+                OperationError::Failed(
+                    "notched cap hole loop lies in no kept fragment \
+                     (inconsistent cap-touching cut)"
+                        .into(),
+                )
+            })?;
+        fragment_holes[containing].push(store.add_wire(WireData {
+            edges: cycle,
+            is_closed: true,
+        }));
+    }
+
+    // One planar fragment per outer cycle (same plane, same sense; the
+    // planar tessellation is wire-driven, so no trim is carried).
+    let mut fragment_faces = Vec::with_capacity(fragment_cycles.len());
+    for (cycle, holes) in fragment_cycles.iter().zip(fragment_holes) {
         let new_wire = store.add_wire(WireData {
             edges: cycle.clone(),
             is_closed: true,
@@ -133,7 +191,7 @@ fn rebuild_cap(
         fragment_faces.push(store.add_face(FaceData {
             surface: face.surface.clone(),
             outer_wire: new_wire,
-            inner_wires: Vec::new(),
+            inner_wires: holes,
             same_sense: face.same_sense,
             trim: None,
             pcurves: Vec::new(),
@@ -151,12 +209,8 @@ fn rebuild_cap(
         }
         [a, b] => {
             if let Some(op) = op_id {
-                let to2d = |p: Point3| -> Point2 {
-                    let rel = p - *plane.origin();
-                    Point2::new(rel.dot(plane.u_dir()), rel.dot(plane.v_dir()))
-                };
                 let (left, right) =
-                    order_cap_fragments(store, *a, *b, &cycles, closure_edges, &to2d)?;
+                    order_cap_fragments(store, *a, *b, &fragment_cycles, closure_edges, &to2d)?;
                 store.names_mut().split_face(cap, op, left, right);
             }
             Ok(fragment_faces)
@@ -168,6 +222,55 @@ fn rebuild_cap(
         )
         .into()),
     }
+}
+
+/// Samples a cycle's oriented edges into a polygon in the cap plane's 2D
+/// frame (interior samples per edge in traversal order; each edge's tail
+/// sample is dropped — it coincides with the next edge's head).
+fn cycle_polygon(
+    store: &TopologyStore,
+    cycle: &[OrientedEdge],
+    to2d: &impl Fn(Point3) -> Point2,
+) -> Result<Vec<Point2>> {
+    /// Interior samples per edge (winding / containment only — never used
+    /// for boundary geometry).
+    const SAMPLES: usize = 8;
+
+    let mut poly = Vec::with_capacity(cycle.len() * SAMPLES);
+    for oe in cycle {
+        let edge = store.edge(oe.edge)?;
+        let (t0, t1) = if oe.forward {
+            (edge.t_start, edge.t_end)
+        } else {
+            (edge.t_end, edge.t_start)
+        };
+        for i in 0..SAMPLES {
+            #[allow(clippy::cast_precision_loss)]
+            let frac = i as f64 / SAMPLES as f64;
+            let t = t0 + (t1 - t0) * frac;
+            let p = match &edge.curve {
+                EdgeCurve::Line(c) => c.evaluate(t)?,
+                EdgeCurve::Arc(c) => c.evaluate(t)?,
+                EdgeCurve::Circle(c) => c.evaluate(t)?,
+                EdgeCurve::Ellipse(c) => c.evaluate(t)?,
+                EdgeCurve::Nurbs(c) => c.point_at(t)?,
+            };
+            poly.push(to2d(p));
+        }
+    }
+    Ok(poly)
+}
+
+/// Shoelace signed area of a 2D polygon (positive = counter-clockwise).
+fn polygon_signed_area(poly: &[Point2]) -> f64 {
+    let n = poly.len();
+    let mut area2 = 0.0;
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    0.5 * area2
 }
 
 /// Chains the kept boundary pool into closed cycles, pulling in closure
