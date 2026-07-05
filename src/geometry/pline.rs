@@ -61,13 +61,29 @@ impl Pline {
     /// `tolerance` controls the maximum deviation between the arc and its chord approximation.
     #[must_use]
     pub fn to_points(&self, tolerance: f64) -> Vec<Point3> {
+        self.to_points_with_sources(tolerance).0
+    }
+
+    /// [`Self::to_points`] variant that additionally reports, for each
+    /// tessellated edge, the index of the source polyline segment it
+    /// approximates.
+    ///
+    /// Returns `(points, sources)` where `sources[j]` is the source
+    /// segment index of the edge `points[j] → points[j + 1]`
+    /// (`sources.len() == points.len() - 1` whenever at least one
+    /// segment exists). A line segment contributes one edge; an arc
+    /// segment contributes one edge per tessellation chord, all mapped
+    /// to the same source segment index.
+    #[must_use]
+    pub fn to_points_with_sources(&self, tolerance: f64) -> (Vec<Point3>, Vec<usize>) {
         let n = self.vertices.len();
         if n == 0 {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         let seg_count = self.segment_count();
         let mut points = Vec::with_capacity(n * 2);
+        let mut sources = Vec::with_capacity(n * 2);
 
         for i in 0..seg_count {
             let v0 = &self.vertices[i];
@@ -81,6 +97,7 @@ impl Pline {
             if v0.bulge.abs() < 1e-12 {
                 // Straight line: just add endpoint.
                 points.push(Point3::new(v1.x, v1.y, 0.0));
+                sources.push(i);
             } else {
                 // Arc: tessellate into line segments.
                 let (cx, cy, radius, start_angle, sweep) =
@@ -88,6 +105,7 @@ impl Pline {
 
                 if radius < 1e-12 {
                     points.push(Point3::new(v1.x, v1.y, 0.0));
+                    sources.push(i);
                     continue;
                 }
 
@@ -98,12 +116,14 @@ impl Pline {
                     let t = f64::from(j) / f64::from(n_sub);
                     let (px, py) = arc_point_at(cx, cy, radius, start_angle, sweep, t);
                     points.push(Point3::new(px, py, 0.0));
+                    sources.push(i);
                 }
                 points.push(Point3::new(v1.x, v1.y, 0.0));
+                sources.push(i);
             }
         }
 
-        points
+        (points, sources)
     }
 
     /// Returns a new polyline with vertices in reverse order and negated bulges.
