@@ -7,8 +7,8 @@
 //! from `crate::operations::boolean_2d` instead of touching this file.
 
 pub(crate) use crate::operations::boolean_2d::{
-    point_in_polygon_class, seg_seg_intersect, union_all_with_holes, PointClass, Polygon,
-    PolygonWithHoles, WALL_EPS, WALL_EPS_SQ,
+    point_in_polygon_class, seg_seg_intersect, PointClass, Polygon, PolygonWithHoles, WALL_EPS,
+    WALL_EPS_SQ,
 };
 
 // Test-only re-export: the P3 oracle in `wall_outline::tests` calls

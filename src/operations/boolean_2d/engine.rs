@@ -40,6 +40,45 @@ pub enum BoundaryRef {
     Hole(usize),
 }
 
+/// Which ring of an input [`PolygonWithHoles`] a raw segment belongs to.
+///
+/// `Ord` follows variant order (`Outer < Hole(0) < Hole(1) < …`), which
+/// fixes the deterministic tie-break used when coincident sub-edges from
+/// different rings are deduplicated (smallest [`SegmentSite`] wins).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RingRef {
+    Outer,
+    Hole(usize),
+}
+
+/// Structural source of one raw input segment: which input PWH, which
+/// ring of that PWH, and which edge of that ring (edge `e` connects ring
+/// vertex `e` to ring vertex `(e + 1) % n`).
+///
+/// Sites are threaded verbatim through every engine stage (split, snap,
+/// canonicalize, classify, walk, assemble), so each output edge of a
+/// [`TracedFace`] reports the input edge whose supporting line it lies
+/// on. When two inputs contribute geometrically identical sub-edges
+/// (coincident collinear boundaries), the lexicographically smallest
+/// site — `(input, ring, edge)` — wins deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SegmentSite {
+    pub input: usize,
+    pub ring: RingRef,
+    pub edge: usize,
+}
+
+/// One output face with per-edge source sites.
+///
+/// `outer_sites[k]` is the site of the outer-ring edge from
+/// `face.outer[k]` to `face.outer[(k + 1) % n]`; `hole_sites[h][k]`
+/// likewise for hole `h`. Lengths always match the ring vertex counts.
+pub(crate) struct TracedFace {
+    pub face: PolygonWithHoles,
+    pub outer_sites: Vec<SegmentSite>,
+    pub hole_sites: Vec<Vec<SegmentSite>>,
+}
+
 /// Three-valued classification of a probe point against the operation's
 /// result region.
 ///
@@ -183,6 +222,23 @@ pub fn run_arrangement(
     segment_inputs: &[PolygonWithHoles],
     oracle: &impl FillOracle,
 ) -> Result<Vec<PolygonWithHoles>> {
+    Ok(run_arrangement_traced(segment_inputs, oracle)?
+        .into_iter()
+        .map(|t| t.face)
+        .collect())
+}
+
+/// [`run_arrangement`] variant that additionally reports, per output
+/// edge, the [`SegmentSite`] of the input segment it originated from.
+///
+/// The site of an output edge is exact — it is threaded through the
+/// arrangement, not recovered by geometric matching — so every output
+/// edge lies on the supporting line of the input edge its site names
+/// (up to the `≤ 2·WALL_EPS` vertex-snap perturbation).
+pub(crate) fn run_arrangement_traced(
+    segment_inputs: &[PolygonWithHoles],
+    oracle: &impl FillOracle,
+) -> Result<Vec<TracedFace>> {
     let raw_segments = collect_raw_segments(segment_inputs);
     if raw_segments.is_empty() {
         return Ok(Vec::new());
@@ -201,8 +257,30 @@ pub fn run_arrangement(
             signed_area(&polygon).abs() > WALL_EPS_SQ
         })
         .collect();
-    let faces = assemble_faces(&loops, &vertex_table)?;
-    debug_assert_cdt_safe(&faces);
+    let trees = assemble_face_trees(&loops, &vertex_table)?;
+    let loop_sites = |li: usize| -> Vec<SegmentSite> {
+        loops[li]
+            .kept_indices
+            .iter()
+            .map(|&k| kept_half_edges[k].2)
+            .collect()
+    };
+    let faces: Vec<TracedFace> = trees
+        .iter()
+        .map(|tree| TracedFace {
+            face: PolygonWithHoles {
+                outer: loop_polygon(&loops[tree.outer], &vertex_table),
+                holes: tree
+                    .holes
+                    .iter()
+                    .map(|&h| loop_polygon(&loops[h], &vertex_table))
+                    .collect(),
+            },
+            outer_sites: loop_sites(tree.outer),
+            hole_sites: tree.holes.iter().map(|&h| loop_sites(h)).collect(),
+        })
+        .collect();
+    debug_assert_cdt_safe(faces.iter().map(|t| &t.face));
     Ok(faces)
 }
 
@@ -212,12 +290,11 @@ pub fn run_arrangement(
 /// skip the check entirely. Panics on failure rather than returning Err
 /// so the bug is surfaced loudly during development.
 #[cfg(debug_assertions)]
-fn debug_assert_cdt_safe(faces: &[PolygonWithHoles]) {
+fn debug_assert_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) {
     use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
         ConstrainedDelaunayTriangulation::new();
     let boundaries: Vec<&Polygon> = faces
-        .iter()
         .flat_map(|f| std::iter::once(&f.outer).chain(f.holes.iter()))
         .collect();
     for (bi, boundary) in boundaries.iter().enumerate() {
@@ -252,22 +329,35 @@ fn debug_assert_cdt_safe(faces: &[PolygonWithHoles]) {
 
 #[cfg(not(debug_assertions))]
 #[inline]
-fn debug_assert_cdt_safe(_faces: &[PolygonWithHoles]) {}
+fn debug_assert_cdt_safe<'a>(_faces: impl Iterator<Item = &'a PolygonWithHoles>) {}
 
 // === Internals ===
 
 type RawSegment = ((f64, f64), (f64, f64));
 
-fn collect_raw_segments(inputs: &[PolygonWithHoles]) -> Vec<RawSegment> {
+fn collect_raw_segments(inputs: &[PolygonWithHoles]) -> Vec<(RawSegment, SegmentSite)> {
     let mut out = Vec::new();
-    for pwh in inputs {
-        for ring in std::iter::once(&pwh.outer).chain(pwh.holes.iter()) {
+    for (input, pwh) in inputs.iter().enumerate() {
+        let rings = std::iter::once((RingRef::Outer, &pwh.outer)).chain(
+            pwh.holes
+                .iter()
+                .enumerate()
+                .map(|(hi, h)| (RingRef::Hole(hi), h)),
+        );
+        for (ring_ref, ring) in rings {
             let n = ring.len();
             if n < 3 {
                 continue;
             }
             for i in 0..n {
-                out.push((ring[i], ring[(i + 1) % n]));
+                out.push((
+                    (ring[i], ring[(i + 1) % n]),
+                    SegmentSite {
+                        input,
+                        ring: ring_ref,
+                        edge: i,
+                    },
+                ));
             }
         }
     }
@@ -277,11 +367,11 @@ fn collect_raw_segments(inputs: &[PolygonWithHoles]) -> Vec<RawSegment> {
 /// Split every segment at every transverse crossing, T-junction
 /// (endpoint-on-edge), and collinear-overlap endpoint with every other
 /// segment. Returns the resulting list of sub-segments.
-fn arrangement_split(segs: &[RawSegment]) -> Vec<RawSegment> {
+fn arrangement_split(segs: &[(RawSegment, SegmentSite)]) -> Vec<(RawSegment, SegmentSite)> {
     let mut out = Vec::new();
-    for (si, &(a0, a1)) in segs.iter().enumerate() {
+    for (si, &((a0, a1), site)) in segs.iter().enumerate() {
         let mut params: Vec<f64> = vec![0.0, 1.0];
-        for (sj, &(b0, b1)) in segs.iter().enumerate() {
+        for (sj, &((b0, b1), _)) in segs.iter().enumerate() {
             if si == sj {
                 continue;
             }
@@ -308,7 +398,7 @@ fn arrangement_split(segs: &[RawSegment]) -> Vec<RawSegment> {
             }
             let p0 = lerp(a0, a1, w[0]);
             let p1 = lerp(a0, a1, w[1]);
-            out.push((p0, p1));
+            out.push(((p0, p1), site));
         }
     }
     out
@@ -338,7 +428,7 @@ fn project_endpoint_on_interior(a0: (f64, f64), a1: (f64, f64), p: (f64, f64)) -
 }
 
 /// `(vertex_table, snapped_segments)` returned by [`vertex_snap`].
-type SnapResult = (Vec<(f64, f64)>, Vec<(usize, usize)>);
+type SnapResult = (Vec<(f64, f64)>, Vec<(usize, usize, SegmentSite)>);
 
 /// Grid-quantized vertex snap with bounded cross-cell merging.
 ///
@@ -359,18 +449,18 @@ type SnapResult = (Vec<(f64, f64)>, Vec<(usize, usize)>);
               CAD coordinate range (no overflow); usize→f64 for cluster size mean \
               loses no relevant precision (cluster sizes are O(10) at most)."
 )]
-fn vertex_snap(segs: &[RawSegment]) -> SnapResult {
+fn vertex_snap(segs: &[(RawSegment, SegmentSite)]) -> SnapResult {
     if segs.is_empty() {
         return (Vec::new(), Vec::new());
     }
     let mut vertices: Vec<(f64, f64)> = Vec::with_capacity(segs.len() * 2);
-    let mut seg_endpoints: Vec<(usize, usize)> = Vec::with_capacity(segs.len());
-    for &(s, e) in segs {
+    let mut seg_endpoints: Vec<(usize, usize, SegmentSite)> = Vec::with_capacity(segs.len());
+    for &((s, e), site) in segs {
         let si = vertices.len();
         vertices.push(s);
         let ei = vertices.len();
         vertices.push(e);
-        seg_endpoints.push((si, ei));
+        seg_endpoints.push((si, ei, site));
     }
     let n = vertices.len();
     let cells: Vec<(i64, i64)> = vertices
@@ -492,12 +582,12 @@ fn vertex_snap(segs: &[RawSegment]) -> SnapResult {
         points.push(rep);
     }
 
-    let mut snapped: Vec<(usize, usize)> = Vec::with_capacity(seg_endpoints.len());
-    for (si, ei) in seg_endpoints {
+    let mut snapped: Vec<(usize, usize, SegmentSite)> = Vec::with_capacity(seg_endpoints.len());
+    for (si, ei, site) in seg_endpoints {
         let cs = class_of_root[&find_root(&mut parent, si)];
         let ce = class_of_root[&find_root(&mut parent, ei)];
         if cs != ce {
-            snapped.push((cs, ce));
+            snapped.push((cs, ce, site));
         }
     }
     (points, snapped)
@@ -517,13 +607,20 @@ fn find_root(parent: &mut [usize], mut i: usize) -> usize {
 /// `vertex_snap`'s order-independent class id assignment, this guarantees
 /// that engine outputs are topologically identical regardless of input
 /// order.
-fn canonicalize_undirected(snapped: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    let mut canon: Vec<(usize, usize)> = snapped
+///
+/// When geometrically identical sub-edges carry different
+/// [`SegmentSite`]s (coincident collinear boundaries from two inputs),
+/// the sort places the smallest site first and the dedup keeps it —
+/// the surviving site is the lexicographic minimum, deterministically.
+fn canonicalize_undirected(
+    snapped: Vec<(usize, usize, SegmentSite)>,
+) -> Vec<(usize, usize, SegmentSite)> {
+    let mut canon: Vec<(usize, usize, SegmentSite)> = snapped
         .into_iter()
-        .map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
+        .map(|(a, b, site)| if a <= b { (a, b, site) } else { (b, a, site) })
         .collect();
     canon.sort_unstable();
-    canon.dedup();
+    canon.dedup_by(|next, kept| next.0 == kept.0 && next.1 == kept.1);
     canon
 }
 
@@ -532,12 +629,12 @@ fn canonicalize_undirected(snapped: Vec<(usize, usize)>) -> Vec<(usize, usize)> 
 /// return only those half-edges with `Filled` on the LEFT and `Empty`
 /// on the RIGHT.
 fn classify_and_filter(
-    undirected: &[(usize, usize)],
+    undirected: &[(usize, usize, SegmentSite)],
     vertex_table: &[(f64, f64)],
     oracle: &impl FillOracle,
-) -> Result<Vec<(usize, usize)>> {
-    let mut out: Vec<(usize, usize)> = Vec::with_capacity(undirected.len() * 2);
-    for &(u, v) in undirected {
+) -> Result<Vec<(usize, usize, SegmentSite)>> {
+    let mut out: Vec<(usize, usize, SegmentSite)> = Vec::with_capacity(undirected.len() * 2);
+    for &(u, v, site) in undirected {
         for (a, b) in [(u, v), (v, u)] {
             let pa = vertex_table[a];
             let pb = vertex_table[b];
@@ -575,7 +672,7 @@ fn classify_and_filter(
                 eps *= 0.5;
             };
             if matches!(left, FilledClass::Filled) && matches!(right, FilledClass::Empty) {
-                out.push((a, b));
+                out.push((a, b, site));
             }
         }
     }
@@ -597,10 +694,9 @@ enum Orientation {
 /// `kept[loop.kept_indices[k]] == (loop.vertex_indices[k], loop.vertex_indices[(k + 1) % len])`.
 pub(crate) struct WalkedLoop {
     pub vertex_indices: Vec<usize>,
-    /// Index trail into the `kept` slice. Currently unused by `assemble_faces`,
-    /// but retained so future diagnostic logging can map a loop back to the
-    /// half-edges it bounds without re-walking the arrangement.
-    #[allow(dead_code)]
+    /// Index trail into the `kept` slice. [`run_arrangement_traced`] uses it
+    /// to map each loop edge back to the [`SegmentSite`] of the kept
+    /// half-edge it walks.
     pub kept_indices: Vec<usize>,
 }
 
@@ -617,13 +713,16 @@ pub(crate) struct WalkedLoop {
 /// Returns one [`WalkedLoop`] per closed boundary cycle, retaining the
 /// kept-half-edge index trail so downstream face assembly can map each loop
 /// back to the half-edges it bounds.
-pub(crate) fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) -> Vec<WalkedLoop> {
+pub(crate) fn face_walk(
+    kept: &[(usize, usize, SegmentSite)],
+    vertex_table: &[(f64, f64)],
+) -> Vec<WalkedLoop> {
     if kept.is_empty() {
         return Vec::new();
     }
     let n_classes = vertex_table.len();
     let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n_classes];
-    for (idx, &(a, _)) in kept.iter().enumerate() {
+    for (idx, &(a, _, _)) in kept.iter().enumerate() {
         adjacency[a].push(idx);
     }
     let mut used: Vec<bool> = vec![false; kept.len()];
@@ -642,7 +741,7 @@ pub(crate) fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) ->
                 break;
             }
             used[current] = true;
-            let (a, b) = kept[current];
+            let (a, b, _) = kept[current];
             vertex_indices.push(a);
             kept_indices.push(current);
             let pa = vertex_table[a];
@@ -686,6 +785,88 @@ pub(crate) fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) ->
     loops
 }
 
+/// Builds the containment matrix on leftmost-vertex witnesses with bounded
+/// `Boundary` fallback: `contained_in[i]` lists every loop that strictly
+/// contains loop `i`.
+///
+/// # Errors
+///
+/// Returns [`OperationError::Failed`] when a loop's witness candidates are
+/// exhausted (every tried witness lies on the other loop's boundary).
+fn containment_matrix(
+    polygons: &[Polygon],
+    witness_candidates: &[Vec<(f64, f64)>],
+) -> Result<Vec<Vec<usize>>> {
+    const MAX_WITNESS_FALLBACK: usize = 3;
+    let n = polygons.len();
+    let mut contained_in: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for (j, polygon) in polygons.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let mut witness_idx = 0;
+            loop {
+                if witness_idx >= MAX_WITNESS_FALLBACK || witness_idx >= witness_candidates[i].len()
+                {
+                    return Err(OperationError::Failed(format!(
+                        "boolean_2d: assemble_faces witness disambiguation \
+                         exhausted for loop {i} against loop {j} (tried \
+                         {witness_idx} candidates, all on j's boundary)"
+                    ))
+                    .into());
+                }
+                let w = witness_candidates[i][witness_idx];
+                match point_in_polygon_class(w, polygon) {
+                    PointClass::Inside => {
+                        contained_in[i].push(j);
+                        break;
+                    }
+                    PointClass::Outside => break,
+                    PointClass::Boundary => {
+                        witness_idx += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(contained_in)
+}
+
+/// Computes each loop's parent: the unique containing loop at `depth − 1`.
+///
+/// # Errors
+///
+/// Returns [`OperationError::Failed`] when the parent candidate at
+/// `depth − 1` is not unique (broken arrangement topology).
+fn parent_loops(contained_in: &[Vec<usize>], depth: &[usize]) -> Result<Vec<Option<usize>>> {
+    let n = depth.len();
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        if depth[i] == 0 {
+            continue;
+        }
+        let target_depth = depth[i] - 1;
+        let candidates: Vec<usize> = contained_in[i]
+            .iter()
+            .copied()
+            .filter(|&j| depth[j] == target_depth)
+            .collect();
+        if candidates.len() != 1 {
+            return Err(OperationError::Failed(format!(
+                "boolean_2d: assemble_faces found {} parent candidates for \
+                 loop {} (depth {}); arrangement topology is broken",
+                candidates.len(),
+                i,
+                depth[i],
+            ))
+            .into());
+        }
+        parent[i] = Some(candidates[0]);
+    }
+    Ok(parent)
+}
+
 /// Assemble closed boundary loops into face topology
 /// (`Vec<PolygonWithHoles>`).
 ///
@@ -712,10 +893,41 @@ pub(crate) fn face_walk(kept: &[(usize, usize)], vertex_table: &[(f64, f64)]) ->
 /// - The number of parent candidates at `depth - 1` is not exactly one.
 /// - A loop's orientation does not match its depth parity (even depth ⇒
 ///   CCW; odd depth ⇒ CW).
+#[cfg(test)]
 pub(crate) fn assemble_faces(
     loops: &[WalkedLoop],
     vertex_table: &[(f64, f64)],
 ) -> Result<Vec<PolygonWithHoles>> {
+    let trees = assemble_face_trees(loops, vertex_table)?;
+    Ok(trees
+        .into_iter()
+        .map(|tree| PolygonWithHoles {
+            outer: loop_polygon(&loops[tree.outer], vertex_table),
+            holes: tree
+                .holes
+                .iter()
+                .map(|&h| loop_polygon(&loops[h], vertex_table))
+                .collect(),
+        })
+        .collect())
+}
+
+/// Materialise a walked loop's vertex-class indices into a polygon.
+fn loop_polygon(l: &WalkedLoop, vertex_table: &[(f64, f64)]) -> Polygon {
+    l.vertex_indices.iter().map(|&i| vertex_table[i]).collect()
+}
+
+/// One assembled face expressed as indices into the loop list: the CCW
+/// outer loop plus the CW hole loops whose parent it is.
+struct FaceTree {
+    outer: usize,
+    holes: Vec<usize>,
+}
+
+/// Containment-matrix face assembly returning loop indices instead of
+/// materialised polygons, so callers that carry per-edge metadata
+/// ([`run_arrangement_traced`]) can keep it aligned with each ring.
+fn assemble_face_trees(loops: &[WalkedLoop], vertex_table: &[(f64, f64)]) -> Result<Vec<FaceTree>> {
     let n = loops.len();
     if n == 0 {
         return Ok(Vec::new());
@@ -751,68 +963,15 @@ pub(crate) fn assemble_faces(
         .collect();
 
     // 2. Containment matrix with bounded Boundary fallback.
-    const MAX_WITNESS_FALLBACK: usize = 3;
-    let mut contained_in: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let mut witness_idx = 0;
-            loop {
-                if witness_idx >= MAX_WITNESS_FALLBACK || witness_idx >= witness_candidates[i].len()
-                {
-                    return Err(OperationError::Failed(format!(
-                        "boolean_2d: assemble_faces witness disambiguation \
-                         exhausted for loop {i} against loop {j} (tried \
-                         {witness_idx} candidates, all on j's boundary)"
-                    ))
-                    .into());
-                }
-                let w = witness_candidates[i][witness_idx];
-                match point_in_polygon_class(w, &polygons[j]) {
-                    PointClass::Inside => {
-                        contained_in[i].push(j);
-                        break;
-                    }
-                    PointClass::Outside => break,
-                    PointClass::Boundary => {
-                        witness_idx += 1;
-                    }
-                }
-            }
-        }
-    }
+    let contained_in = containment_matrix(&polygons, &witness_candidates)?;
 
     // 3. Depth and parent.
-    let depth: Vec<usize> = contained_in.iter().map(|s| s.len()).collect();
-    let mut parent: Vec<Option<usize>> = vec![None; n];
-    for i in 0..n {
-        if depth[i] == 0 {
-            continue;
-        }
-        let target_depth = depth[i] - 1;
-        let candidates: Vec<usize> = contained_in[i]
-            .iter()
-            .copied()
-            .filter(|&j| depth[j] == target_depth)
-            .collect();
-        if candidates.len() != 1 {
-            return Err(OperationError::Failed(format!(
-                "boolean_2d: assemble_faces found {} parent candidates for \
-                 loop {} (depth {}); arrangement topology is broken",
-                candidates.len(),
-                i,
-                depth[i],
-            ))
-            .into());
-        }
-        parent[i] = Some(candidates[0]);
-    }
+    let depth: Vec<usize> = contained_in.iter().map(Vec::len).collect();
+    let parent = parent_loops(&contained_in, &depth)?;
 
     // 4. Validate orientation parity.
     for i in 0..n {
-        let want_ccw = depth[i] % 2 == 0;
+        let want_ccw = depth[i].is_multiple_of(2);
         let is_ccw = orientation[i] == Orientation::Ccw;
         if want_ccw != is_ccw {
             return Err(OperationError::Failed(format!(
@@ -826,31 +985,27 @@ pub(crate) fn assemble_faces(
 
     // 5. Assemble faces. Each CCW loop is the outer of one face; its holes
     //    are the CW loops whose parent is this loop.
-    let mut faces: Vec<PolygonWithHoles> = Vec::new();
+    let mut faces: Vec<FaceTree> = Vec::new();
     for i in 0..n {
         if orientation[i] != Orientation::Ccw {
             continue;
         }
-        let holes: Vec<Polygon> = (0..n)
+        let holes: Vec<usize> = (0..n)
             .filter(|&j| orientation[j] == Orientation::Cw && parent[j] == Some(i))
-            .map(|j| polygons[j].clone())
             .collect();
-        faces.push(PolygonWithHoles {
-            outer: polygons[i].clone(),
-            holes,
-        });
+        faces.push(FaceTree { outer: i, holes });
     }
 
     // 6. Post-conditions.
     debug_assert!(
-        faces.iter().all(|f| signed_area(&f.outer) > 0.0),
+        faces.iter().all(|f| signed_area(&polygons[f.outer]) > 0.0),
         "assemble_faces: outer winding contract violated"
     );
     debug_assert!(
         faces
             .iter()
             .flat_map(|f| f.holes.iter())
-            .all(|h| signed_area(h) < 0.0),
+            .all(|&h| signed_area(&polygons[h]) < 0.0),
         "assemble_faces: hole winding contract violated"
     );
     let cw_count = orientation
@@ -947,7 +1102,7 @@ fn lerp(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    //! Engine-internal tests (assemble_faces synthetic loop fixtures).
+    //! Engine-internal tests (`assemble_faces` synthetic loop fixtures).
     //!
     //! The end-to-end union / subtract behaviour is exercised by tests
     //! in the `union` / `subtract` submodules; this file only covers
@@ -1149,8 +1304,8 @@ mod tests {
         assert_eq!(faces_a.len(), faces_b.len());
         let mut counts_a: Vec<usize> = faces_a.iter().map(|f| f.holes.len()).collect();
         let mut counts_b: Vec<usize> = faces_b.iter().map(|f| f.holes.len()).collect();
-        counts_a.sort();
-        counts_b.sort();
+        counts_a.sort_unstable();
+        counts_b.sort_unstable();
         assert_eq!(counts_a, counts_b);
     }
 }

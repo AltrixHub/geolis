@@ -14,7 +14,7 @@
 
 use crate::error::Result;
 
-use super::engine::{run_arrangement, UnionOracle};
+use super::engine::{run_arrangement, run_arrangement_traced, TracedFace, UnionOracle};
 use super::types::{PolygonWithHoles, UnionResult};
 
 /// Compute the boolean-union outline of `inputs`. Output boundary loops
@@ -38,6 +38,19 @@ pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> Result<UnionResult> 
     let oracle = UnionOracle { inputs };
     let faces = run_arrangement(inputs, &oracle)?;
     Ok(UnionResult { faces })
+}
+
+/// [`union_all_with_holes`] variant that additionally reports, per output
+/// edge, the [`super::engine::SegmentSite`] of the input edge it came
+/// from. Sites are threaded through the arrangement (never recovered by
+/// geometric matching), so they are exact and deterministic.
+///
+/// # Errors
+///
+/// Same failure modes as [`union_all_with_holes`].
+pub(crate) fn union_all_with_holes_traced(inputs: &[PolygonWithHoles]) -> Result<Vec<TracedFace>> {
+    let oracle = UnionOracle { inputs };
+    run_arrangement_traced(inputs, &oracle)
 }
 
 #[cfg(test)]
@@ -394,6 +407,87 @@ mod tests {
             .count();
         assert_eq!(outer_count, 1, "outer must be CCW (signed area > 0)");
         assert_eq!(hole_count, 1, "hole must be CW (signed area < 0)");
+    }
+
+    // ===== union_all_with_holes_traced — per-edge source sites =====
+
+    /// Every traced output edge must lie on the supporting line of the
+    /// input edge its site names (within the snap tolerance), and the
+    /// site arrays must align 1:1 with the ring vertex counts.
+    fn assert_sites_exact(traced: &[super::super::TracedFace], inputs: &[PolygonWithHoles]) {
+        use super::super::engine::RingRef;
+        for tf in traced {
+            let rings: Vec<(&Polygon, &Vec<super::super::SegmentSite>)> =
+                std::iter::once((&tf.face.outer, &tf.outer_sites))
+                    .chain(tf.face.holes.iter().zip(tf.hole_sites.iter()))
+                    .collect();
+            for (pts, sites) in rings {
+                assert_eq!(pts.len(), sites.len(), "site array must align with ring");
+                for (e, site) in sites.iter().enumerate() {
+                    let src_ring: &Polygon = match site.ring {
+                        RingRef::Outer => &inputs[site.input].outer,
+                        RingRef::Hole(h) => &inputs[site.input].holes[h],
+                    };
+                    let a = src_ring[site.edge];
+                    let b = src_ring[(site.edge + 1) % src_ring.len()];
+                    let dx = b.0 - a.0;
+                    let dy = b.1 - a.1;
+                    let len = (dx * dx + dy * dy).sqrt();
+                    for p in [pts[e], pts[(e + 1) % pts.len()]] {
+                        let perp = ((p.0 - a.0) * dy - (p.1 - a.1) * dx) / len;
+                        assert!(
+                            perp.abs() < WALL_EPS * 5.0,
+                            "output edge {e} not on supporting line of its \
+                             site {site:?}: perp={perp}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn traced_t_shape_sites_are_exact() {
+        let inputs = no_hole_inputs(vec![rect(0.0, -1.0, 8.0, 2.0), rect(3.0, -1.0, 2.0, 5.0)]);
+        let traced = union_all_with_holes_traced(&inputs).expect("union must succeed");
+        assert_eq!(traced.len(), 1);
+        assert_sites_exact(&traced, &inputs);
+        // Both inputs must be represented on the merged boundary.
+        let mut input_ids: Vec<usize> = traced[0].outer_sites.iter().map(|s| s.input).collect();
+        input_ids.sort_unstable();
+        input_ids.dedup();
+        assert_eq!(input_ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn traced_identical_inputs_attribute_to_smallest_site() {
+        // Two bit-identical squares: the dedup tie-break must attribute
+        // every surviving edge to input 0, deterministically.
+        let inputs = no_hole_inputs(vec![rect(0.0, 0.0, 4.0, 3.0), rect(0.0, 0.0, 4.0, 3.0)]);
+        let traced = union_all_with_holes_traced(&inputs).expect("union must succeed");
+        assert_eq!(traced.len(), 1);
+        assert_sites_exact(&traced, &inputs);
+        for site in &traced[0].outer_sites {
+            assert_eq!(site.input, 0, "coincident edges must resolve to input 0");
+        }
+    }
+
+    #[test]
+    fn traced_donut_hole_ring_carries_sites() {
+        use super::super::engine::RingRef;
+        let outer = rect(0.0, 0.0, 10.0, 10.0);
+        let hole = vec![(2.0, 2.0), (2.0, 8.0), (8.0, 8.0), (8.0, 2.0)];
+        let inputs = vec![PolygonWithHoles {
+            outer,
+            holes: vec![hole],
+        }];
+        let traced = union_all_with_holes_traced(&inputs).expect("union must succeed");
+        assert_eq!(traced.len(), 1);
+        assert_eq!(traced[0].face.holes.len(), 1);
+        assert_sites_exact(&traced, &inputs);
+        for site in &traced[0].hole_sites[0] {
+            assert_eq!(site.ring, RingRef::Hole(0));
+        }
     }
 
     /// Two squares touching at a single vertex (degree-4 in the

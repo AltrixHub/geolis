@@ -790,16 +790,16 @@ mod tests {
     }
 
     /// Cascade regression: Subtract(wall, door) succeeds, then
-    /// Subtract(that_result, window1) fails at runtime with
+    /// `Subtract(that_result`, window1) fails at runtime with
     /// "invalid input: consecutive points 7 and 8 are coincident".
     ///
     /// Coordinates captured verbatim (`{:.17e}`) from a live modeling
     /// session that placed a door followed by two windows on the same
     /// wall. Runtime imports **all three cutters** into the base store
     /// before the first subtract runs (revion's `BRepSubtract` batches
-    /// the imports). This test mirrors that import order — wall + door
-    /// + window1 + window2 all materialised first, then the subtract
-    /// chain — so a state-pollution failure (e.g. the boolean engine
+    /// the imports). This test mirrors that import order — wall, door,
+    /// window1, and window2 are all materialised first, then the subtract
+    /// chain runs — so a state-pollution failure (e.g. the boolean engine
     /// snapping new fragments onto vertices of an *unrelated* solid
     /// that happens to sit in the same store) shows up here too.
     ///
@@ -812,21 +812,21 @@ mod tests {
 
         // Wall — gently tilted cuboid, 8.78 m long × 0.18 m thick × 2.4 m tall.
         let wall_bottom = vec![
-            p(-3.269_483_891_652_068_32, -6.843_402_330_123_231_62e-1, 0.0),
-            p(5.258_328_608_347_930_81, -3.538_324_608_012_322_51, 0.0),
-            p(5.201_202_641_652_067_80, -3.709_019_141_987_676_79, 0.0),
-            p(-3.326_609_858_347_931_77, -8.550_347_669_876_767_75e-1, 0.0),
+            p(-3.269_483_891_652_068_3, -6.843_402_330_123_232e-1, 0.0),
+            p(5.258_328_608_347_931, -3.538_324_608_012_322_5, 0.0),
+            p(5.201_202_641_652_068, -3.709_019_141_987_677, 0.0),
+            p(-3.326_609_858_347_931_8, -8.550_347_669_876_768e-1, 0.0),
         ];
         let wall = build_extruded(&mut store, wall_bottom, 2.4);
 
         // Door — perpendicular cuboid, ~0.9 m wide × ~0.22 m deep × ~2.1 m tall.
         let door_bottom = vec![
-            p(-7.497_596_405_132_468_39e-1, -1.508_629_561_657_746_31, 0.0),
-            p(-8.183_108_003_719_504_75e-1, -1.713_463_006_253_083_12, 0.0),
-            p(-1.671_783_463_576_549_17, -1.427_833_181_075_091_27, 0.0),
-            p(-1.603_232_303_717_845_75, -1.222_999_736_479_754_46, 0.0),
+            p(-7.497_596_405_132_468e-1, -1.508_629_561_657_746_3, 0.0),
+            p(-8.183_108_003_719_505e-1, -1.713_463_006_253_083_1, 0.0),
+            p(-1.671_783_463_576_549_2, -1.427_833_181_075_091_3, 0.0),
+            p(-1.603_232_303_717_845_8, -1.222_999_736_479_754_5, 0.0),
         ];
-        let door = build_extruded(&mut store, door_bottom, 2.099_999_904_632_568_36);
+        let door = build_extruded(&mut store, door_bottom, 2.099_999_904_632_568_4);
 
         // Window 1 — sits at z ∈ [0.9, 2.1] (sill 0.9 m, height 1.2 m).
         // Built BEFORE the first subtract so the store carries it
@@ -834,27 +834,27 @@ mod tests {
         // imports every cutter up front.
         let window1_bottom = vec![
             p(
-                4.186_251_396_293_492_63,
-                -3.160_553_589_522_334_23,
-                8.999_999_761_581_420_90e-1,
+                4.186_251_396_293_493,
+                -3.160_553_589_522_334_2,
+                8.999_999_761_581_421e-1,
             ),
             p(
-                4.117_700_236_434_789_22,
-                -3.365_387_034_117_671_48,
-                8.999_999_761_581_420_90e-1,
+                4.117_700_236_434_789,
+                -3.365_387_034_117_671_5,
+                8.999_999_761_581_421e-1,
             ),
             p(
-                3.264_227_573_230_190_42,
-                -3.079_757_208_939_679_64,
-                8.999_999_761_581_420_90e-1,
+                3.264_227_573_230_190_4,
+                -3.079_757_208_939_679_6,
+                8.999_999_761_581_421e-1,
             ),
             p(
-                3.332_778_733_088_893_83,
-                -2.874_923_764_344_342_38,
-                8.999_999_761_581_420_90e-1,
+                3.332_778_733_088_894,
+                -2.874_923_764_344_342_4,
+                8.999_999_761_581_421e-1,
             ),
         ];
-        let window_height = 2.100_000_023_841_857_91 - 8.999_999_761_581_420_90e-1;
+        let window_height = 2.100_000_023_841_858 - 8.999_999_761_581_421e-1;
         let window1 = build_extruded(&mut store, window1_bottom, window_height);
 
         // Window 2 — second window placement captured verbatim from
@@ -863,24 +863,24 @@ mod tests {
         // "zero-length vector" inside the boolean engine.
         let window2_bottom = vec![
             p(
-                1.532_615_675_427_539_74,
-                -2.591_498_101_432_384_35,
-                8.999_999_761_581_420_90e-1,
+                1.532_615_675_427_539_7,
+                -2.591_498_101_432_384_3,
+                8.999_999_761_581_421e-1,
             ),
             p(
-                1.476_937_380_768_878_82,
-                -2.800_198_677_737_773_87,
-                8.999_999_761_581_420_90e-1,
+                1.476_937_380_768_878_8,
+                -2.800_198_677_737_774,
+                8.999_999_761_581_421e-1,
             ),
             p(
-                6.073_516_691_992_446_59e-1,
-                -2.568_205_789_472_399_75,
-                8.999_999_761_581_420_90e-1,
+                6.073_516_691_992_447e-1,
+                -2.568_205_789_472_399_7,
+                8.999_999_761_581_421e-1,
             ),
             p(
-                6.630_299_638_579_055_80e-1,
-                -2.359_505_213_167_010_23,
-                8.999_999_761_581_420_90e-1,
+                6.630_299_638_579_056e-1,
+                -2.359_505_213_167_010_2,
+                8.999_999_761_581_421e-1,
             ),
         ];
         let window2 = build_extruded(&mut store, window2_bottom, window_height);

@@ -197,13 +197,16 @@ fn tessellate_nurbs_face(
 
     // Edge-driven boundary: every outer wire edge has a pcurve, so the outer
     // UV loop is assembled from the shared per-edge samples (structural
-    // conformance with every adjacent face). Falls back to the geometric
+    // conformance with every adjacent face), and boundary vertices are pinned
+    // to the canonical per-edge 3D samples. Falls back to the geometric
     // paths when the face predates shared-edge topology.
-    let edge_driven = super::edge_driven_outer_uv(store, cache, face, nurbs, &options)?;
+    let mut pins = super::UvPinMap::new();
+    let edge_driven = super::edge_driven_outer_uv(store, cache, face, nurbs, &options, &mut pins)?;
 
     let mut mesh = match (&face.trim, edge_driven) {
-        (trim, Some(outer)) => {
-            super::tessellate_with_outer_uv(nurbs, &outer, trim.as_ref(), &options)?
+        (_, Some(outer)) => {
+            let holes = super::face_hole_loops_uv(store, cache, face, &mut pins)?;
+            super::tessellate_with_outer_uv(nurbs, &outer, &holes, &pins, &options)?
         }
         // Untrimmed faces with a non-degenerate rectangular boundary go through
         // the boundary-conforming CDT path so adjacent faces sharing a boundary
@@ -945,7 +948,7 @@ fn insert_constraint_loop(
 ///
 /// Starts from faces adjacent to the outer (infinite) face at depth 0. Each time
 /// a constraint edge is crossed, depth increments. Odd depth = interior.
-fn classify_interior_faces(
+pub(crate) fn classify_interior_faces(
     cdt: &ConstrainedDelaunayTriangulation<SpadePoint2<f64>>,
 ) -> HashSet<usize> {
     let mut interior = HashSet::new();

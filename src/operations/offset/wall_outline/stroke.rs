@@ -1,6 +1,35 @@
 use super::polygon_union::{Polygon, PolygonWithHoles, WALL_EPS};
+use super::provenance::{CapEnd, OffsetSide};
 
-/// Expands a polyline into a thickened polygon with left/right offsets.
+/// Structural origin of one stroke-polygon edge, expressed in the
+/// **caller's** vertex frame: `seg` indexes the segments of the
+/// `vertices` slice exactly as passed to [`stroke_expand_labeled`]
+/// (segment `k` connects `vertices[k]` to `vertices[(k + 1) % n]`),
+/// and `side` is relative to the caller's traversal direction. The
+/// internal CCW winding normalisation applied to closed inputs is
+/// transparently remapped back to the caller frame.
+///
+/// Joins are miters (each join contributes a single shared point, never
+/// its own edge), so every stroke edge is either a `Side` offset or a
+/// flat end `Cap` — there is no join-arc origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrokeOrigin {
+    Side { seg: usize, side: OffsetSide },
+    Cap { end: CapEnd },
+}
+
+/// Per-edge origins for every ring of a stroke-expanded polygon,
+/// aligned 1:1 with the rings of the returned [`PolygonWithHoles`]:
+/// `outer[e]` describes the edge `outer[e] → outer[(e + 1) % n]`, and
+/// likewise per hole.
+pub struct StrokeLabels {
+    pub outer: Vec<StrokeOrigin>,
+    pub holes: Vec<Vec<StrokeOrigin>>,
+}
+
+/// Expands a polyline into a thickened polygon with left/right offsets,
+/// reporting per polygon edge the [`StrokeOrigin`] it came from (see
+/// [`StrokeLabels`] for the alignment contract).
 ///
 /// The polygon has two offset "sides":
 ///   - left side: points offset by `+left_w` along the left normal
@@ -8,22 +37,34 @@ use super::polygon_union::{Polygon, PolygonWithHoles, WALL_EPS};
 ///
 /// For a closed polyline the result is an annulus: outer ring + one hole.
 /// For an open polyline it is a single ring (left side forward, right side back).
-pub fn stroke_expand(
+pub fn stroke_expand_labeled(
     vertices: &[(f64, f64)],
     closed: bool,
     left_w: f64,
     right_w: f64,
-) -> PolygonWithHoles {
+) -> (PolygonWithHoles, StrokeLabels) {
     let n = vertices.len();
     if n < 2 {
-        return PolygonWithHoles {
-            outer: Vec::new(),
-            holes: Vec::new(),
-        };
+        return (
+            PolygonWithHoles {
+                outer: Vec::new(),
+                holes: Vec::new(),
+            },
+            StrokeLabels {
+                outer: Vec::new(),
+                holes: Vec::new(),
+            },
+        );
     }
 
-    let verts = if closed {
-        normalize_winding(vertices)
+    // Closed inputs are normalised to CCW winding for the offset build;
+    // `reversed` records the flip so labels can be remapped back to the
+    // caller's original segment indices and sides.
+    let reversed = closed && signed_area_tuples(vertices) < 0.0;
+    let verts: Vec<(f64, f64)> = if reversed {
+        let mut r = vertices.to_vec();
+        r.reverse();
+        r
     } else {
         vertices.to_vec()
     };
@@ -61,41 +102,144 @@ pub fn stroke_expand(
     }
 
     if closed {
-        // For CCW input, left_normal points INWARD, so:
-        //   right_pts = outer boundary (larger)
-        //   left_pts = inner boundary (hole)
-        // Ensure outer is CCW, hole is CW.
-        let right_area = signed_area_tuples(&right_pts);
-        let left_area = signed_area_tuples(&left_pts);
+        assemble_closed_annulus(left_pts, right_pts, seg_count, reversed)
+    } else {
+        assemble_open_ring(&left_pts, right_pts, seg_count)
+    }
+}
 
-        let (mut outer, mut hole) = if right_area.abs() > left_area.abs() {
-            (right_pts, left_pts)
+/// Assembles the closed-input annulus (outer ring + one hole) with
+/// per-edge labels remapped to the caller frame.
+///
+/// Reversing a closed ring of `n` vertices maps internal segment `i` to
+/// caller segment `(n - 2 - i) mod n` and swaps left and right; edge
+/// labels follow the point rings through the outer/hole area pick and
+/// the winding-fix reversals.
+fn assemble_closed_annulus(
+    left_pts: Vec<(f64, f64)>,
+    right_pts: Vec<(f64, f64)>,
+    seg_count: usize,
+    reversed: bool,
+) -> (PolygonWithHoles, StrokeLabels) {
+    // Each join contributes exactly one miter point per side, so both
+    // rings have exactly seg_count points; ring edge k runs along the
+    // offset line of internal segment k.
+    debug_assert_eq!(left_pts.len(), seg_count);
+    debug_assert_eq!(right_pts.len(), seg_count);
+    let caller_seg = |i: usize| -> usize {
+        if reversed {
+            (2 * seg_count - 2 - i) % seg_count
         } else {
-            (left_pts, right_pts)
+            i
+        }
+    };
+    let caller_side = |side: OffsetSide| -> OffsetSide {
+        if !reversed {
+            return side;
+        }
+        match side {
+            OffsetSide::Left => OffsetSide::Right,
+            OffsetSide::Right => OffsetSide::Left,
+        }
+    };
+    let side_ring_labels = |side: OffsetSide| -> Vec<StrokeOrigin> {
+        (0..seg_count)
+            .map(|k| StrokeOrigin::Side {
+                seg: caller_seg(k),
+                side: caller_side(side),
+            })
+            .collect()
+    };
+    let left_labels = side_ring_labels(OffsetSide::Left);
+    let right_labels = side_ring_labels(OffsetSide::Right);
+
+    // For CCW input, left_normal points INWARD, so:
+    //   right_pts = outer boundary (larger)
+    //   left_pts = inner boundary (hole)
+    // Ensure outer is CCW, hole is CW.
+    let right_area = signed_area_tuples(&right_pts);
+    let left_area = signed_area_tuples(&left_pts);
+
+    let (mut outer, mut outer_labels, mut hole, mut hole_labels) =
+        if right_area.abs() > left_area.abs() {
+            (right_pts, right_labels, left_pts, left_labels)
+        } else {
+            (left_pts, left_labels, right_pts, right_labels)
         };
 
-        if signed_area_tuples(&outer) < 0.0 {
-            outer.reverse();
-        }
-        if signed_area_tuples(&hole) > 0.0 {
-            hole.reverse();
-        }
+    if signed_area_tuples(&outer) < 0.0 {
+        outer.reverse();
+        outer_labels = ring_reversed_labels(&outer_labels);
+    }
+    if signed_area_tuples(&hole) > 0.0 {
+        hole.reverse();
+        hole_labels = ring_reversed_labels(&hole_labels);
+    }
 
+    (
         PolygonWithHoles {
             outer,
             holes: vec![hole],
-        }
-    } else {
-        // Single polygon: left forward, end cap, right backward.
-        let mut poly: Polygon = Vec::new();
-        poly.extend_from_slice(&left_pts);
-        right_pts.reverse();
-        poly.extend_from_slice(&right_pts);
+        },
+        StrokeLabels {
+            outer: outer_labels,
+            holes: vec![hole_labels],
+        },
+    )
+}
+
+/// Assembles the open-input single ring: left side forward, end cap,
+/// right side backward, start cap — with matching per-edge labels.
+fn assemble_open_ring(
+    left_pts: &[(f64, f64)],
+    mut right_pts: Vec<(f64, f64)>,
+    seg_count: usize,
+) -> (PolygonWithHoles, StrokeLabels) {
+    // Each side has seg_count + 1 points (start cap point, one miter per
+    // interior vertex, end point); side edge k lies on the offset line
+    // of segment k.
+    debug_assert_eq!(left_pts.len(), seg_count + 1);
+    debug_assert_eq!(right_pts.len(), seg_count + 1);
+    let mut poly: Polygon = Vec::new();
+    poly.extend_from_slice(left_pts);
+    right_pts.reverse();
+    poly.extend_from_slice(&right_pts);
+
+    let mut labels: Vec<StrokeOrigin> = Vec::with_capacity(poly.len());
+    for k in 0..seg_count {
+        labels.push(StrokeOrigin::Side {
+            seg: k,
+            side: OffsetSide::Left,
+        });
+    }
+    labels.push(StrokeOrigin::Cap { end: CapEnd::End });
+    for k in (0..seg_count).rev() {
+        labels.push(StrokeOrigin::Side {
+            seg: k,
+            side: OffsetSide::Right,
+        });
+    }
+    labels.push(StrokeOrigin::Cap { end: CapEnd::Start });
+    debug_assert_eq!(labels.len(), poly.len());
+
+    (
         PolygonWithHoles {
             outer: poly,
             holes: Vec::new(),
-        }
-    }
+        },
+        StrokeLabels {
+            outer: labels,
+            holes: Vec::new(),
+        },
+    )
+}
+
+/// Label remap for an in-place ring reversal `q[j] = p[m - 1 - j]`: the
+/// reversed ring's edge `j` retraces the original ring's edge
+/// `(m - 2 - j) mod m`, so its label is `l[(2m - 2 - j) % m]`.
+fn ring_reversed_labels(labels: &[StrokeOrigin]) -> Vec<StrokeOrigin> {
+    let m = labels.len();
+    (0..m).map(|j| labels[(2 * m - 2 - j) % m]).collect()
 }
 
 fn build_open_offsets(
@@ -216,17 +360,6 @@ fn miter_chain(miter: Option<(f64, f64)>, fallback: (f64, f64)) -> Vec<(f64, f64
     }
 }
 
-fn normalize_winding(verts: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    let area = signed_area_tuples(verts);
-    if area < 0.0 {
-        let mut reversed = verts.to_vec();
-        reversed.reverse();
-        reversed
-    } else {
-        verts.to_vec()
-    }
-}
-
 fn signed_area_tuples(verts: &[(f64, f64)]) -> f64 {
     let n = verts.len();
     let mut area = 0.0;
@@ -274,6 +407,16 @@ fn line_intersect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Geometry-only view for tests written against the pre-labels API.
+    fn stroke_expand(
+        vertices: &[(f64, f64)],
+        closed: bool,
+        left_w: f64,
+        right_w: f64,
+    ) -> PolygonWithHoles {
+        stroke_expand_labeled(vertices, closed, left_w, right_w).0
+    }
 
     #[test]
     fn straight_open() {
@@ -352,6 +495,8 @@ mod tests {
     }
 
     #[test]
+    // The bbox extremes are clearest as input_{min,max}_{x,y}.
+    #[allow(clippy::similar_names)]
     fn angled_closed_polygon_no_dent() {
         // Regression test: diagonal (non-axis-aligned) closed polygon.
         // Earlier iterations produced corner "dents" on the outer boundary
@@ -431,5 +576,159 @@ mod tests {
         let join = compute_join((1.0, 0.0), (1.0, 0.0), (1.0, 0.0), 0.3, 0.3);
         assert_eq!(join.left.len(), 1);
         assert_eq!(join.right.len(), 1);
+    }
+
+    // ===== stroke_expand_labeled — per-edge origin labels =====
+
+    #[test]
+    fn labels_open_l_shape_sequence() {
+        let (pwh, labels) =
+            stroke_expand_labeled(&[(0.0, 0.0), (3.0, 0.0), (3.0, 3.0)], false, 0.3, 0.3);
+        assert!(labels.holes.is_empty());
+        assert_eq!(labels.outer.len(), pwh.outer.len());
+        let l = |seg| StrokeOrigin::Side {
+            seg,
+            side: OffsetSide::Left,
+        };
+        let r = |seg| StrokeOrigin::Side {
+            seg,
+            side: OffsetSide::Right,
+        };
+        assert_eq!(
+            labels.outer,
+            vec![
+                l(0),
+                l(1),
+                StrokeOrigin::Cap { end: CapEnd::End },
+                r(1),
+                r(0),
+                StrokeOrigin::Cap { end: CapEnd::Start },
+            ]
+        );
+    }
+
+    /// Asserts that ring edge `e` (labelled `Side { seg, side }`) lies on
+    /// the offset supporting line of centerline segment `seg`.
+    fn assert_side_edges_on_offset_lines(
+        ring: &[(f64, f64)],
+        labels: &[StrokeOrigin],
+        centerline: &[(f64, f64)],
+        left_w: f64,
+        right_w: f64,
+    ) {
+        let vert_count = centerline.len();
+        for (e, label) in labels.iter().enumerate() {
+            let StrokeOrigin::Side { seg, side } = *label else {
+                continue;
+            };
+            let seg_a = centerline[seg];
+            let seg_b = centerline[(seg + 1) % vert_count];
+            let dir = normalize(seg_b.0 - seg_a.0, seg_b.1 - seg_a.1);
+            let nn = left_normal(dir);
+            let width = match side {
+                OffsetSide::Left => left_w,
+                OffsetSide::Right => -right_w,
+            };
+            let base = (seg_a.0 + width * nn.0, seg_a.1 + width * nn.1);
+            for p in [ring[e], ring[(e + 1) % ring.len()]] {
+                let perp = (p.0 - base.0) * dir.1 - (p.1 - base.1) * dir.0;
+                assert!(
+                    perp.abs() < 1e-9,
+                    "edge {e} labelled seg={seg} side={side:?} not on its \
+                     offset line: perp={perp}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn labels_closed_square_ccw_outer_right_hole_left() {
+        let square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let (pwh, labels) = stroke_expand_labeled(&square, true, 0.3, 0.3);
+        assert_eq!(labels.outer.len(), pwh.outer.len());
+        assert_eq!(labels.holes.len(), 1);
+        assert_eq!(labels.holes[0].len(), pwh.holes[0].len());
+        // CCW input: left normal points inward → outer ring is the RIGHT
+        // side, hole ring the LEFT side, in the caller's frame.
+        for lab in &labels.outer {
+            assert!(
+                matches!(
+                    lab,
+                    StrokeOrigin::Side {
+                        side: OffsetSide::Right,
+                        ..
+                    }
+                ),
+                "outer label {lab:?} must be a Right side for CCW input"
+            );
+        }
+        for lab in &labels.holes[0] {
+            assert!(
+                matches!(
+                    lab,
+                    StrokeOrigin::Side {
+                        side: OffsetSide::Left,
+                        ..
+                    }
+                ),
+                "hole label {lab:?} must be a Left side for CCW input"
+            );
+        }
+        // Every centerline segment appears exactly once per ring.
+        for ring_labels in [&labels.outer, &labels.holes[0]] {
+            let mut segs: Vec<usize> = ring_labels
+                .iter()
+                .map(|l| match l {
+                    StrokeOrigin::Side { seg, .. } => *seg,
+                    StrokeOrigin::Cap { .. } => panic!("closed input must not emit caps"),
+                })
+                .collect();
+            segs.sort_unstable();
+            assert_eq!(segs, vec![0, 1, 2, 3]);
+        }
+        assert_side_edges_on_offset_lines(&pwh.outer, &labels.outer, &square, 0.3, 0.3);
+        assert_side_edges_on_offset_lines(&pwh.holes[0], &labels.holes[0], &square, 0.3, 0.3);
+    }
+
+    #[test]
+    fn labels_closed_square_cw_input_sides_follow_caller_direction() {
+        // Same square traversed CW: sides must be reported relative to the
+        // caller's (CW) traversal, so the outer ring is now the LEFT side.
+        let square_cw = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)];
+        let (pwh, labels) = stroke_expand_labeled(&square_cw, true, 0.3, 0.3);
+        for lab in &labels.outer {
+            assert!(
+                matches!(
+                    lab,
+                    StrokeOrigin::Side {
+                        side: OffsetSide::Left,
+                        ..
+                    }
+                ),
+                "outer label {lab:?} must be a Left side for CW input"
+            );
+        }
+        for lab in &labels.holes[0] {
+            assert!(
+                matches!(
+                    lab,
+                    StrokeOrigin::Side {
+                        side: OffsetSide::Right,
+                        ..
+                    }
+                ),
+                "hole label {lab:?} must be a Right side for CW input"
+            );
+        }
+        assert_side_edges_on_offset_lines(&pwh.outer, &labels.outer, &square_cw, 0.3, 0.3);
+        assert_side_edges_on_offset_lines(&pwh.holes[0], &labels.holes[0], &square_cw, 0.3, 0.3);
+    }
+
+    #[test]
+    fn labels_asymmetric_open_segment_on_offset_lines() {
+        let line = [(0.0, 0.0), (5.0, 0.0)];
+        let (pwh, labels) = stroke_expand_labeled(&line, false, 0.0, 0.3);
+        assert_eq!(labels.outer.len(), pwh.outer.len());
+        assert_side_edges_on_offset_lines(&pwh.outer, &labels.outer, &line, 0.0, 0.3);
     }
 }
