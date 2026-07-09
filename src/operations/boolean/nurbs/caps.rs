@@ -389,8 +389,19 @@ fn chain_cycles(
 /// Orders two cap fragments into `(left, right)` by the canonical-chord
 /// rule in the cap plane's 2D frame: the canonical trace is the consumed
 /// closure edge whose canonically-oriented projected chord starts
-/// lexicographically first; a fragment is Left when its vertex-average
-/// centroid lies on the positive cross-product side of that chord.
+/// lexicographically first; a fragment is Left when its representative
+/// interior point lies on the positive cross-product side of that chord.
+///
+/// The representative point is a LOCAL probe taken just inside each
+/// fragment at the midpoint of its own cut-trace (closure) edge — NOT the
+/// fragment's global centroid. A cap severed by a second doorway can leave
+/// long fragments that wrap around the annulus (e.g. one arm runs back
+/// along the far wall), and their vertex-average centroid can land on the
+/// wrong side of — or exactly on — the extended chord line, which the
+/// centroid test misreads as an ambiguous split. The doorway separates the
+/// two fragments, so each one's boundary carries a cut-trace edge and the
+/// interior immediately inside that edge is unambiguously on that
+/// fragment's side of the cut.
 fn order_cap_fragments(
     store: &TopologyStore,
     a: FaceId,
@@ -420,28 +431,24 @@ fn order_cap_fragments(
         })
         .ok_or_else(|| OperationError::Failed("split cap without any closure edge".into()))?;
 
-    let centroid = |face: FaceId| -> Result<Point2> {
-        let cycle = if face == a { &cycles[0] } else { &cycles[1] };
-        let mut sum = Point2::new(0.0, 0.0);
-        let mut count = 0usize;
-        for oe in cycle {
-            let edge = store.edge(oe.edge)?;
-            let p = to2d(store.vertex(edge.start)?.point);
-            sum = Point2::new(sum.x + p.x, sum.y + p.y);
-            count += 1;
-        }
-        #[allow(clippy::cast_precision_loss)]
-        let inv = 1.0 / count.max(1) as f64;
-        Ok(Point2::new(sum.x * inv, sum.y * inv))
-    };
-
     let side = |center: Point2| -> f64 {
         let dir = chord.1 - chord.0;
         let rel = center - chord.0;
         dir.x * rel.y - dir.y * rel.x
     };
-    let side_a = side(centroid(a)?);
-    let side_b = side(centroid(b)?);
+    let cycle_of = |face: FaceId| if face == a { &cycles[0] } else { &cycles[1] };
+    let side_a = side(fragment_interior_probe(
+        store,
+        cycle_of(a),
+        closure_edges,
+        to2d,
+    )?);
+    let side_b = side(fragment_interior_probe(
+        store,
+        cycle_of(b),
+        closure_edges,
+        to2d,
+    )?);
     if side_a > 0.0 && side_b < 0.0 {
         Ok((a, b))
     } else if side_a < 0.0 && side_b > 0.0 {
@@ -454,6 +461,59 @@ fn order_cap_fragments(
         )
         .into())
     }
+}
+
+/// A representative interior point of a cap fragment, taken just inside its
+/// boundary at the midpoint of its own cut-trace (closure) edge.
+///
+/// Unlike the fragment's global centroid this stays LOCAL to the doorway,
+/// so it lands on the fragment's true side of the cut even when the
+/// fragment wraps far around an annulus cap. The step direction is the
+/// inward normal of the trace edge, chosen from the fragment's winding
+/// (interior is left of a CCW boundary, right of a CW one), and the step is
+/// a small fraction of the edge length so the probe never leaves the local
+/// neighbourhood of the trace.
+fn fragment_interior_probe(
+    store: &TopologyStore,
+    cycle: &[OrientedEdge],
+    closure_edges: &[EdgeId],
+    to2d: &impl Fn(Point3) -> Point2,
+) -> Result<Point2> {
+    // A small, geometry-scaled step into the interior (fraction of the
+    // trace edge length via the inward normal below).
+    const STEP: f64 = 1e-3;
+
+    let trace = cycle
+        .iter()
+        .find(|oe| closure_edges.contains(&oe.edge))
+        .ok_or_else(|| {
+            OperationError::Failed(
+                "cap fragment carries no cut-trace edge (cannot classify split side)".into(),
+            )
+        })?;
+    let edge = store.edge(trace.edge)?;
+    let (start, end) = if trace.forward {
+        (edge.start, edge.end)
+    } else {
+        (edge.end, edge.start)
+    };
+    let p0 = to2d(store.vertex(start)?.point);
+    let p1 = to2d(store.vertex(end)?.point);
+    let mid = Point2::new((p0.x + p1.x) * 0.5, (p0.y + p1.y) * 0.5);
+    let dir = p1 - p0;
+    // Interior is left of the directed boundary for a CCW cycle, right for
+    // a CW one; the inward normal has magnitude = edge length, so a fixed
+    // small fraction of it is a geometry-scaled step into the interior.
+    let ccw = polygon_signed_area(&cycle_polygon(store, cycle, to2d)?) > 0.0;
+    let inward = if ccw {
+        Point2::new(-dir.y, dir.x)
+    } else {
+        Point2::new(dir.y, -dir.x)
+    };
+    Ok(Point2::new(
+        mid.x + STEP * inward.x,
+        mid.y + STEP * inward.y,
+    ))
 }
 
 /// Orients a chord so `end - start` is lexicographically positive.
