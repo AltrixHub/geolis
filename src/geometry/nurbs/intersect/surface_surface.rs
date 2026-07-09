@@ -58,6 +58,23 @@ pub fn intersect_surfaces(
     b: &NurbsSurface,
     options: &IntersectionOptions,
 ) -> Result<Vec<SurfaceIntersectionCurve>> {
+    // Closed-form fast path: prism-vs-prism pairs (extruded surface ×
+    // planar patch) dominate the BIM boolean workload and have analytic
+    // intersection curves — bypass seeding + marching entirely for them.
+    if let Some(branches) = super::analytic::try_intersect(a, b, options)? {
+        return Ok(branches);
+    }
+    intersect_surfaces_marching(a, b, options)
+}
+
+/// The numerical SSI pipeline (seeding + marching) without the analytic
+/// dispatch — the fallback body of [`intersect_surfaces`], kept callable on
+/// its own so equivalence tests can compare both paths on one pair.
+pub(crate) fn intersect_surfaces_marching(
+    a: &NurbsSurface,
+    b: &NurbsSurface,
+    options: &IntersectionOptions,
+) -> Result<Vec<SurfaceIntersectionCurve>> {
     let leaf = seed_leaf_extent(a, b);
     let pad = 1e-7;
     let box_pairs = seed_surface_surface(a, b, leaf, pad, 40)?;
@@ -178,7 +195,7 @@ impl SurfaceDomain {
 /// wall): the step became comparable to the tool's corner radii, the corrector
 /// jumped between loop lobes, and branches fragmented into overlapping open
 /// pieces.
-fn seed_leaf_extent(a: &NurbsSurface, b: &NurbsSurface) -> f64 {
+pub(crate) fn seed_leaf_extent(a: &NurbsSurface, b: &NurbsSurface) -> f64 {
     let (a_lo, a_hi) = a.bounding_box();
     let (b_lo, b_hi) = b.bounding_box();
     let da = (a_hi - a_lo).norm();
