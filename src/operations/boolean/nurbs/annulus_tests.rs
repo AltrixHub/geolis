@@ -459,6 +459,174 @@ fn door_preserves_untouched_courtyard_wire() {
     );
 }
 
+/// Second bottom-touching door through the NORTH wall (`y in [5.5, 6.0]`):
+/// profile in the XZ plane at `y = 7.0`, extruded 2.5 along `-Y` so the far
+/// cap ends inside the courtyard air. Reversed winding keeps the prism
+/// outward-facing under the flipped extrusion direction.
+fn build_cutter_north(store: &mut TopologyStore, cut: &Opening) -> SolidId {
+    let q = |x: f64, z: f64| Point3::new(x, 7.0, z);
+    let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+    let profile = vec![
+        line(q(cut.x0, cut.z0), q(cut.x0, cut.z1)), // jamb-left
+        line(q(cut.x0, cut.z1), q(cut.x1, cut.z1)), // head
+        line(q(cut.x1, cut.z1), q(cut.x1, cut.z0)), // jamb-right
+        line(q(cut.x1, cut.z0), q(cut.x0, cut.z0)), // sill
+    ];
+    MakeSegmentedPrism::new(profile, Vector3::new(0.0, -2.5, 0.0))
+        .with_op_id(OpId::new(tool_op(cut)))
+        .with_segment_tags(tags(["jamb-left", "head", "jamb-right", "sill"]))
+        .execute(store)
+        .unwrap()
+}
+
+/// Bottom-touching door through the WEST wall (`x in [0, 0.5]`): profile in
+/// the YZ plane at `x = -1.0`, extruded 2.5 along `+X`. `y0..y1` spans the
+/// wall run. Mirrors the south cutter under an X↔Y swap (winding reversed
+/// to keep the prism outward-facing after the reflection).
+fn build_cutter_west(
+    store: &mut TopologyStore,
+    op: &'static str,
+    y0: f64,
+    y1: f64,
+    z0: f64,
+    z1: f64,
+) -> SolidId {
+    let q = |y: f64, z: f64| Point3::new(-1.0, y, z);
+    let line = |a: Point3, b: Point3| ProfileSegment::Line { start: a, end: b };
+    let profile = vec![
+        line(q(y0, z0), q(y0, z1)), // jamb-left
+        line(q(y0, z1), q(y1, z1)), // head
+        line(q(y1, z1), q(y1, z0)), // jamb-right
+        line(q(y1, z0), q(y0, z0)), // sill
+    ];
+    MakeSegmentedPrism::new(profile, Vector3::new(2.5, 0.0, 0.0))
+        .with_op_id(OpId::new(format!("tool-{op}")))
+        .with_segment_tags(tags(["jamb-left", "head", "jamb-right", "sill"]))
+        .execute(store)
+        .unwrap()
+}
+
+/// REPRO (bug): a second bottom-touching door on the perpendicular (west)
+/// wall. Door 1 (south) opens the annular bottom cap into a single C
+/// fragment; door 2 (west) then severs that C into two fragments whose
+/// global centroids no longer straddle the canonical closure chord — the
+/// ambiguous-SplitSide path, now classified by a local interior probe.
+#[test]
+fn two_doors_on_perpendicular_walls_cut_both() {
+    const DOOR_W: Opening = Opening {
+        op: "cut-doorW",
+        // Reused as the west wall's y-run span.
+        x0: 2.5,
+        x1: 3.5,
+        z0: -0.5,
+        z1: 2.25,
+    };
+    let mut store = TopologyStore::new();
+    let wall = room_wall(&mut store);
+    let after_south = subtract(&mut store, wall, &DOOR);
+    let cutter = build_cutter_west(
+        &mut store, DOOR_W.op, DOOR_W.x0, DOOR_W.x1, DOOR_W.z0, DOOR_W.z1,
+    );
+    let result = Subtract::new(after_south, cutter)
+        .with_op_id(OpId::new(DOOR_W.op))
+        .execute(&mut store)
+        .unwrap_or_else(|e| panic!("second (west) door failed: {e:?}"));
+
+    assert_eq!(
+        welded_boundary_edges(&store, result),
+        0,
+        "perpendicular two-door room must weld watertight"
+    );
+    let mesh = TessellateSolid::new(result, TessellationParams::default())
+        .execute(&store)
+        .unwrap();
+    assert_open(&mesh, &DOOR);
+}
+
+/// REPRO (bug): THREE bottom-touching doors around the room (south, west,
+/// north). Every cut after the first severs an already-notched cap, so all
+/// three must succeed and the room stay watertight.
+#[test]
+fn three_doors_around_room_all_cut() {
+    const DOOR_W: Opening = Opening {
+        op: "cut-doorW",
+        x0: 2.5,
+        x1: 3.5,
+        z0: -0.5,
+        z1: 2.25,
+    };
+    const DOOR_N: Opening = Opening {
+        op: "cut-doorN",
+        x0: 3.5,
+        x1: 4.4,
+        z0: -0.5,
+        z1: 2.25,
+    };
+    let mut store = TopologyStore::new();
+    let mut current = room_wall(&mut store);
+    current = subtract(&mut store, current, &DOOR);
+
+    let west = build_cutter_west(
+        &mut store, DOOR_W.op, DOOR_W.x0, DOOR_W.x1, DOOR_W.z0, DOOR_W.z1,
+    );
+    current = Subtract::new(current, west)
+        .with_op_id(OpId::new(DOOR_W.op))
+        .execute(&mut store)
+        .unwrap_or_else(|e| panic!("west door failed: {e:?}"));
+
+    let north = build_cutter_north(&mut store, &DOOR_N);
+    current = Subtract::new(current, north)
+        .with_op_id(OpId::new(DOOR_N.op))
+        .execute(&mut store)
+        .unwrap_or_else(|e| panic!("north door failed: {e:?}"));
+
+    assert_eq!(
+        welded_boundary_edges(&store, current),
+        0,
+        "three-door room must weld watertight"
+    );
+    let mesh = TessellateSolid::new(current, TessellationParams::default())
+        .execute(&store)
+        .unwrap();
+    assert_open(&mesh, &DOOR);
+    assert_open(&mesh, &DOOR_N);
+}
+
+/// REPRO (bug): a second bottom-touching door on the OPPOSITE (north) wall.
+/// Door 1 (south) notches the bottom-cap annulus into a single C fragment;
+/// door 2 (north) then severs that C into two fragments, driving the
+/// `order_cap_fragments` classification — the ambiguous-SplitSide path.
+#[test]
+fn two_doors_on_opposite_walls_cut_both() {
+    const DOOR_N: Opening = Opening {
+        op: "cut-doorN",
+        x0: 3.5,
+        x1: 4.4,
+        z0: -0.5,
+        z1: 2.25,
+    };
+    let mut store = TopologyStore::new();
+    let wall = room_wall(&mut store);
+    let after_south = subtract(&mut store, wall, &DOOR);
+    // Second door on the north wall — this is where the bug fires.
+    let cutter = build_cutter_north(&mut store, &DOOR_N);
+    let result = Subtract::new(after_south, cutter)
+        .with_op_id(OpId::new(DOOR_N.op))
+        .execute(&mut store)
+        .unwrap_or_else(|e| panic!("second (north) door failed: {e:?}"));
+
+    assert_eq!(
+        welded_boundary_edges(&store, result),
+        0,
+        "two-door room must weld watertight"
+    );
+    let mesh = TessellateSolid::new(result, TessellationParams::default())
+        .execute(&store)
+        .unwrap();
+    assert_open(&mesh, &DOOR);
+    assert_open(&mesh, &DOOR_N);
+}
+
 /// R2-style cascade on the annulus in BOTH cut orders: door → window
 /// punches the already-notched ring faces; window → door notches the
 /// already-punched faces (the hole transfers onto the kept fragment).
