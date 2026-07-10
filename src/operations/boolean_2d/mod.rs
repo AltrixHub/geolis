@@ -33,10 +33,12 @@
 //! 3. Add fixtures exercising the new fill rule.
 
 mod engine;
+mod intersect;
 mod subtract;
 mod types;
 mod union;
 
+pub use intersect::intersect_all_with_holes;
 pub use subtract::subtract_all_with_holes;
 pub use types::{
     point_in_polygon_class, signed_area, PointClass, Polygon, PolygonWithHoles, UnionResult,
