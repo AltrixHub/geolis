@@ -22,6 +22,7 @@ pub struct MakeLoft {
 }
 
 impl MakeLoft {
+    #[must_use]
     pub fn new(bottom: Vec<Point3>, top: Vec<Point3>) -> Self {
         Self { bottom, top }
     }
