@@ -4,6 +4,7 @@
 //! documentation cites algorithm numbers (e.g. A2.2, A4.3).
 
 mod basis;
+mod classify;
 mod curve;
 mod knot;
 mod surface;

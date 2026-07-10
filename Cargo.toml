@@ -5,6 +5,10 @@ license = "MIT"
 name = "geolis"
 version = "0.1.0"
 
+# Standalone package: stop cargo's workspace discovery from walking up into
+# an enclosing checkout (fork worktrees nest this repo under revion's root).
+[workspace]
+
 [dependencies]
 nalgebra = "0.35"
 slotmap = "1.1.1"
