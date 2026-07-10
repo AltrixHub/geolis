@@ -1,6 +1,7 @@
 pub mod curve;
 pub mod nurbs;
 pub mod pline;
+pub mod pline_fillet;
 pub mod pline_sampling;
 pub mod surface;
 
