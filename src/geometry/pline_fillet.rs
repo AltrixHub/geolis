@@ -56,45 +56,7 @@ impl Pline {
             (dx * dx + dy * dy).sqrt()
         };
 
-        // For each vertex, compute the trim distance (0 for untouched).
-        let mut trims = vec![0.0_f64; n];
-        let mut sweeps = vec![0.0_f64; n];
-        for &i in &corner_range {
-            let prev_seg = (i + n - 1) % n;
-            let next_seg = i % n;
-            if !self.closed && (i == 0 || i == n - 1) {
-                continue;
-            }
-            if prev_seg >= seg_count || next_seg >= seg_count {
-                continue;
-            }
-            // Only fillet corners between straight segments.
-            if vertex(prev_seg).bulge.abs() > EPS || vertex(next_seg).bulge.abs() > EPS {
-                continue;
-            }
-            let (ax, ay) = seg_vec(prev_seg);
-            let (bx, by) = seg_vec(next_seg);
-            let (la, lb) = (seg_len(prev_seg), seg_len(next_seg));
-            if la < EPS || lb < EPS {
-                continue;
-            }
-            let (uax, uay) = (ax / la, ay / la);
-            let (ubx, uby) = (bx / lb, by / lb);
-            let cross = uax * uby - uay * ubx;
-            let dot = uax * ubx + uay * uby;
-            let turn = cross.atan2(dot); // signed turn angle at the corner
-            if turn.abs() < 1e-9 {
-                continue; // collinear
-            }
-            let half = (std::f64::consts::PI - turn.abs()) / 2.0;
-            let trim = radius / half.tan();
-            trims[i] = trim;
-            sweeps[i] = if cross > 0.0 {
-                std::f64::consts::PI - 2.0 * half
-            } else {
-                -(std::f64::consts::PI - 2.0 * half)
-            };
-        }
+        let (trims, sweeps) = self.corner_trims(radius, &corner_range);
 
         // Validate segment budgets: trims at both ends must fit.
         for seg in 0..seg_count {
@@ -140,6 +102,56 @@ impl Pline {
             vertices: out,
             closed: self.closed,
         })
+    }
+}
+
+impl Pline {
+    /// Per-vertex fillet trim distances and signed arc sweeps for the
+    /// requested corners (0 where a corner is skipped).
+    fn corner_trims(&self, radius: f64, corner_range: &[usize]) -> (Vec<f64>, Vec<f64>) {
+        let n = self.vertices.len();
+        let seg_count = self.segment_count();
+        let vertex = |i: usize| &self.vertices[i % n];
+        let seg_vec = |i: usize| {
+            let a = vertex(i);
+            let b = vertex(i + 1);
+            (b.x - a.x, b.y - a.y)
+        };
+        let mut trims = vec![0.0_f64; n];
+        let mut sweeps = vec![0.0_f64; n];
+        for &i in corner_range {
+            let prev_seg = (i + n - 1) % n;
+            let next_seg = i % n;
+            if !self.closed && (i == 0 || i == n - 1) {
+                continue;
+            }
+            if prev_seg >= seg_count || next_seg >= seg_count {
+                continue;
+            }
+            // Only fillet corners between straight segments.
+            if vertex(prev_seg).bulge.abs() > EPS || vertex(next_seg).bulge.abs() > EPS {
+                continue;
+            }
+            let (ax, ay) = seg_vec(prev_seg);
+            let (bx, by) = seg_vec(next_seg);
+            let la = (ax * ax + ay * ay).sqrt();
+            let lb = (bx * bx + by * by).sqrt();
+            if la < EPS || lb < EPS {
+                continue;
+            }
+            let (uax, uay) = (ax / la, ay / la);
+            let (ubx, uby) = (bx / lb, by / lb);
+            let cross = uax * uby - uay * ubx;
+            let dot = uax * ubx + uay * uby;
+            let turn = cross.atan2(dot); // signed turn angle at the corner
+            if turn.abs() < 1e-9 {
+                continue; // collinear
+            }
+            let half = (std::f64::consts::PI - turn.abs()) / 2.0;
+            trims[i] = radius / half.tan();
+            sweeps[i] = (std::f64::consts::PI - 2.0 * half).copysign(cross);
+        }
+        (trims, sweeps)
     }
 }
 
