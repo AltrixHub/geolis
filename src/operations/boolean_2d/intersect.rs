@@ -8,7 +8,7 @@
 
 use crate::error::Result;
 
-use super::engine::{IntersectOracle, run_arrangement};
+use super::engine::{run_arrangement, IntersectOracle};
 use super::types::PolygonWithHoles;
 
 /// Intersect a base region with the union of `others`. Returns the
@@ -28,7 +28,7 @@ use super::types::PolygonWithHoles;
 /// arrangement engine on the same degenerate-input cases as
 /// [`super::union_all_with_holes`].
 pub fn intersect_all_with_holes(
-    base: PolygonWithHoles,
+    base: &PolygonWithHoles,
     others: &[PolygonWithHoles],
 ) -> Result<Vec<PolygonWithHoles>> {
     if others.is_empty() {
@@ -38,17 +38,14 @@ pub fn intersect_all_with_holes(
     segment_inputs.push(base.clone());
     segment_inputs.extend(others.iter().cloned());
 
-    let oracle = IntersectOracle {
-        base: &base,
-        others,
-    };
+    let oracle = IntersectOracle { base, others };
     run_arrangement(&segment_inputs, &oracle)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::types::{Polygon, signed_area};
+    use super::super::types::{signed_area, Polygon};
     use super::*;
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> Polygon {
@@ -76,7 +73,7 @@ mod tests {
     fn overlapping_rects_intersect_to_the_shared_area() {
         let base = pwh(rect(0.0, 0.0, 10.0, 10.0));
         let other = pwh(rect(5.0, 5.0, 10.0, 10.0));
-        let result = intersect_all_with_holes(base, &[other]).expect("intersect");
+        let result = intersect_all_with_holes(&base, &[other]).expect("intersect");
         assert_eq!(result.len(), 1);
         assert!((total_area(&result) - 25.0).abs() < 1e-9);
     }
@@ -85,14 +82,14 @@ mod tests {
     fn disjoint_rects_intersect_to_nothing() {
         let base = pwh(rect(0.0, 0.0, 4.0, 4.0));
         let other = pwh(rect(10.0, 10.0, 4.0, 4.0));
-        let result = intersect_all_with_holes(base, &[other]).expect("intersect");
+        let result = intersect_all_with_holes(&base, &[other]).expect("intersect");
         assert!(result.is_empty());
     }
 
     #[test]
     fn empty_others_yield_empty_intersection() {
         let base = pwh(rect(0.0, 0.0, 4.0, 4.0));
-        let result = intersect_all_with_holes(base, &[]).expect("intersect");
+        let result = intersect_all_with_holes(&base, &[]).expect("intersect");
         assert!(result.is_empty());
     }
 
@@ -100,7 +97,7 @@ mod tests {
     fn full_cover_returns_base_area() {
         let base = pwh(rect(2.0, 2.0, 4.0, 4.0));
         let other = pwh(rect(0.0, 0.0, 10.0, 10.0));
-        let result = intersect_all_with_holes(base.clone(), &[other]).expect("intersect");
+        let result = intersect_all_with_holes(&base, &[other]).expect("intersect");
         assert_eq!(result.len(), 1);
         assert!((total_area(&result) - 16.0).abs() < 1e-9);
     }
@@ -111,7 +108,10 @@ mod tests {
         let base = pwh(rect(0.0, 0.0, 10.0, 4.0));
         let left = pwh(rect(-1.0, -1.0, 6.0, 6.0));
         let right = pwh(rect(5.0, -1.0, 6.0, 6.0));
-        let result = intersect_all_with_holes(base, &[left, right]).expect("intersect");
-        assert!((total_area(&result) - 40.0).abs() < 1e-9, "full base covered");
+        let result = intersect_all_with_holes(&base, &[left, right]).expect("intersect");
+        assert!(
+            (total_area(&result) - 40.0).abs() < 1e-9,
+            "full base covered"
+        );
     }
 }

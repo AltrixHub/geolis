@@ -162,8 +162,7 @@ impl Pline {
                 if v0.bulge.abs() < EPS {
                     chord
                 } else {
-                    let (_, _, radius, _, sweep) =
-                        arc_from_bulge(v0.x, v0.y, v1.x, v1.y, v0.bulge);
+                    let (_, _, radius, _, sweep) = arc_from_bulge(v0.x, v0.y, v1.x, v1.y, v0.bulge);
                     if radius < EPS {
                         chord
                     } else {
@@ -277,7 +276,9 @@ mod tests {
     fn sample_rejects_out_of_range() {
         assert!(l_path(false).sample_at_length(-0.1).is_err());
         assert!(l_path(false).sample_at_length(7.1).is_err());
-        assert!(Pline::from_points(&[], false).sample_at_length(0.0).is_err());
+        assert!(Pline::from_points(&[], false)
+            .sample_at_length(0.0)
+            .is_err());
     }
 
     #[test]
@@ -286,11 +287,19 @@ mod tests {
         let arc = semicircle();
         let start = arc.sample_at_length(0.0).unwrap();
         assert!(start.tangent.x.abs() < TOL, "tx={}", start.tangent.x);
-        assert!((start.tangent.y + 1.0).abs() < TOL, "ty={}", start.tangent.y);
+        assert!(
+            (start.tangent.y + 1.0).abs() < TOL,
+            "ty={}",
+            start.tangent.y
+        );
         let bottom = arc.sample_at_length(PI / 2.0).unwrap();
         assert!((bottom.point.x - 1.0).abs() < TOL);
         assert!((bottom.point.y + 1.0).abs() < TOL);
-        assert!((bottom.tangent.x - 1.0).abs() < TOL, "tx={}", bottom.tangent.x);
+        assert!(
+            (bottom.tangent.x - 1.0).abs() < TOL,
+            "tx={}",
+            bottom.tangent.x
+        );
         assert!(bottom.tangent.y.abs() < TOL, "ty={}", bottom.tangent.y);
     }
 
