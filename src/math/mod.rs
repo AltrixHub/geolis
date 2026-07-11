@@ -4,6 +4,7 @@ pub mod intersect_2d;
 pub mod intersect_3d;
 pub mod polygon_2d;
 pub mod polygon_3d;
+pub mod straight_skeleton;
 
 /// 2D point type.
 pub type Point2 = nalgebra::Point2<f64>;
