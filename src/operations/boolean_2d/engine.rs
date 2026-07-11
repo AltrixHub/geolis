@@ -137,6 +137,38 @@ impl FillOracle for UnionOracle<'_> {
     }
 }
 
+/// AND-of-coverage rule used by the intersection operation.
+///
+/// A point is `Filled` iff the base PWH contains it strictly Inside
+/// AND at least one of `others` contains it strictly Inside.
+pub struct IntersectOracle<'a> {
+    pub base: &'a PolygonWithHoles,
+    pub others: &'a [PolygonWithHoles],
+}
+
+impl FillOracle for IntersectOracle<'_> {
+    fn classify(&self, p: (f64, f64)) -> FilledClass {
+        let mut touched: Vec<(usize, BoundaryRef)> = Vec::new();
+        let (base_filled, base_touches) = classify_pwh_filled(p, self.base, 0);
+        touched.extend(base_touches);
+        let mut any_other_filled = false;
+        for (idx, pwh) in self.others.iter().enumerate() {
+            let (filled, ring_touches) = classify_pwh_filled(p, pwh, idx + 1);
+            touched.extend(ring_touches);
+            if filled {
+                any_other_filled = true;
+            }
+        }
+        if !touched.is_empty() {
+            FilledClass::AmbiguousOnBoundary { touched }
+        } else if base_filled && any_other_filled {
+            FilledClass::Filled
+        } else {
+            FilledClass::Empty
+        }
+    }
+}
+
 /// Subtract rule: `Filled` iff `base` is filled AND every entry in
 /// `subtracts` is empty.
 ///

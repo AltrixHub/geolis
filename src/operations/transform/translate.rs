@@ -85,4 +85,32 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn cloned_store_is_independent_of_the_original() {
+        let mut store = TopologyStore::new();
+        let solid = crate::operations::creation::MakeBox::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 1.0),
+        )
+        .execute(&mut store)
+        .unwrap();
+
+        let mut copy = store.clone();
+        Translate::new(solid, Vector3::new(10.0, 0.0, 0.0))
+            .execute(&mut copy)
+            .unwrap();
+
+        let original_max = crate::operations::query::BoundingBox::new(solid)
+            .execute(&store)
+            .unwrap();
+        let moved_max = crate::operations::query::BoundingBox::new(solid)
+            .execute(&copy)
+            .unwrap();
+        assert!(
+            (original_max.max.x - 1.0).abs() < 1e-9,
+            "original untouched"
+        );
+        assert!((moved_max.max.x - 11.0).abs() < 1e-9, "clone moved");
+    }
 }

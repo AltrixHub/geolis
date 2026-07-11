@@ -211,7 +211,7 @@ fn collect_wire_points(
 }
 
 /// Computes the normal of a polygon using Newell's method.
-fn newell_normal(points: &[Point3]) -> Result<Vector3> {
+pub(super) fn newell_normal(points: &[Point3]) -> Result<Vector3> {
     let n = points.len();
     let mut normal = Vector3::new(0.0, 0.0, 0.0);
     for i in 0..n {
@@ -231,7 +231,7 @@ fn newell_normal(points: &[Point3]) -> Result<Vector3> {
 }
 
 /// Creates edges forming a closed loop from vertex/point arrays.
-fn create_loop_edges(
+pub(super) fn create_loop_edges(
     store: &mut TopologyStore,
     verts: &[VertexId],
     points: &[Point3],
@@ -248,7 +248,7 @@ fn create_loop_edges(
 }
 
 /// Creates vertical edges connecting bottom and top vertex arrays.
-fn create_vertical_edges(
+pub(super) fn create_vertical_edges(
     store: &mut TopologyStore,
     bottom_verts: &[VertexId],
     top_verts: &[VertexId],
@@ -270,7 +270,7 @@ fn create_vertical_edges(
 }
 
 /// Creates a line edge between two existing vertices.
-fn create_line_edge(
+pub(super) fn create_line_edge(
     store: &mut TopologyStore,
     start: VertexId,
     end: VertexId,
@@ -290,7 +290,7 @@ fn create_line_edge(
 }
 
 /// Creates a closed wire from a sequence of oriented edges.
-fn create_closed_wire(store: &mut TopologyStore, edges: Vec<OrientedEdge>) -> WireId {
+pub(super) fn create_closed_wire(store: &mut TopologyStore, edges: Vec<OrientedEdge>) -> WireId {
     store.add_wire(WireData {
         edges,
         is_closed: true,

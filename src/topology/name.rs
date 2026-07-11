@@ -192,7 +192,7 @@ pub enum EdgeName {
 /// Both directions stay bijective: registering a name that is already bound
 /// rebinds it (the previous holder drops out), which is exactly the boolean
 /// move semantics — the newest result owns the name.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NameRegistry {
     face_names: HashMap<FaceId, FaceName>,
     faces_by_name: HashMap<FaceName, FaceId>,

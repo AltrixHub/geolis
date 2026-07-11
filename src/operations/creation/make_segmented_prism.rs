@@ -136,6 +136,79 @@ impl MakeSegmentedPrism {
         }
     }
 
+    /// Creates the transverse rectangular prism that pierces a
+    /// wall-like solid: a 4-line rectangle in the vertical plane
+    /// spanned by the in-plane `tangent` and world Z, anchored at
+    /// `base` (bottom-center, `base.z` = lower edge), spanning
+    /// `±half_width` along the tangent and `height` upward, extruded
+    /// along `direction`. The vertical profile + horizontal extrusion
+    /// keeps all four loop-forming faces NURBS side faces and the
+    /// planar caps clear of the pierced solid — the through-cut class
+    /// boolean subtraction requires.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` when any coordinate is non-finite, `tangent`'s
+    /// XY projection is (near-)zero, or `half_width` / `height` is not
+    /// strictly positive.
+    pub fn vertical_rect(
+        base: Point3,
+        tangent: Vector3,
+        half_width: f64,
+        height: f64,
+        direction: Vector3,
+    ) -> Result<Self> {
+        let finite = [
+            base.x,
+            base.y,
+            base.z,
+            tangent.x,
+            tangent.y,
+            half_width,
+            height,
+            direction.x,
+            direction.y,
+            direction.z,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite {
+            return Err(OperationError::InvalidInput(
+                "vertical_rect: all inputs must be finite".to_string(),
+            )
+            .into());
+        }
+        let t_len = (tangent.x * tangent.x + tangent.y * tangent.y).sqrt();
+        if t_len < TOLERANCE {
+            return Err(OperationError::InvalidInput(
+                "vertical_rect: tangent must have a non-zero XY projection".to_string(),
+            )
+            .into());
+        }
+        if half_width <= 0.0 || height <= 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "vertical_rect: half_width and height must be strictly positive, \
+                 got {half_width} / {height}"
+            ))
+            .into());
+        }
+        let (tx, ty) = (tangent.x / t_len, tangent.y / t_len);
+        let (z_lo, z_hi) = (base.z, base.z + height);
+        let pts = [
+            Point3::new(base.x - tx * half_width, base.y - ty * half_width, z_lo),
+            Point3::new(base.x + tx * half_width, base.y + ty * half_width, z_lo),
+            Point3::new(base.x + tx * half_width, base.y + ty * half_width, z_hi),
+            Point3::new(base.x - tx * half_width, base.y - ty * half_width, z_hi),
+        ];
+        let profile = (0..4)
+            .map(|i| ProfileSegment::Line {
+                start: pts[i],
+                end: pts[(i + 1) % 4],
+            })
+            .collect();
+        Ok(Self::new(profile, direction))
+    }
+
     /// Registers persistent names for the prism's faces under the
     /// caller-supplied operation identity.
     #[must_use]
@@ -641,6 +714,54 @@ mod tests {
 
     fn p(x: f64, y: f64) -> Point3 {
         Point3::new(x, y, 0.0)
+    }
+
+    /// `vertical_rect` builds the transverse wall-piercing prism:
+    /// `2·half_width` wide along the tangent, `height` tall, extruded
+    /// along `direction` — volume = 2·hw × h × |direction|.
+    #[test]
+    fn vertical_rect_volume_matches_box() {
+        let mut store = TopologyStore::new();
+        let solid = MakeSegmentedPrism::vertical_rect(
+            Point3::new(1.0, 2.0, 0.5),
+            Vector3::new(2.0, 0.0, 0.0), // non-unit tangent is normalized
+            0.6,
+            1.5,
+            Vector3::new(0.0, 0.3, 0.0),
+        )
+        .expect("valid rect")
+        .execute(&mut store)
+        .expect("prism");
+        let volume = crate::operations::query::Volume::new(solid)
+            .execute(&store)
+            .expect("volume");
+        let expected = 1.2 * 1.5 * 0.3;
+        assert!(
+            (volume - expected).abs() < 1e-6,
+            "volume {volume} != {expected}"
+        );
+    }
+
+    #[test]
+    fn vertical_rect_rejects_degenerate_inputs() {
+        let base = Point3::new(0.0, 0.0, 0.0);
+        let dir = Vector3::new(0.0, 1.0, 0.0);
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::z(), 0.5, 1.0, dir).is_err(),
+            "tangent with zero XY projection must be rejected"
+        );
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::x(), 0.0, 1.0, dir).is_err(),
+            "zero half_width must be rejected"
+        );
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::x(), 0.5, -1.0, dir).is_err(),
+            "negative height must be rejected"
+        );
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::x(), f64::NAN, 1.0, dir).is_err(),
+            "non-finite input must be rejected"
+        );
     }
 
     /// L-shaped 5-segment closed profile (CCW): 4 lines + 1 concave arc
