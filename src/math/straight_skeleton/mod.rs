@@ -167,7 +167,7 @@ fn normalize_polygon(points: &[Point3]) -> Result<Vec<Point2>> {
 }
 
 /// Signed area of a 2D ring (shoelace; positive for CCW).
-fn ring_area(pts: &[Point2]) -> f64 {
+pub(crate) fn ring_area(pts: &[Point2]) -> f64 {
     let n = pts.len();
     let mut sum = 0.0;
     for i in 0..n {
@@ -178,7 +178,7 @@ fn ring_area(pts: &[Point2]) -> f64 {
 }
 
 /// Returns the first pair of non-adjacent edges that cross transversely.
-fn ring_self_intersection(pts: &[Point2]) -> Option<(usize, usize)> {
+pub(crate) fn ring_self_intersection(pts: &[Point2]) -> Option<(usize, usize)> {
     let n = pts.len();
     for i in 0..n {
         let a0 = pts[i];
