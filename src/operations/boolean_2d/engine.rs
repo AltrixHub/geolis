@@ -710,8 +710,10 @@ fn classify_and_filter(
 
             // Perpendicular probe offset for bilateral fill sampling.
             //
-            // Two competing constraints fix the offset, and the arrangement
-            // guarantees they never conflict:
+            // Two competing constraints fix the offset. Where both can be
+            // satisfied — the common case — the offset classifies cleanly;
+            // where they cannot (the narrow sub-tolerance band documented
+            // below), the design returns a typed `Err` rather than guessing:
             //
             // * **Lower bound** — the offset must exceed the oracle's
             //   `WALL_EPS` boundary band (see `point_in_polygon_class`), or the

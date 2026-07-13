@@ -434,4 +434,96 @@ mod tests {
             "expected most grazing offsets to resolve, only {ok_count}/9 succeeded"
         );
     }
+
+    /// Oblique float-coordinate split regression, pinning the world-space
+    /// `arrangement_split` tolerance (K-2).
+    ///
+    /// A `~8e-6`-wide full-height slot cut through a long (length-20) wall
+    /// places the slot's two walls a fixed WORLD distance apart. On the
+    /// length-20 top/bottom host edges that world gap maps to a parameter gap
+    /// of `~4e-7` — *below* the old fixed `WALL_EPS` parameter split tolerance
+    /// but *above* the length-scaled `WALL_EPS / seg_len` world tolerance. With
+    /// a parameter-space tolerance the two crossings collapse into one, a split
+    /// point is dropped, a vertex dangles and the face topology corrupts; the
+    /// world-space tolerance keeps the crossings distinct.
+    ///
+    /// The whole configuration is rotated `~17°`, so every coordinate is an
+    /// irrational-scale float and no edge is axis-aligned. This is load-bearing:
+    /// the integer / axis-aligned fixtures are invariant to the parameter↔world
+    /// switch by construction (their crossings never land in the sensitive
+    /// tolerance band) and cannot catch this regression. Rotation is
+    /// area-preserving, so the expected area is analytic and exact — both the
+    /// subtract area and the subtract+intersect partition invariant are pinned
+    /// to `< 1e-6`, mirroring `grazing_arc_chord_subtract_succeeds`.
+    #[test]
+    fn oblique_float_split_partition_is_exact() {
+        // Long wall (length 20, height 4). The long top/bottom edges are the
+        // hosts whose length makes the parameter↔world tolerance distinction
+        // bite.
+        const WALL_LEN: f64 = 20.0;
+        const WALL_H: f64 = 4.0;
+        // Slot width a few WALL_EPS wide: robustly above the bilateral / snap
+        // thresholds (~3·WALL_EPS) so the op resolves, yet its two walls map to
+        // a parameter gap (~SLOT_W / WALL_LEN ≈ 4e-7) that sits inside the old
+        // fixed-WALL_EPS merge band and outside the world-scaled band.
+        const SLOT_W: f64 = 8e-6;
+        const SLOT_X: f64 = 8.0; // interior: both slot walls cross the long edges
+
+        // ~17°, well off any axis; sin/cos are both irrational-scale floats.
+        let theta = 17.0_f64.to_radians();
+        let (s, c) = theta.sin_cos();
+        let rot = |poly: &Polygon| -> Polygon {
+            poly.iter()
+                .map(|&(x, y)| (x * c - y * s, x * s + y * c))
+                .collect()
+        };
+        let rot_pwh = |p: &PolygonWithHoles| -> PolygonWithHoles {
+            PolygonWithHoles {
+                outer: rot(&p.outer),
+                holes: p.holes.iter().map(&rot).collect(),
+            }
+        };
+
+        let wall = pwh_no_holes(rect(0.0, 0.0, WALL_LEN, WALL_H));
+        // Full-height through-cut: extends past both long edges so it splits the
+        // wall cleanly into two pieces (no partial-height corner cases).
+        let slot = pwh_no_holes(vec![
+            (SLOT_X, -1.0),
+            (SLOT_X + SLOT_W, -1.0),
+            (SLOT_X + SLOT_W, WALL_H + 1.0),
+            (SLOT_X, WALL_H + 1.0),
+        ]);
+
+        let wall_r = rot_pwh(&wall);
+        let slot_r = rot_pwh(&slot);
+        let wall_area = signed_area(&wall_r.outer).abs();
+
+        // Subtract: the wall splits into two rectangles either side of the slot.
+        let sub = subtract_all_with_holes(wall_r.clone(), std::slice::from_ref(&slot_r))
+            .expect("oblique split subtract must succeed");
+        assert_valid_windings(&sub);
+        assert_eq!(
+            sub.len(),
+            2,
+            "full-height slot splits the wall into two faces"
+        );
+
+        // Analytic (rotation-preserved) area: the removed slot is SLOT_W × WALL_H.
+        let expected_sub = WALL_LEN * WALL_H - SLOT_W * WALL_H;
+        let sub_area = total_area(&sub);
+        assert!(
+            (sub_area - expected_sub).abs() < 1e-6,
+            "oblique subtract area {sub_area} deviates from analytic {expected_sub}"
+        );
+
+        // Partition invariant: subtract + intersect exactly repartition the wall.
+        let int = intersect_all_with_holes(&wall_r, std::slice::from_ref(&slot_r))
+            .expect("oblique split intersect must succeed");
+        assert_valid_windings(&int);
+        let int_area = total_area(&int);
+        assert!(
+            (sub_area + int_area - wall_area).abs() < 1e-6,
+            "partition invariant violated: sub={sub_area}, int={int_area}, wall={wall_area}"
+        );
+    }
 }
