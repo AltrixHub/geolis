@@ -61,8 +61,16 @@ pub fn subtract_all_with_holes(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_precision_loss,
+    reason = "test code: panics are the failure signal; arc facet counts are tiny"
+)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    use super::super::intersect_all_with_holes;
     use super::super::types::{signed_area, Polygon};
     use super::*;
 
@@ -228,5 +236,202 @@ mod tests {
                 "each piece area=4*4=16, got {area}"
             );
         }
+    }
+
+    // ===== Kernel-robustness regression tests (grazing / degenerate input) ==
+
+    /// Net area of a face set: outer areas minus hole areas.
+    fn total_area(faces: &[PolygonWithHoles]) -> f64 {
+        faces
+            .iter()
+            .map(|f| {
+                signed_area(&f.outer).abs()
+                    - f.holes.iter().map(|h| signed_area(h).abs()).sum::<f64>()
+            })
+            .sum()
+    }
+
+    /// Annular band (a curved wall) between inner radius `ri` and outer radius
+    /// `ro`, swept over `[a0, a1]`, tessellated into `n` facets per arc and
+    /// returned as a CCW polygon.
+    fn arc_band(ri: f64, ro: f64, a0: f64, a1: f64, n: usize) -> Polygon {
+        let mut pts = Vec::new();
+        for i in 0..=n {
+            let t = a0 + (a1 - a0) * (i as f64) / (n as f64);
+            pts.push((ro * t.cos(), ro * t.sin()));
+        }
+        for i in 0..=n {
+            let t = a1 + (a0 - a1) * (i as f64) / (n as f64);
+            pts.push((ri * t.cos(), ri * t.sin()));
+        }
+        if signed_area(&pts) < 0.0 {
+            pts.reverse();
+        }
+        pts
+    }
+
+    /// Every face a boolean op emits must satisfy the winding contract
+    /// (CCW outer, CW holes). A wrong-area/topology corruption would break it.
+    fn assert_valid_windings(faces: &[PolygonWithHoles]) {
+        for f in faces {
+            assert!(
+                signed_area(&f.outer) > 0.0,
+                "outer must be CCW, area={}",
+                signed_area(&f.outer)
+            );
+            for h in &f.holes {
+                assert!(
+                    signed_area(h) < 0.0,
+                    "hole must be CW, area={}",
+                    signed_area(h)
+                );
+            }
+        }
+    }
+
+    /// A near-degenerate "sliver" subtract must return a typed `Err`, never
+    /// panic. Covers the converted CDT post-condition (defect: a spade
+    /// `TooSmall` vertex rejection used to `panic!` at the post-condition)
+    /// **and** the sub-tolerance bilateral-classification `Err` path. The
+    /// `catch_unwind` proves no unwind escapes on reachable input.
+    #[test]
+    fn cdt_sliver_returns_err_not_panic() {
+        // Silence the default panic hook so a (regressed) panic does not spam
+        // the test log; `catch_unwind` still reports it as an Err below.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let cases: Vec<(&str, PolygonWithHoles, PolygonWithHoles)> = vec![
+            // (a) Collinear near-zero-width cut: a full-height sliver only
+            //     `WALL_EPS` wide. Its two walls are closer than bilateral
+            //     classification can resolve -> typed Err.
+            (
+                "near-zero-width sliver cut",
+                pwh_no_holes(rect(0.0, 0.0, 10.0, 10.0)),
+                pwh_no_holes(vec![
+                    (5.0, -1.0),
+                    (5.0 + 1e-6, -1.0),
+                    (5.0 + 1e-6, 11.0),
+                    (5.0, 11.0),
+                ]),
+            ),
+            // (b) An input coordinate below spade's MIN_ALLOWED_VALUE
+            //     (~1.79e-43) flows to an output vertex; the CDT post-condition
+            //     rejects it as `TooSmall`. This is the exact production panic,
+            //     now a typed Err.
+            (
+                "sub-representable output coordinate",
+                PolygonWithHoles {
+                    outer: vec![(0.0, 1e-50), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+                    holes: Vec::new(),
+                },
+                pwh_no_holes(rect(3.0, 3.0, 2.0, 2.0)),
+            ),
+        ];
+
+        let mut verdicts = Vec::new();
+        for (label, base, cut) in &cases {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                subtract_all_with_holes(base.clone(), std::slice::from_ref(cut))
+            }));
+            verdicts.push((label, outcome));
+        }
+        std::panic::set_hook(prev_hook);
+
+        for (label, outcome) in verdicts {
+            let inner = outcome
+                .unwrap_or_else(|_| panic!("'{label}' unwound: degenerate input must not panic"));
+            assert!(
+                inner.is_err(),
+                "'{label}' must return a typed Err on degenerate input, got Ok"
+            );
+        }
+    }
+
+    /// A wide opening rectangle subtracted from a curved wall band, where one
+    /// rectangle edge grazes an outer-arc facet near-tangentially. Sweeping the
+    /// grazing offset across `1e-7..1e-3`, every result must be either `Ok` with
+    /// the analytically-consistent area or a typed `Err` — never a panic, never
+    /// a wrong area. The reproduced (moderate-offset) configuration must
+    /// succeed. Regression for the "ambiguous half-edge / ε exhausted" failure
+    /// and the world-space split-tolerance topology corruption.
+    #[test]
+    fn grazing_arc_chord_subtract_succeeds() {
+        // Curved wall band, mean radius ~5, width 0.6, swept ±0.5 rad.
+        let band = pwh_no_holes(arc_band(4.7, 5.3, -0.5, 0.5, 32));
+        let band_area = signed_area(&band.outer).abs();
+
+        // The rect's bottom edge is placed a grazing offset `d` below the
+        // topmost outer-arc facet vertex (angle a1 = 0.5), so the edge is
+        // near-tangent to that facet.
+        let apex_y = 5.3 * 0.5_f64.sin();
+        let cut = |d: f64| -> PolygonWithHoles {
+            let y_bot = apex_y - d;
+            pwh_no_holes(vec![(3.0, y_bot), (6.0, y_bot), (6.0, 4.0), (3.0, 4.0)])
+        };
+
+        // Analytic anchor via the partition invariant: for the same base and
+        // cut, `subtract` and `intersect` split the base, so
+        //   area(base ∩ ¬cut) + area(base ∩ cut) == area(base).
+        // Evaluated at a robustly-resolvable offset.
+        let d_ref = 1e-3;
+        let sub_ref = subtract_all_with_holes(band.clone(), &[cut(d_ref)])
+            .expect("reference subtract must succeed");
+        assert_valid_windings(&sub_ref);
+        let area_ref = total_area(&sub_ref);
+        let int_ref = intersect_all_with_holes(&band, std::slice::from_ref(&cut(d_ref)))
+            .expect("reference intersect must succeed");
+        assert!(
+            (area_ref + total_area(&int_ref) - band_area).abs() < 1e-6,
+            "partition invariant violated: sub={area_ref}, int={}, band={band_area}",
+            total_area(&int_ref)
+        );
+
+        // The reproduced grazing configuration (moderate offset) must succeed
+        // with the analytic area.
+        let d_primary = 1e-5;
+        let sub_primary = subtract_all_with_holes(band.clone(), &[cut(d_primary)])
+            .expect("grazing subtract at 1e-5 must succeed (not Err)");
+        assert_valid_windings(&sub_primary);
+        assert!(
+            (total_area(&sub_primary) - area_ref).abs() < 1e-3,
+            "grazing area {} deviates from analytic {area_ref}",
+            total_area(&sub_primary)
+        );
+
+        // Full ε sweep: never panic, never wrong area; Ok-with-correct-area or
+        // typed Err only.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let offsets = [1e-7, 3e-7, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3];
+        let mut results = Vec::new();
+        for &d in &offsets {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                subtract_all_with_holes(band.clone(), &[cut(d)])
+            }));
+            results.push((d, outcome));
+        }
+        std::panic::set_hook(prev_hook);
+
+        let mut ok_count = 0;
+        for (d, outcome) in results {
+            let inner =
+                outcome.unwrap_or_else(|_| panic!("grazing subtract panicked at offset {d:e}"));
+            // A typed Err on a sub-tolerance offset is allowed; only Ok results
+            // are area-checked (they must never be wrong).
+            if let Ok(faces) = inner {
+                assert_valid_windings(&faces);
+                assert!(
+                    (total_area(&faces) - area_ref).abs() < 1e-3,
+                    "offset {d:e}: area {} is wrong (analytic {area_ref})",
+                    total_area(&faces)
+                );
+                ok_count += 1;
+            }
+        }
+        assert!(
+            ok_count >= 5,
+            "expected most grazing offsets to resolve, only {ok_count}/9 succeeded"
+        );
     }
 }
