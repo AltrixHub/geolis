@@ -312,17 +312,26 @@ pub(crate) fn run_arrangement_traced(
             hole_sites: tree.holes.iter().map(|&h| loop_sites(h)).collect(),
         })
         .collect();
-    debug_assert_cdt_safe(faces.iter().map(|t| &t.face));
+    ensure_cdt_safe(faces.iter().map(|t| &t.face))?;
     Ok(faces)
 }
 
-/// Defense-in-depth post-condition: verifies that the output boundary set
-/// is safe for ingestion by `spade::ConstrainedDelaunayTriangulation`'s
-/// `try_add_constraint`. Active only in debug builds; release builds
-/// skip the check entirely. Panics on failure rather than returning Err
-/// so the bug is surfaced loudly during development.
-#[cfg(debug_assertions)]
-fn debug_assert_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) {
+/// Defense-in-depth post-condition: verifies that the output boundary set is
+/// safe for ingestion by `spade::ConstrainedDelaunayTriangulation` — every
+/// vertex is a valid spade coordinate (finite and within spade's representable
+/// magnitude range) and no boundary edge would cross an existing constraint.
+///
+/// This is a **geometry-dependent** post-condition: whether it holds depends on
+/// the numeric input, not on a logic invariant of the pipeline. A near-
+/// degenerate input (e.g. a collinear near-zero-width cut whose collapsed
+/// output leaves a coordinate below spade's `MIN_ALLOWED_VALUE`, reported as
+/// `TooSmall`) can reach it on perfectly ordinary caller usage. Per the kernel
+/// convention — validate at runtime, return `Result`, never panic on reachable
+/// input — a violation is returned as [`OperationError::Failed`] so the caller
+/// degrades gracefully rather than unwinding. The check runs in all build
+/// profiles (its cost is dominated by the arrangement itself). Genuine logic
+/// invariants of face assembly stay `debug_assert!` (see `assemble_face_trees`).
+fn ensure_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) -> Result<()> {
     use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
         ConstrainedDelaunayTriangulation::new();
@@ -338,10 +347,13 @@ fn debug_assert_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) 
         for (vi, &(x, y)) in boundary.iter().enumerate() {
             match cdt.insert(Point2::new(x, y)) {
                 Ok(h) => handles.push(h),
-                Err(e) => panic!(
-                    "boolean_2d post-condition: CDT vertex insert rejected \
-                     (b={bi}, v={vi}, p=({x:.6},{y:.6})): {e:?}"
-                ),
+                Err(e) => {
+                    return Err(OperationError::Failed(format!(
+                        "boolean_2d post-condition: CDT vertex insert rejected \
+                         (b={bi}, v={vi}, p=({x:.6},{y:.6})): {e:?}"
+                    ))
+                    .into())
+                }
             }
         }
         for k in 0..n {
@@ -350,18 +362,17 @@ fn debug_assert_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) 
             if from == to {
                 continue;
             }
-            assert!(
-                !cdt.try_add_constraint(from, to).is_empty(),
-                "boolean_2d post-condition: CDT constraint rejected \
-                 (b={bi}, edge={k}): would intersect an existing constraint",
-            );
+            if cdt.try_add_constraint(from, to).is_empty() {
+                return Err(OperationError::Failed(format!(
+                    "boolean_2d post-condition: CDT constraint rejected \
+                     (b={bi}, edge={k}): would intersect an existing constraint"
+                ))
+                .into());
+            }
         }
     }
+    Ok(())
 }
-
-#[cfg(not(debug_assertions))]
-#[inline]
-fn debug_assert_cdt_safe<'a>(_faces: impl Iterator<Item = &'a PolygonWithHoles>) {}
 
 // === Internals ===
 
