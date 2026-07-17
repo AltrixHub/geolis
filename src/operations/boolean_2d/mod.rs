@@ -20,7 +20,9 @@
 //! - Every hole is fully contained in its outer.
 //! - Sibling holes do not overlap.
 //! - Boundaries are simple (no self-intersection).
-//! - Outputs are CDT-safe (verified in `debug_assertions` builds).
+//! - Outputs are CDT-safe (verified in every build; a violation from a
+//!   near-degenerate input is returned as [`crate::error::OperationError`],
+//!   never a panic).
 //! - Determinism: outputs are topologically identical regardless of
 //!   input order.
 //!
