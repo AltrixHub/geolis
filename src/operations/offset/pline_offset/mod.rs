@@ -290,6 +290,58 @@ mod tests {
     }
 
     #[test]
+    fn closed_ring_arc_edge_offsets_to_exact_concentric_arc() {
+        use crate::math::arc_2d::arc_from_bulge;
+
+        // 4x3 CCW rectangle whose bottom edge bows outward (bulge 0.5):
+        // source arc center (2, 1.5), radius 2.5. The offset arc must be
+        // the EXACT concentric circle — same center, radius r - distance
+        // (positive distance = left = toward the CCW arc's center) —
+        // with both junction endpoints ON that circle (the corner join
+        // intersects the offset line and offset circle carriers, not
+        // their tangent-line approximations).
+        let ring = Pline {
+            vertices: vec![
+                PlineVertex::new(0.0, 0.0, 0.5),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(0.0, 3.0),
+            ],
+            closed: true,
+        };
+        let (cx, cy, r, _, _) = arc_from_bulge(0.0, 0.0, 4.0, 0.0, 0.5);
+        for distance in [0.1, -0.1] {
+            let result = PlineOffset2D::new(ring.clone(), distance)
+                .execute()
+                .unwrap();
+            assert_eq!(result.len(), 1, "distance {distance}");
+            let poly = &result[0];
+            let bulged: Vec<usize> = poly
+                .vertices
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.bulge.abs() > 1e-9)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(bulged.len(), 1, "distance {distance}: exactly one arc edge");
+            let i = bulged[0];
+            let v0 = &poly.vertices[i];
+            let v1 = &poly.vertices[(i + 1) % poly.vertices.len()];
+            assert!(v0.bulge > 0.0, "winding preserved");
+            let (ocx, ocy, or_, _, _) = arc_from_bulge(v0.x, v0.y, v1.x, v1.y, v0.bulge);
+            assert!(
+                (ocx - cx).abs() < 1e-9 && (ocy - cy).abs() < 1e-9,
+                "distance {distance}: offset arc must stay concentric; got ({ocx}, {ocy})"
+            );
+            let expected = r - distance;
+            assert!(
+                (or_ - expected).abs() < 1e-9,
+                "distance {distance}: radius must be exactly {expected}, got {or_}"
+            );
+        }
+    }
+
+    #[test]
     fn mixed_line_arc_square_with_rounded_corner() {
         // Square with one rounded corner (quarter-circle arc).
         let bulge = std::f64::consts::FRAC_PI_8.tan(); // quarter circle
