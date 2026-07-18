@@ -305,7 +305,26 @@ fn corner_join(
                         r: br,
                         ..
                     },
-                ) => circle_circle_intersections((*cx, *cy), *r, (*bx, *by), *br),
+                ) => {
+                    // Two arcs split from the SAME carrier circle (a
+                    // tangent-continuous junction): the carriers are
+                    // coincident, so intersecting them yields nothing
+                    // (concentric ⇒ empty) and would force a zero-length
+                    // bevel between the coincident endpoints. The join is
+                    // the shared offset endpoint itself — the legacy
+                    // single-point join.
+                    if (cx - bx).abs() < TOLERANCE
+                        && (cy - by).abs() < TOLERANCE
+                        && (r - br).abs() < TOLERANCE
+                    {
+                        vec![(
+                            0.5 * (seg_prev.end.0 + seg_next.start.0),
+                            0.5 * (seg_prev.end.1 + seg_next.start.1),
+                        )]
+                    } else {
+                        circle_circle_intersections((*cx, *cy), *r, (*bx, *by), *br)
+                    }
+                }
                 (Carrier::Line, Carrier::Line) => unreachable!("handled above"),
             };
             let nearest = candidates.into_iter().min_by(|a, b| {
