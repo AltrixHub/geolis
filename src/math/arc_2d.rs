@@ -126,9 +126,14 @@ pub fn offset_arc_segment(
     }
 
     // Determine offset direction: positive distance = left offset.
-    // For CCW arc (bulge > 0), left offset = outward (radius increases).
-    // For CW arc (bulge < 0), left offset = inward (radius decreases).
-    let sign = if bulge > 0.0 { 1.0 } else { -1.0 };
+    // For a CCW arc (bulge > 0) the center lies on the LEFT of the
+    // traversal (unit circle: at (r, 0) moving +y, left points at the
+    // origin), so a left offset moves TOWARD the center — the radius
+    // decreases. For a CW arc (bulge < 0) the center is on the right,
+    // so a left offset moves away and the radius increases. This
+    // matches the line-segment convention (left normal), keeping a
+    // mixed line/arc polyline's offset internally consistent.
+    let sign = if bulge > 0.0 { -1.0 } else { 1.0 };
     let new_radius = radius + sign * distance;
 
     if new_radius <= 1e-12 {
@@ -243,15 +248,27 @@ mod tests {
     }
 
     #[test]
-    fn offset_arc_outward() {
+    fn offset_arc_left_moves_toward_ccw_center() {
         // Semicircle from (0,0) to (2,0), bulge=1, radius=1, center=(1,0).
-        // Offset outward by 0.5: new radius = 1.5.
+        // Positive distance = LEFT of the CCW traversal = toward the
+        // center: offset by 0.5 → new radius = 0.5.
         let result = offset_arc_segment(0.0, 0.0, 2.0, 0.0, 1.0, 0.5);
         assert!(result.is_some());
         let (x0, y0, x1, y1, b) = result.unwrap();
         // Bulge should remain 1 (same sweep).
         assert!((b - 1.0).abs() < TOL, "bulge={b}");
-        // Check that new endpoints are further from center.
+        let (cx, cy, _, _, _) = arc_from_bulge(x0, y0, x1, y1, b);
+        let new_r = ((x0 - cx).powi(2) + (y0 - cy).powi(2)).sqrt();
+        assert!((new_r - 0.5).abs() < 1e-6, "new_r={new_r}");
+    }
+
+    #[test]
+    fn offset_arc_right_moves_away_from_ccw_center() {
+        // Negative distance = RIGHT of the CCW traversal = away from
+        // the center: offset by -0.5 → new radius = 1.5.
+        let result = offset_arc_segment(0.0, 0.0, 2.0, 0.0, 1.0, -0.5);
+        assert!(result.is_some());
+        let (x0, y0, x1, y1, b) = result.unwrap();
         let (cx, cy, _, _, _) = arc_from_bulge(x0, y0, x1, y1, b);
         let new_r = ((x0 - cx).powi(2) + (y0 - cy).powi(2)).sqrt();
         assert!((new_r - 1.5).abs() < 1e-6, "new_r={new_r}");
@@ -259,8 +276,9 @@ mod tests {
 
     #[test]
     fn offset_arc_collapse() {
-        // Semicircle radius=1. Offset inward by 1.5 → collapses.
-        let result = offset_arc_segment(0.0, 0.0, 2.0, 0.0, 1.0, -1.5);
+        // Semicircle radius=1. Left offset by 1.5 crosses the CCW
+        // center → collapses.
+        let result = offset_arc_segment(0.0, 0.0, 2.0, 0.0, 1.0, 1.5);
         assert!(result.is_none());
     }
 
