@@ -1496,4 +1496,56 @@ mod tests {
             ))
         ));
     }
+
+    /// Closed CCW circle of quarter-arc segments about `+Z`, centered at
+    /// `(cx, cy)` with radius `r`.
+    fn circle_ring(cx: f64, cy: f64, r: f64) -> Vec<ProfileSegment> {
+        (0..4)
+            .map(|i| ProfileSegment::Arc {
+                center: Point3::new(cx, cy, 0.0),
+                radius: r,
+                normal: Vector3::z(),
+                ref_dir: Vector3::x(),
+                start_angle: f64::from(i) * FRAC_PI_2,
+                end_angle: f64::from(i + 1) * FRAC_PI_2,
+            })
+            .collect()
+    }
+
+    /// Arc annulus: a circular outer profile carrying a circular ARC hole
+    /// ring builds, and every hole side face is an exact cylindrical
+    /// patch about the hole's vertical axis (the arc-hole mirror of
+    /// [`arc_side_face_is_exact_cylindrical_patch`]).
+    #[test]
+    fn annulus_arc_hole_side_faces_are_exact_cylindrical_patches() {
+        let mut store = TopologyStore::new();
+        let solid = MakeSegmentedPrism::new(circle_ring(3.0, 3.0, 2.5), direction())
+            .with_holes(vec![circle_ring(3.0, 3.0, 1.0)])
+            .execute(&mut store)
+            .unwrap();
+        let shell = shell_of(&store, solid);
+        assert_eq!(shell.faces.len(), 10, "4 outer + 4 hole sides + 2 caps");
+
+        // Hole side faces are stored in ring order after the outer ring.
+        for &face in &shell.faces[4..8] {
+            let FaceSurface::Nurbs(surface) = &store.face(face).unwrap().surface else {
+                panic!("arc hole side face must be NURBS");
+            };
+            let ((u0, u1), (v0, v1)) = surface.parameter_domain();
+            for i in 0..=16 {
+                for j in 0..=4 {
+                    let u = u0 + (u1 - u0) * f64::from(i) / 16.0;
+                    let v = v0 + (v1 - v0) * f64::from(j) / 4.0;
+                    let sample = surface.point_at(u, v).unwrap();
+                    let radial = ((sample.x - 3.0).powi(2) + (sample.y - 3.0).powi(2)).sqrt();
+                    assert!(
+                        (radial - 1.0).abs() < 1e-9,
+                        "arc hole face sample off the cylinder: distance \
+                         {radial} vs radius 1"
+                    );
+                }
+            }
+        }
+        assert_position_weld_watertight(&store, solid);
+    }
 }
