@@ -707,7 +707,7 @@ fn cap_from_wires(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::tessellation::{TessellateSolid, TessellationParams};
+    use crate::tessellation::{TessellateFace, TessellateSolid, TessellationParams};
     use crate::topology::{FaceName, ShellData};
     use std::collections::HashMap;
     use std::f64::consts::{FRAC_PI_2, PI};
@@ -955,6 +955,59 @@ mod tests {
         let mut store = TopologyStore::new();
         let solid = build_l_prism(&mut store);
         assert_position_weld_watertight(&store, solid);
+    }
+
+    /// Asserts every tessellated face of `solid` emits triangle windings
+    /// that agree with its stored vertex normals. Renderers back-face-cull
+    /// translucent solids, so a face wound against its own normal vanishes
+    /// when viewed from the normal side.
+    fn assert_face_windings_agree_with_normals(store: &TopologyStore, solid: SolidId) {
+        let shell = shell_of(store, solid);
+        for (fi, &face_id) in shell.faces.iter().enumerate() {
+            let mesh = TessellateFace::new(face_id, TessellationParams::default())
+                .execute(store)
+                .expect("tessellate face");
+            for tri in &mesh.indices {
+                let a = mesh.vertices[tri[0] as usize];
+                let b = mesh.vertices[tri[1] as usize];
+                let c = mesh.vertices[tri[2] as usize];
+                let geometric = (b - a).cross(&(c - a));
+                if geometric.norm() < 1e-12 {
+                    continue;
+                }
+                let stored = mesh.normals[tri[0] as usize]
+                    + mesh.normals[tri[1] as usize]
+                    + mesh.normals[tri[2] as usize];
+                assert!(
+                    geometric.dot(&stored) > 0.0,
+                    "face[{fi}] triangle winds against its stored normal \
+                     (geometric {geometric:?} vs stored {stored:?})"
+                );
+            }
+        }
+    }
+
+    /// One cap of every segmented prism is a `same_sense = false` planar
+    /// face (the cap whose required outward direction opposes the fitted
+    /// plane normal — bottom for CCW rings, top for CW). Its tessellation
+    /// must reverse the triangle winding along with the normals, or the
+    /// cap back-face-culls from the outside (user-visible as a missing
+    /// face on translucent bulged void / zone prisms).
+    #[test]
+    fn face_windings_agree_with_normals_for_both_ring_orientations() {
+        // Arc-carrying CCW ring (the L-prism's fillet arc).
+        let mut store = TopologyStore::new();
+        let solid = build_l_prism(&mut store);
+        assert_face_windings_agree_with_normals(&store, solid);
+
+        // Line-only rings, both orientations (flips opposite caps).
+        for ccw in [true, false] {
+            let mut store = TopologyStore::new();
+            let solid = MakeSegmentedPrism::new(rect_ring(0.0, 0.0, 4.0, 3.0, ccw), direction())
+                .execute(&mut store)
+                .unwrap();
+            assert_face_windings_agree_with_normals(&store, solid);
+        }
     }
 
     /// The arc segment's side face is an exact cylindrical patch: every
