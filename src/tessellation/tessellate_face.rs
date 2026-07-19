@@ -308,6 +308,15 @@ fn tessellate_plane(
             tri_indices[i] = mesh_idx;
         }
 
+        // CDT triangles wind counter-clockwise in the (u, v) projection, so
+        // their geometric normal follows `u_dir × v_dir` = the raw plane
+        // normal. A back face (`same_sense == false`) negates the stored
+        // normal, so the winding must reverse with it — mirroring the
+        // analytic and NURBS arms — or the face is culled from its outward
+        // side.
+        if !same_sense {
+            tri_indices.swap(1, 2);
+        }
         mesh.indices.push(tri_indices);
     }
 

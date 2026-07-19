@@ -158,6 +158,54 @@ impl Pline {
         }
     }
 
+    /// Returns the signed area enclosed by this polyline.
+    ///
+    /// Counter-clockwise orientation yields a positive area, clockwise a
+    /// negative one. Circular-arc segments are accounted for exactly:
+    /// each bulged segment contributes its chord to the shoelace sum plus
+    /// the signed circular-segment area between chord and arc,
+    /// `sign(bulge) · r²/2 · (θ − sin θ)` with `θ = 4·atan(|bulge|)`.
+    ///
+    /// An open polyline is treated as implicitly closed by a straight
+    /// chord from the last vertex back to the first (shoelace
+    /// convention); the last vertex's bulge is ignored because it has no
+    /// segment. Fewer than two vertices → `0.0`.
+    #[must_use]
+    pub fn signed_area(&self) -> f64 {
+        let n = self.vertices.len();
+        if n < 2 {
+            return 0.0;
+        }
+
+        // Chord shoelace over the (implicitly) closed ring.
+        let mut twice_chord_area = 0.0;
+        for i in 0..n {
+            let v0 = &self.vertices[i];
+            let v1 = &self.vertices[(i + 1) % n];
+            twice_chord_area += v0.x * v1.y - v1.x * v0.y;
+        }
+        let mut area = 0.5 * twice_chord_area;
+
+        // Circular-segment corrections on real segments only: for an
+        // open polyline the implicit closing chord stays straight.
+        for i in 0..self.segment_count() {
+            let v0 = &self.vertices[i];
+            let v1 = &self.vertices[(i + 1) % n];
+            if v0.bulge.abs() < 1e-12 {
+                continue;
+            }
+            let (_, _, radius, _, sweep) = arc_from_bulge(v0.x, v0.y, v1.x, v1.y, v0.bulge);
+            if radius < 1e-12 {
+                // Degenerate chord: no well-defined arc.
+                continue;
+            }
+            let theta = sweep.abs();
+            area += v0.bulge.signum() * 0.5 * radius * radius * (theta - theta.sin());
+        }
+
+        area
+    }
+
     /// Returns the number of segments in this polyline.
     #[must_use]
     pub fn segment_count(&self) -> usize {
@@ -318,6 +366,139 @@ mod tests {
         // Seg 1 (2→0): reverse of original seg 0 (v[0].bulge=0) → bulge = 0
         assert!((rev.vertices[0].bulge - (-1.0)).abs() < 1e-12); // (4,0), CW semicircle to (2,0)
         assert!(rev.vertices[1].bulge.abs() < 1e-12); // (2,0), line to (0,0)
+    }
+
+    #[test]
+    fn signed_area_unit_square_ccw() {
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        let pline = Pline::from_points(&pts, true);
+        let area = pline.signed_area();
+        assert!((area - 1.0).abs() < 1e-12, "area={area}");
+    }
+
+    #[test]
+    fn signed_area_cw_rect_negative() {
+        // 2x3 rectangle traversed clockwise → -6.
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 3.0, 0.0),
+            Point3::new(2.0, 3.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+        ];
+        let pline = Pline::from_points(&pts, true);
+        let area = pline.signed_area();
+        assert!((area + 6.0).abs() < 1e-12, "area={area}");
+    }
+
+    #[test]
+    fn signed_area_bulged_edge_adds_circular_segment() {
+        // 4x3 CCW rectangle with bulge=0.5 on the bottom edge (0,0)→(4,0).
+        // Positive bulge bows outward (below the chord), so the circular
+        // segment adds to the chord-polygon area.
+        let bulge = 0.5;
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::new(0.0, 0.0, bulge),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(0.0, 3.0),
+            ],
+            closed: true,
+        };
+        // Closed form from the same arc conversion: r²/2 · (θ − sin θ).
+        let (_, _, r, _, sweep) = arc_from_bulge(0.0, 0.0, 4.0, 0.0, bulge);
+        let theta = sweep.abs();
+        let expected = 12.0 + 0.5 * r * r * (theta - theta.sin());
+        let area = pline.signed_area();
+        assert!(
+            (area - expected).abs() < 1e-10,
+            "area={area} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn signed_area_negative_bulge_subtracts() {
+        // Same rectangle but the bottom edge bows inward (bulge=-0.5):
+        // the circular segment is subtracted from the chord-polygon area.
+        let bulge = -0.5;
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::new(0.0, 0.0, bulge),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(0.0, 3.0),
+            ],
+            closed: true,
+        };
+        let (_, _, r, _, sweep) = arc_from_bulge(0.0, 0.0, 4.0, 0.0, bulge);
+        let theta = sweep.abs();
+        let expected = 12.0 - 0.5 * r * r * (theta - theta.sin());
+        let area = pline.signed_area();
+        assert!(
+            area < 12.0,
+            "area={area} should be less than the straight rect"
+        );
+        assert!(
+            (area - expected).abs() < 1e-10,
+            "area={area} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn signed_area_two_vertex_circle() {
+        // Two semicircles (bulge=1 each) form a full CCW circle of
+        // radius 1 (half the chord distance) → area = π·r².
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::new(0.0, 0.0, 1.0),
+                PlineVertex::new(2.0, 0.0, 1.0),
+            ],
+            closed: true,
+        };
+        let area = pline.signed_area();
+        assert!(
+            (area - std::f64::consts::PI).abs() < 1e-10,
+            "area={area} expected=π"
+        );
+    }
+
+    #[test]
+    fn signed_area_reversal_negates() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::new(0.0, 0.0, 0.5),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(0.0, 3.0),
+            ],
+            closed: true,
+        };
+        let area = pline.signed_area();
+        let rev_area = pline.reversed().signed_area();
+        assert!(
+            (rev_area + area).abs() < 1e-10,
+            "area={area} rev_area={rev_area}"
+        );
+    }
+
+    #[test]
+    fn signed_area_open_pline_uses_implicit_closing_chord() {
+        // Open polylines are treated as implicitly closed by a straight
+        // chord from the last vertex back to the first.
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        let pline = Pline::from_points(&pts, false);
+        let area = pline.signed_area();
+        assert!((area - 1.0).abs() < 1e-12, "area={area}");
     }
 
     #[test]
