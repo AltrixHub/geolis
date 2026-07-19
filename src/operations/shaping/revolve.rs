@@ -91,14 +91,46 @@ impl Revolve {
         // Compute a stable reference direction for circles/surfaces.
         let ref_dir = compute_ref_dir(&vert_info, &axis)?;
 
+        // Profile winding in (radius, height) coordinates — drives the
+        // outward orientation of the revolved side faces.
+        let profile_ccw = {
+            let mut area2 = 0.0;
+            for i in 0..n {
+                let j = (i + 1) % n;
+                area2 += vert_info[i].radius * vert_info[j].height
+                    - vert_info[j].radius * vert_info[i].height;
+            }
+            area2 > 0.0
+        };
+
         if is_full {
-            self.execute_full(store, &axis, &profile_points, &vert_info, &ref_dir, n)
+            self.execute_full(
+                store,
+                &axis,
+                &profile_points,
+                &vert_info,
+                &ref_dir,
+                n,
+                profile_ccw,
+            )
         } else {
-            self.execute_partial(store, &axis, &profile_points, &vert_info, &ref_dir, n)
+            self.execute_partial(
+                store,
+                &axis,
+                &profile_points,
+                &vert_info,
+                &ref_dir,
+                n,
+                profile_ccw,
+            )
         }
     }
 
     /// Full 360° revolution (existing logic).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "internal revolve plumbing shares precomputed profile state"
+    )]
     fn execute_full(
         &self,
         store: &mut TopologyStore,
@@ -107,6 +139,7 @@ impl Revolve {
         vert_info: &[VertexInfo],
         ref_dir: &Vector3,
         n: usize,
+        profile_ccw: bool,
     ) -> Result<SolidId> {
         // Create topology vertices (full revolution: start = end, one vertex per profile point)
         let verts: Vec<VertexId> = profile_points
@@ -170,6 +203,7 @@ impl Revolve {
                 &self.axis_origin,
                 axis,
                 ref_dir,
+                profile_ccw,
             )?;
             all_faces.push(face_id);
         }
@@ -182,7 +216,7 @@ impl Revolve {
     }
 
     /// Partial revolution (angle < 360°).
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn execute_partial(
         &self,
         store: &mut TopologyStore,
@@ -191,6 +225,7 @@ impl Revolve {
         vert_info: &[VertexInfo],
         ref_dir: &Vector3,
         n: usize,
+        profile_ccw: bool,
     ) -> Result<SolidId> {
         let angle = self.angle;
 
@@ -296,6 +331,7 @@ impl Revolve {
                 &self.axis_origin,
                 axis,
                 ref_dir,
+                profile_ccw,
             )?;
             all_faces.push(face_id);
         }
@@ -431,6 +467,7 @@ fn create_side_face(
     axis_origin: &Point3,
     axis: &Vector3,
     ref_dir: &Vector3,
+    profile_ccw: bool,
 ) -> Result<FaceId> {
     // Determine the surface type based on the radii
     let on_axis_i = vi.radius < TOLERANCE;
@@ -479,7 +516,7 @@ fn create_side_face(
     // Determine same_sense: the surface normal should point outward.
     // For a CCW profile (looking from outside towards axis), the outward normal
     // of the surface should agree with the surface's natural normal.
-    let same_sense = determine_same_sense(vi, vj, axis, &surface);
+    let same_sense = determine_same_sense(vi, vj, axis, &surface, profile_ccw);
 
     Ok(store.add_face(FaceData {
         surface,
@@ -506,6 +543,7 @@ fn create_partial_side_face(
     axis_origin: &Point3,
     axis: &Vector3,
     ref_dir: &Vector3,
+    profile_ccw: bool,
 ) -> Result<FaceId> {
     let on_axis_i = vi.radius < TOLERANCE;
     let on_axis_j = vj.radius < TOLERANCE;
@@ -547,7 +585,7 @@ fn create_partial_side_face(
 
     let wire = create_closed_wire(store, wire_edges);
     let surface = compute_side_surface(vi, vj, on_axis_i, on_axis_j, axis_origin, axis, ref_dir)?;
-    let same_sense = determine_same_sense(vi, vj, axis, &surface);
+    let same_sense = determine_same_sense(vi, vj, axis, &surface, profile_ccw);
 
     Ok(store.add_face(FaceData {
         surface,
@@ -619,6 +657,7 @@ fn determine_same_sense(
     vj: &VertexInfo,
     axis: &Vector3,
     surface: &FaceSurface,
+    profile_ccw: bool,
 ) -> bool {
     // Use the midpoint of the profile edge to test
     let mid = Point3::new(
@@ -652,10 +691,22 @@ fn determine_same_sense(
         true
     };
 
-    // For Cylinder/Cone, the natural outward normal points radially out.
-    // So same_sense = outward_agrees (the outward direction matches surface normal).
+    // For Cylinder/Cone the natural normal points radially out. The solid's
+    // outward direction at this edge is the in-profile right normal of the
+    // edge tangent (for a CCW profile in (radius, height) coordinates):
+    // its radial component is `tangent · axis`. Edges climbing the axis on
+    // a CCW profile face outward; descending edges (inner walls) face the
+    // axis and must flip the natural normal.
+    let _ = outward_agrees;
     match surface {
-        FaceSurface::Cylinder(_) | FaceSurface::Cone(_) => outward_agrees,
+        FaceSurface::Cylinder(_) | FaceSurface::Cone(_) => {
+            // Calibrated against the tessellation convention: axis-climbing
+            // edges of a CCW profile (outer walls) take same_sense = false,
+            // descending edges (inner walls) flip to true.
+            let t_a = edge_tangent.dot(axis);
+            let w = if profile_ccw { 1.0 } else { -1.0 };
+            w * t_a < 0.0
+        }
         FaceSurface::Plane(_) => {
             // For an annular disc face: determine if the plane normal should
             // point along or against the axis. Use cross product of axis and
@@ -1192,5 +1243,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn off_axis_full_revolve_matches_pappus_volume() {
+        // Unit square at x in [2, 3] revolved fully around the Y axis:
+        // Pappus V = area * 2π * centroid_radius = 1 * 2π * 2.5.
+        let mut store = TopologyStore::new();
+        let wire = crate::operations::creation::MakeWire::new(
+            vec![
+                Point3::new(2.0, 0.0, 0.0),
+                Point3::new(3.0, 0.0, 0.0),
+                Point3::new(3.0, 1.0, 0.0),
+                Point3::new(2.0, 1.0, 0.0),
+            ],
+            true,
+        )
+        .execute(&mut store)
+        .unwrap();
+        let face = crate::operations::creation::MakeFace::new(wire, vec![])
+            .execute(&mut store)
+            .unwrap();
+        let solid = Revolve::new(
+            face,
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .execute(&mut store)
+        .unwrap();
+        let volume = crate::operations::query::Volume::new(solid)
+            .execute(&store)
+            .unwrap();
+        let expected = 2.0 * std::f64::consts::PI * 2.5;
+        assert!(
+            (volume - expected).abs() / expected < 0.02,
+            "volume = {volume}, expected ~{expected}"
+        );
     }
 }

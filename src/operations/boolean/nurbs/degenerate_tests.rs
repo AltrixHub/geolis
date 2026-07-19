@@ -277,8 +277,11 @@ fn flush_sill_and_head_door_severs_wall_faces() {
 /// coplanar with the wall's end face (`x1 == 6.0`). The coplanar jamb
 /// yields no SSI branch on the end face, so the sill / head branches
 /// dead-end at the wall-end corner — there is no cap to notch (the end is
-/// a NURBS side face). The open-branch typed error is pinned; no silent
-/// wrong geometry.
+/// a NURBS side face). Historically the marcher stopped one step short of
+/// the corner (open-branch error); the analytic extrusion×plane path lands
+/// the endpoints exactly on the corner, so chaining proceeds one stage
+/// further and rejects the configuration as a chain crossing one tool face
+/// twice. Still a typed error, never silent wrong geometry.
 #[test]
 fn wall_end_flush_opening_is_a_typed_error() {
     let (mut store, wall, cutter) = wall_and_cutter(5.0, 6.0, 0.5, 2.0);
@@ -288,7 +291,7 @@ fn wall_end_flush_opening_is_a_typed_error() {
     let err = result.expect_err("wall-end-flush opening must be a typed error");
     let message = format!("{err}");
     assert!(
-        message.contains("open branch"),
+        message.contains("crosses one tool side face twice"),
         "unexpected error for the wall-end-flush opening: {message}"
     );
 }
@@ -354,23 +357,20 @@ fn near_degenerate_neighbours_still_cut_cleanly() {
     assert_eq!(welded_boundary_edges(&store, result), 0);
 }
 
-/// R3 near-degenerate band (PINNED typed error, pre-existing marcher
-/// behaviour, characterized): a margin greater than zero but smaller than
-/// one SSI marcher step (sill 0.01 above the cap) leaves the jamb branch
-/// terminating one step short of the tool kink with an interior endpoint —
-/// the open-branch typed error fires. Exact flush contact (margin == 0) is
-/// CLEAN; margins of one step or more are CLEAN; the band in between is a
-/// typed error, never silent wrong geometry.
+/// R3 near-degenerate band: a margin greater than zero but smaller than
+/// one SSI marcher step (sill 0.01 above the cap). Historically a PINNED
+/// typed error — the marcher left the jamb branch terminating one step
+/// short of the tool kink with an interior endpoint. The analytic
+/// extrusion×plane fast path computes the exact boundary crossing, so this
+/// margin now cuts CLEANLY like its neighbours (flush contact and
+/// one-step-plus margins were already clean). Pinned as a clean, manifold
+/// cut — never silent wrong geometry.
 #[test]
-fn sub_step_margin_stays_a_typed_error() {
+fn sub_step_margin_cuts_cleanly() {
     let (mut store, wall, cutter) = wall_and_cutter(0.6, 1.5, 0.01, 2.25);
     let result = Subtract::new(wall, cutter)
         .with_op_id(OpId::new("cut1"))
-        .execute(&mut store);
-    let err = result.expect_err("sub-step margin must be a typed error");
-    let message = format!("{err}");
-    assert!(
-        message.contains("open branch"),
-        "unexpected error for the sub-step margin: {message}"
-    );
+        .execute(&mut store)
+        .unwrap_or_else(|e| panic!("sub-step margin must cut cleanly: {e:?}"));
+    assert_eq!(welded_boundary_edges(&store, result), 0);
 }

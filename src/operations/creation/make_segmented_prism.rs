@@ -136,6 +136,79 @@ impl MakeSegmentedPrism {
         }
     }
 
+    /// Creates the transverse rectangular prism that pierces a
+    /// wall-like solid: a 4-line rectangle in the vertical plane
+    /// spanned by the in-plane `tangent` and world Z, anchored at
+    /// `base` (bottom-center, `base.z` = lower edge), spanning
+    /// `±half_width` along the tangent and `height` upward, extruded
+    /// along `direction`. The vertical profile + horizontal extrusion
+    /// keeps all four loop-forming faces NURBS side faces and the
+    /// planar caps clear of the pierced solid — the through-cut class
+    /// boolean subtraction requires.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` when any coordinate is non-finite, `tangent`'s
+    /// XY projection is (near-)zero, or `half_width` / `height` is not
+    /// strictly positive.
+    pub fn vertical_rect(
+        base: Point3,
+        tangent: Vector3,
+        half_width: f64,
+        height: f64,
+        direction: Vector3,
+    ) -> Result<Self> {
+        let finite = [
+            base.x,
+            base.y,
+            base.z,
+            tangent.x,
+            tangent.y,
+            half_width,
+            height,
+            direction.x,
+            direction.y,
+            direction.z,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite {
+            return Err(OperationError::InvalidInput(
+                "vertical_rect: all inputs must be finite".to_string(),
+            )
+            .into());
+        }
+        let t_len = (tangent.x * tangent.x + tangent.y * tangent.y).sqrt();
+        if t_len < TOLERANCE {
+            return Err(OperationError::InvalidInput(
+                "vertical_rect: tangent must have a non-zero XY projection".to_string(),
+            )
+            .into());
+        }
+        if half_width <= 0.0 || height <= 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "vertical_rect: half_width and height must be strictly positive, \
+                 got {half_width} / {height}"
+            ))
+            .into());
+        }
+        let (tx, ty) = (tangent.x / t_len, tangent.y / t_len);
+        let (z_lo, z_hi) = (base.z, base.z + height);
+        let pts = [
+            Point3::new(base.x - tx * half_width, base.y - ty * half_width, z_lo),
+            Point3::new(base.x + tx * half_width, base.y + ty * half_width, z_lo),
+            Point3::new(base.x + tx * half_width, base.y + ty * half_width, z_hi),
+            Point3::new(base.x - tx * half_width, base.y - ty * half_width, z_hi),
+        ];
+        let profile = (0..4)
+            .map(|i| ProfileSegment::Line {
+                start: pts[i],
+                end: pts[(i + 1) % 4],
+            })
+            .collect();
+        Ok(Self::new(profile, direction))
+    }
+
     /// Registers persistent names for the prism's faces under the
     /// caller-supplied operation identity.
     #[must_use]
@@ -634,13 +707,61 @@ fn cap_from_wires(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::tessellation::{TessellateSolid, TessellationParams};
+    use crate::tessellation::{TessellateFace, TessellateSolid, TessellationParams};
     use crate::topology::{FaceName, ShellData};
     use std::collections::HashMap;
     use std::f64::consts::{FRAC_PI_2, PI};
 
     fn p(x: f64, y: f64) -> Point3 {
         Point3::new(x, y, 0.0)
+    }
+
+    /// `vertical_rect` builds the transverse wall-piercing prism:
+    /// `2·half_width` wide along the tangent, `height` tall, extruded
+    /// along `direction` — volume = 2·hw × h × |direction|.
+    #[test]
+    fn vertical_rect_volume_matches_box() {
+        let mut store = TopologyStore::new();
+        let solid = MakeSegmentedPrism::vertical_rect(
+            Point3::new(1.0, 2.0, 0.5),
+            Vector3::new(2.0, 0.0, 0.0), // non-unit tangent is normalized
+            0.6,
+            1.5,
+            Vector3::new(0.0, 0.3, 0.0),
+        )
+        .expect("valid rect")
+        .execute(&mut store)
+        .expect("prism");
+        let volume = crate::operations::query::Volume::new(solid)
+            .execute(&store)
+            .expect("volume");
+        let expected = 1.2 * 1.5 * 0.3;
+        assert!(
+            (volume - expected).abs() < 1e-6,
+            "volume {volume} != {expected}"
+        );
+    }
+
+    #[test]
+    fn vertical_rect_rejects_degenerate_inputs() {
+        let base = Point3::new(0.0, 0.0, 0.0);
+        let dir = Vector3::new(0.0, 1.0, 0.0);
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::z(), 0.5, 1.0, dir).is_err(),
+            "tangent with zero XY projection must be rejected"
+        );
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::x(), 0.0, 1.0, dir).is_err(),
+            "zero half_width must be rejected"
+        );
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::x(), 0.5, -1.0, dir).is_err(),
+            "negative height must be rejected"
+        );
+        assert!(
+            MakeSegmentedPrism::vertical_rect(base, Vector3::x(), f64::NAN, 1.0, dir).is_err(),
+            "non-finite input must be rejected"
+        );
     }
 
     /// L-shaped 5-segment closed profile (CCW): 4 lines + 1 concave arc
@@ -834,6 +955,59 @@ mod tests {
         let mut store = TopologyStore::new();
         let solid = build_l_prism(&mut store);
         assert_position_weld_watertight(&store, solid);
+    }
+
+    /// Asserts every tessellated face of `solid` emits triangle windings
+    /// that agree with its stored vertex normals. Renderers back-face-cull
+    /// translucent solids, so a face wound against its own normal vanishes
+    /// when viewed from the normal side.
+    fn assert_face_windings_agree_with_normals(store: &TopologyStore, solid: SolidId) {
+        let shell = shell_of(store, solid);
+        for (fi, &face_id) in shell.faces.iter().enumerate() {
+            let mesh = TessellateFace::new(face_id, TessellationParams::default())
+                .execute(store)
+                .expect("tessellate face");
+            for tri in &mesh.indices {
+                let a = mesh.vertices[tri[0] as usize];
+                let b = mesh.vertices[tri[1] as usize];
+                let c = mesh.vertices[tri[2] as usize];
+                let geometric = (b - a).cross(&(c - a));
+                if geometric.norm() < 1e-12 {
+                    continue;
+                }
+                let stored = mesh.normals[tri[0] as usize]
+                    + mesh.normals[tri[1] as usize]
+                    + mesh.normals[tri[2] as usize];
+                assert!(
+                    geometric.dot(&stored) > 0.0,
+                    "face[{fi}] triangle winds against its stored normal \
+                     (geometric {geometric:?} vs stored {stored:?})"
+                );
+            }
+        }
+    }
+
+    /// One cap of every segmented prism is a `same_sense = false` planar
+    /// face (the cap whose required outward direction opposes the fitted
+    /// plane normal — bottom for CCW rings, top for CW). Its tessellation
+    /// must reverse the triangle winding along with the normals, or the
+    /// cap back-face-culls from the outside (user-visible as a missing
+    /// face on translucent bulged void / zone prisms).
+    #[test]
+    fn face_windings_agree_with_normals_for_both_ring_orientations() {
+        // Arc-carrying CCW ring (the L-prism's fillet arc).
+        let mut store = TopologyStore::new();
+        let solid = build_l_prism(&mut store);
+        assert_face_windings_agree_with_normals(&store, solid);
+
+        // Line-only rings, both orientations (flips opposite caps).
+        for ccw in [true, false] {
+            let mut store = TopologyStore::new();
+            let solid = MakeSegmentedPrism::new(rect_ring(0.0, 0.0, 4.0, 3.0, ccw), direction())
+                .execute(&mut store)
+                .unwrap();
+            assert_face_windings_agree_with_normals(&store, solid);
+        }
     }
 
     /// The arc segment's side face is an exact cylindrical patch: every
@@ -1374,5 +1548,57 @@ mod tests {
                 OperationError::InvalidInput(_)
             ))
         ));
+    }
+
+    /// Closed CCW circle of quarter-arc segments about `+Z`, centered at
+    /// `(cx, cy)` with radius `r`.
+    fn circle_ring(cx: f64, cy: f64, r: f64) -> Vec<ProfileSegment> {
+        (0..4)
+            .map(|i| ProfileSegment::Arc {
+                center: Point3::new(cx, cy, 0.0),
+                radius: r,
+                normal: Vector3::z(),
+                ref_dir: Vector3::x(),
+                start_angle: f64::from(i) * FRAC_PI_2,
+                end_angle: f64::from(i + 1) * FRAC_PI_2,
+            })
+            .collect()
+    }
+
+    /// Arc annulus: a circular outer profile carrying a circular ARC hole
+    /// ring builds, and every hole side face is an exact cylindrical
+    /// patch about the hole's vertical axis (the arc-hole mirror of
+    /// [`arc_side_face_is_exact_cylindrical_patch`]).
+    #[test]
+    fn annulus_arc_hole_side_faces_are_exact_cylindrical_patches() {
+        let mut store = TopologyStore::new();
+        let solid = MakeSegmentedPrism::new(circle_ring(3.0, 3.0, 2.5), direction())
+            .with_holes(vec![circle_ring(3.0, 3.0, 1.0)])
+            .execute(&mut store)
+            .unwrap();
+        let shell = shell_of(&store, solid);
+        assert_eq!(shell.faces.len(), 10, "4 outer + 4 hole sides + 2 caps");
+
+        // Hole side faces are stored in ring order after the outer ring.
+        for &face in &shell.faces[4..8] {
+            let FaceSurface::Nurbs(surface) = &store.face(face).unwrap().surface else {
+                panic!("arc hole side face must be NURBS");
+            };
+            let ((u0, u1), (v0, v1)) = surface.parameter_domain();
+            for i in 0..=16 {
+                for j in 0..=4 {
+                    let u = u0 + (u1 - u0) * f64::from(i) / 16.0;
+                    let v = v0 + (v1 - v0) * f64::from(j) / 4.0;
+                    let sample = surface.point_at(u, v).unwrap();
+                    let radial = ((sample.x - 3.0).powi(2) + (sample.y - 3.0).powi(2)).sqrt();
+                    assert!(
+                        (radial - 1.0).abs() < 1e-9,
+                        "arc hole face sample off the cylinder: distance \
+                         {radial} vs radius 1"
+                    );
+                }
+            }
+        }
+        assert_position_weld_watertight(&store, solid);
     }
 }

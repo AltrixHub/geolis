@@ -137,6 +137,38 @@ impl FillOracle for UnionOracle<'_> {
     }
 }
 
+/// AND-of-coverage rule used by the intersection operation.
+///
+/// A point is `Filled` iff the base PWH contains it strictly Inside
+/// AND at least one of `others` contains it strictly Inside.
+pub struct IntersectOracle<'a> {
+    pub base: &'a PolygonWithHoles,
+    pub others: &'a [PolygonWithHoles],
+}
+
+impl FillOracle for IntersectOracle<'_> {
+    fn classify(&self, p: (f64, f64)) -> FilledClass {
+        let mut touched: Vec<(usize, BoundaryRef)> = Vec::new();
+        let (base_filled, base_touches) = classify_pwh_filled(p, self.base, 0);
+        touched.extend(base_touches);
+        let mut any_other_filled = false;
+        for (idx, pwh) in self.others.iter().enumerate() {
+            let (filled, ring_touches) = classify_pwh_filled(p, pwh, idx + 1);
+            touched.extend(ring_touches);
+            if filled {
+                any_other_filled = true;
+            }
+        }
+        if !touched.is_empty() {
+            FilledClass::AmbiguousOnBoundary { touched }
+        } else if base_filled && any_other_filled {
+            FilledClass::Filled
+        } else {
+            FilledClass::Empty
+        }
+    }
+}
+
 /// Subtract rule: `Filled` iff `base` is filled AND every entry in
 /// `subtracts` is empty.
 ///
@@ -280,17 +312,26 @@ pub(crate) fn run_arrangement_traced(
             hole_sites: tree.holes.iter().map(|&h| loop_sites(h)).collect(),
         })
         .collect();
-    debug_assert_cdt_safe(faces.iter().map(|t| &t.face));
+    ensure_cdt_safe(faces.iter().map(|t| &t.face))?;
     Ok(faces)
 }
 
-/// Defense-in-depth post-condition: verifies that the output boundary set
-/// is safe for ingestion by `spade::ConstrainedDelaunayTriangulation`'s
-/// `try_add_constraint`. Active only in debug builds; release builds
-/// skip the check entirely. Panics on failure rather than returning Err
-/// so the bug is surfaced loudly during development.
-#[cfg(debug_assertions)]
-fn debug_assert_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) {
+/// Defense-in-depth post-condition: verifies that the output boundary set is
+/// safe for ingestion by `spade::ConstrainedDelaunayTriangulation` — every
+/// vertex is a valid spade coordinate (finite and within spade's representable
+/// magnitude range) and no boundary edge would cross an existing constraint.
+///
+/// This is a **geometry-dependent** post-condition: whether it holds depends on
+/// the numeric input, not on a logic invariant of the pipeline. A near-
+/// degenerate input (e.g. a collinear near-zero-width cut whose collapsed
+/// output leaves a coordinate below spade's `MIN_ALLOWED_VALUE`, reported as
+/// `TooSmall`) can reach it on perfectly ordinary caller usage. Per the kernel
+/// convention — validate at runtime, return `Result`, never panic on reachable
+/// input — a violation is returned as [`OperationError::Failed`] so the caller
+/// degrades gracefully rather than unwinding. The check runs in all build
+/// profiles (its cost is dominated by the arrangement itself). Genuine logic
+/// invariants of face assembly stay `debug_assert!` (see `assemble_face_trees`).
+fn ensure_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) -> Result<()> {
     use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
         ConstrainedDelaunayTriangulation::new();
@@ -306,10 +347,13 @@ fn debug_assert_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) 
         for (vi, &(x, y)) in boundary.iter().enumerate() {
             match cdt.insert(Point2::new(x, y)) {
                 Ok(h) => handles.push(h),
-                Err(e) => panic!(
-                    "boolean_2d post-condition: CDT vertex insert rejected \
-                     (b={bi}, v={vi}, p=({x:.6},{y:.6})): {e:?}"
-                ),
+                Err(e) => {
+                    return Err(OperationError::Failed(format!(
+                        "boolean_2d post-condition: CDT vertex insert rejected \
+                         (b={bi}, v={vi}, p=({x:.6},{y:.6})): {e:?}"
+                    ))
+                    .into())
+                }
             }
         }
         for k in 0..n {
@@ -318,18 +362,17 @@ fn debug_assert_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) 
             if from == to {
                 continue;
             }
-            assert!(
-                !cdt.try_add_constraint(from, to).is_empty(),
-                "boolean_2d post-condition: CDT constraint rejected \
-                 (b={bi}, edge={k}): would intersect an existing constraint",
-            );
+            if cdt.try_add_constraint(from, to).is_empty() {
+                return Err(OperationError::Failed(format!(
+                    "boolean_2d post-condition: CDT constraint rejected \
+                     (b={bi}, edge={k}): would intersect an existing constraint"
+                ))
+                .into());
+            }
         }
     }
+    Ok(())
 }
-
-#[cfg(not(debug_assertions))]
-#[inline]
-fn debug_assert_cdt_safe<'a>(_faces: impl Iterator<Item = &'a PolygonWithHoles>) {}
 
 // === Internals ===
 
@@ -370,13 +413,30 @@ fn collect_raw_segments(inputs: &[PolygonWithHoles]) -> Vec<(RawSegment, Segment
 fn arrangement_split(segs: &[(RawSegment, SegmentSite)]) -> Vec<(RawSegment, SegmentSite)> {
     let mut out = Vec::new();
     for (si, &((a0, a1), site)) in segs.iter().enumerate() {
+        // Split parameters live on `[0, 1]`, but "coincident" must be judged in
+        // WORLD space, not parameter space. Two crossings a fixed world
+        // distance apart map to a parameter gap that shrinks as the host
+        // segment gets longer, so a fixed `WALL_EPS` parameter tolerance
+        // wrongly merges distinct crossings on long edges. (A `WALL_EPS`-wide
+        // opening cut into a long wall — the grazing case — puts two crossings
+        // `WALL_EPS / len` apart in parameter space; on a length-10 edge that
+        // is `1e-7`, far below `WALL_EPS`, so the two crossings collapsed into
+        // one and a split point was dropped, dangling a vertex and corrupting
+        // the face topology.) Scale the tolerance by the segment length so it
+        // always denotes the same world distance `WALL_EPS`.
+        let seg_len = ((a1.0 - a0.0).powi(2) + (a1.1 - a0.1).powi(2)).sqrt();
+        let eps_param = if seg_len > WALL_EPS {
+            (WALL_EPS / seg_len).min(0.5)
+        } else {
+            0.5
+        };
         let mut params: Vec<f64> = vec![0.0, 1.0];
         for (sj, &((b0, b1), _)) in segs.iter().enumerate() {
             if si == sj {
                 continue;
             }
             if let Some((t, _u)) = seg_seg_intersect(a0, a1, b0, b1) {
-                if t > WALL_EPS && t < 1.0 - WALL_EPS {
+                if t > eps_param && t < 1.0 - eps_param {
                     params.push(t);
                 }
             } else {
@@ -391,9 +451,9 @@ fn arrangement_split(segs: &[(RawSegment, SegmentSite)]) -> Vec<(RawSegment, Seg
             }
         }
         params.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-        params.dedup_by(|x, y| (*x - *y).abs() < WALL_EPS);
+        params.dedup_by(|x, y| (*x - *y).abs() < eps_param);
         for w in params.windows(2) {
-            if (w[1] - w[0]).abs() < WALL_EPS {
+            if (w[1] - w[0]).abs() < eps_param {
                 continue;
             }
             let p0 = lerp(a0, a1, w[0]);
@@ -648,29 +708,52 @@ fn classify_and_filter(
             let nx = -dy / len;
             let ny = dx / len;
 
-            let initial_eps = (WALL_EPS * 10.0).min(len * 0.1);
-            let mut eps = initial_eps;
-            let mut tries = 0;
-            let (left, right) = loop {
-                let l = oracle.classify((mid.0 + eps * nx, mid.1 + eps * ny));
-                let r = oracle.classify((mid.0 - eps * nx, mid.1 - eps * ny));
-                let l_amb = matches!(l, FilledClass::AmbiguousOnBoundary { .. });
-                let r_amb = matches!(r, FilledClass::AmbiguousOnBoundary { .. });
-                if !l_amb && !r_amb {
-                    break (l, r);
-                }
-                tries += 1;
-                if tries >= 3 {
-                    return Err(OperationError::Failed(format!(
-                        "boolean_2d: ambiguous half-edge classification at \
-                         edge ({pa:?} → {pb:?}) (mid=({:.6}, {:.6})); ε exhausted; \
-                         left={l:?} right={r:?}",
-                        mid.0, mid.1
-                    ))
-                    .into());
-                }
-                eps *= 0.5;
-            };
+            // Perpendicular probe offset for bilateral fill sampling.
+            //
+            // Two competing constraints fix the offset. Where both can be
+            // satisfied — the common case — the offset classifies cleanly;
+            // where they cannot (the narrow sub-tolerance band documented
+            // below), the design returns a typed `Err` rather than guessing:
+            //
+            // * **Lower bound** — the offset must exceed the oracle's
+            //   `WALL_EPS` boundary band (see `point_in_polygon_class`), or the
+            //   probe lands inside THIS edge's own band, is reported
+            //   `Boundary`, and stays permanently ambiguous. (The previous
+            //   `min(len * 0.1)` clamp produced a *sub*-`WALL_EPS` offset on
+            //   short grazing sub-edges — near-tangent arc/chord contacts split
+            //   the arrangement into slivers only a few `WALL_EPS` long — which
+            //   is exactly what tripped "ε exhausted".)
+            //
+            // * **Upper bound** — the offset must NOT overshoot a *parallel*
+            //   neighbouring edge, or the probe crosses into the wrong region
+            //   and returns a confidently WRONG classification (dropping a real
+            //   boundary and corrupting the face topology). This is why the
+            //   offset is kept minimal (a fixed `1.5·WALL_EPS`) instead of the
+            //   old length-scaled value that could reach up to `10·WALL_EPS`
+            //   and jump a thin parallel gap.
+            //
+            // A fixed `1.5·WALL_EPS` offset clears the band (lower bound) and,
+            // for any parallel gap wider than `~3·WALL_EPS`, stays strictly
+            // inside it (upper bound) — the common case classifies cleanly.
+            // Truly coincident features (gap `≤ WALL_EPS`) are already welded
+            // away by `vertex_snap`; a gap in the narrow `(WALL_EPS, 3·WALL_EPS)`
+            // band is genuinely below tolerance, so at least one probe is
+            // reported `Boundary` and we return a typed `Err` — never a panic,
+            // never a silently wrong classification.
+            let eps = WALL_EPS * 1.5;
+            let left = oracle.classify((mid.0 + eps * nx, mid.1 + eps * ny));
+            let right = oracle.classify((mid.0 - eps * nx, mid.1 - eps * ny));
+            if matches!(left, FilledClass::AmbiguousOnBoundary { .. })
+                || matches!(right, FilledClass::AmbiguousOnBoundary { .. })
+            {
+                return Err(OperationError::Failed(format!(
+                    "boolean_2d: ambiguous half-edge classification at \
+                     edge ({pa:?} → {pb:?}) (mid=({:.6}, {:.6})); local feature \
+                     size below tolerance; left={left:?} right={right:?}",
+                    mid.0, mid.1
+                ))
+                .into());
+            }
             if matches!(left, FilledClass::Filled) && matches!(right, FilledClass::Empty) {
                 out.push((a, b, site));
             }

@@ -31,9 +31,18 @@ pub struct StrokeLabels {
 /// reporting per polygon edge the [`StrokeOrigin`] it came from (see
 /// [`StrokeLabels`] for the alignment contract).
 ///
-/// The polygon has two offset "sides":
-///   - left side: points offset by `+left_w` along the left normal
-///   - right side: points offset by `-right_w` along the left normal (i.e. to the right)
+/// The polygon has two offset "sides", both expressed in the
+/// **caller's** traversal frame — the SAME frame the labels use:
+///   - left side: points offset by `+left_w` along the left normal of
+///     the caller's traversal direction
+///   - right side: points offset by `-right_w` along the left normal
+///     (i.e. to the caller's right)
+///
+/// A closed CW input is normalised to CCW internally; the widths are
+/// swapped alongside that reversal so `left_w` stays the width on the
+/// CALLER's left. An edge labeled `Side { seg, side }` therefore always
+/// lies at the distance of the width parameter named by `side` — for
+/// every winding.
 ///
 /// For a closed polyline the result is an annulus: outer ring + one hole.
 /// For an open polyline it is a single ring (left side forward, right side back).
@@ -59,8 +68,16 @@ pub fn stroke_expand_labeled(
 
     // Closed inputs are normalised to CCW winding for the offset build;
     // `reversed` records the flip so labels can be remapped back to the
-    // caller's original segment indices and sides.
+    // caller's original segment indices and sides. The widths swap with
+    // the reversal: the caller's left is the reversed traversal's right,
+    // so stroking the reversed ring with swapped widths keeps `left_w`
+    // on the CALLER's left — the frame the labels are remapped to.
     let reversed = closed && signed_area_tuples(vertices) < 0.0;
+    let (left_w, right_w) = if reversed {
+        (right_w, left_w)
+    } else {
+        (left_w, right_w)
+    };
     let verts: Vec<(f64, f64)> = if reversed {
         let mut r = vertices.to_vec();
         r.reverse();
@@ -722,6 +739,29 @@ mod tests {
         }
         assert_side_edges_on_offset_lines(&pwh.outer, &labels.outer, &square_cw, 0.3, 0.3);
         assert_side_edges_on_offset_lines(&pwh.holes[0], &labels.holes[0], &square_cw, 0.3, 0.3);
+    }
+
+    /// A reversed (CW) closed ring with ASYMMETRIC widths: the widths
+    /// must follow the caller frame exactly like the labels do, so an
+    /// edge labelled `Left` lies at `left_w` on the caller's left.
+    /// Pre-fix the reversal remapped the labels but not the widths, so
+    /// a caller-`Left` edge physically carried `right_w` — the closed
+    /// CW wall band (and its W3 arc reconstruction downstream) landed a
+    /// full width difference off.
+    #[test]
+    fn labels_closed_square_cw_asymmetric_widths_follow_caller_sides() {
+        let square_cw = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)];
+        let (pwh, labels) = stroke_expand_labeled(&square_cw, true, 0.4, 0.1);
+        assert_side_edges_on_offset_lines(&pwh.outer, &labels.outer, &square_cw, 0.4, 0.1);
+        assert_side_edges_on_offset_lines(&pwh.holes[0], &labels.holes[0], &square_cw, 0.4, 0.1);
+        // CW ring: caller-left is the ring exterior, so the 0.4 band
+        // grows outward — the outer ring reaches x = −0.4.
+        let min_x = pwh.outer.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+        assert!(
+            (min_x + 0.4).abs() < 1e-9,
+            "caller-left width 0.4 must expand the CW ring outward to \
+             x = −0.4; got min x = {min_x}"
+        );
     }
 
     #[test]

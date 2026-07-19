@@ -20,6 +20,7 @@
 //! may return empty, partial, or boundary-only output. The `max_points` guard
 //! in [`IntersectionOptions`] bounds every marching loop.
 
+mod analytic;
 mod bbox;
 mod curve_curve;
 mod curve_surface;

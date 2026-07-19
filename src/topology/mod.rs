@@ -24,7 +24,7 @@ use slotmap::SlotMap;
 ///
 /// Entities reference each other via typed IDs (generational indices),
 /// avoiding self-referential structures and enabling safe mutation.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TopologyStore {
     vertices: SlotMap<VertexId, VertexData>,
     edges: SlotMap<EdgeId, EdgeData>,
