@@ -34,6 +34,7 @@
 //!    calls [`engine::run_arrangement`] with the oracle.
 //! 3. Add fixtures exercising the new fill rule.
 
+mod diagnose;
 mod engine;
 mod intersect;
 mod subtract;
@@ -41,7 +42,7 @@ mod types;
 mod union;
 
 pub use intersect::intersect_all_with_holes;
-pub use subtract::subtract_all_with_holes;
+pub use subtract::{subtract_all_with_holes, subtract_all_with_holes_diagnosed};
 pub use types::{
     point_in_polygon_class, signed_area, PointClass, Polygon, PolygonWithHoles, UnionResult,
     WALL_EPS, WALL_EPS_SQ,

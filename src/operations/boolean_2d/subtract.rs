@@ -12,8 +12,10 @@
 
 use crate::error::Result;
 
+use super::diagnose::assess;
 use super::engine::{run_arrangement, SubtractOracle};
-use super::types::PolygonWithHoles;
+use super::types::{signed_area, PolygonWithHoles};
+use crate::diagnostics::{InputSnapshot, OpDiagnostic, OpHealth};
 
 /// Subtract a list of regions from a base region. Returns the
 /// remaining filled regions as typed face topology.
@@ -60,6 +62,47 @@ pub fn subtract_all_with_holes(
     run_arrangement(&segment_inputs, &oracle)
 }
 
+/// [`subtract_all_with_holes`] with a health verdict attached for diagnostics.
+///
+/// The result is returned verbatim (`Ok`/`Err` unchanged). The verdict is
+/// non-`Ok` when the op errored (`Failed`), when a real cut consumed the whole
+/// base (`Degenerate` / `EmptyResult`), or when a sliver face survived
+/// (`Suspicious`); in those cases a readable [`InputSnapshot`] is attached for
+/// the app to log or dump. Cheap input facts are gathered before `base` moves,
+/// and the snapshot is built only when the verdict is non-`Ok` — so the clean
+/// path costs nothing beyond the assessment.
+#[must_use]
+pub fn subtract_all_with_holes_diagnosed(
+    base: PolygonWithHoles,
+    subtracts: &[PolygonWithHoles],
+) -> OpDiagnostic<Result<Vec<PolygonWithHoles>>> {
+    let base_outer_verts = base.outer.len();
+    let base_holes = base.holes.len();
+    let base_area = signed_area(&base.outer).abs();
+    let cutters = subtracts.len();
+    // A real cut against a real base should leave geometry behind; a fully
+    // empty result then means the cut swallowed the whole base.
+    let expect_nonempty = !subtracts.is_empty() && base_area > super::diagnose::MIN_FACE_AREA;
+
+    let result = subtract_all_with_holes(base, subtracts);
+
+    let health = match &result {
+        Err(e) => OpHealth::Failed(e.to_string()),
+        Ok(faces) => assess(faces, expect_nonempty),
+    };
+
+    if health.is_ok() {
+        OpDiagnostic::ok(result)
+    } else {
+        let snapshot = InputSnapshot::new("boolean_2d::subtract")
+            .with("base_outer_verts", base_outer_verts)
+            .with("base_holes", base_holes)
+            .with("base_area", base_area)
+            .with("cutters", cutters);
+        OpDiagnostic::flagged(result, health, snapshot)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -88,6 +131,28 @@ mod tests {
             outer,
             holes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn diagnosed_clean_subtract_is_ok_without_snapshot() {
+        let base = pwh_no_holes(rect(0.0, 0.0, 4.0, 4.0));
+        let hole = pwh_no_holes(rect(1.0, 1.0, 1.0, 1.0));
+        let d = subtract_all_with_holes_diagnosed(base, &[hole]);
+        assert!(d.is_ok());
+        assert!(d.inputs.is_none());
+        assert!(d.value.is_ok());
+    }
+
+    #[test]
+    fn diagnosed_full_consumption_is_flagged_with_snapshot() {
+        // A cut covering the whole base leaves nothing -> non-Ok verdict.
+        let base = pwh_no_holes(rect(0.0, 0.0, 2.0, 2.0));
+        let cover = pwh_no_holes(rect(-1.0, -1.0, 4.0, 4.0));
+        let d = subtract_all_with_holes_diagnosed(base, &[cover]);
+        assert!(!d.is_ok(), "full consumption should be flagged");
+        let snap = d.inputs.expect("snapshot attached on non-Ok");
+        assert_eq!(snap.op, "boolean_2d::subtract");
+        assert!(snap.summary.iter().any(|(k, _)| k == "base_area"));
     }
 
     #[test]
