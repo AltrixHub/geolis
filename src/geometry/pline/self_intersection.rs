@@ -1,11 +1,11 @@
 //! Self-intersection detection primitives for closed plines.
 //!
 //! Provides [`segment_segment_intersection_2d`] and
-//! [`find_self_intersection`], used by the `WallOutline2D` test oracle
+//! [`find_self_intersection`], used by the `CurveBand2D` test oracle
 //! (P3.1 S2) and by per-fixture self-intersection assertions.
 //!
 //! **Scope: closed plines only.** Open plines are out of scope because
-//! `WallOutline2D` always produces closed boundaries.
+//! `CurveBand2D` always produces closed boundaries.
 
 use super::Pline;
 

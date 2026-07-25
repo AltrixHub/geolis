@@ -1,7 +1,7 @@
 //! Per-segment provenance for wall footprints.
 //!
-//! [`super::WallOutline2D::execute_faces_with_provenance`] reports, for
-//! every boundary segment of every output [`super::WallFootprint2D`],
+//! [`super::CurveBand2D::execute_faces_with_provenance`] reports, for
+//! every boundary segment of every output [`super::BandFootprint2D`],
 //! **where that segment came from in the input centerlines** — which
 //! polyline, which centerline edge, which side (or which end cap), and
 //! which surviving fragment of that source. Consumers derive stable
@@ -77,7 +77,7 @@ pub enum SegmentOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SegmentProvenance {
     /// Index of the source polyline in the `Vec<Pline>` passed to
-    /// [`super::WallOutline2D`] (original input position, including any
+    /// [`super::CurveBand2D`] (original input position, including any
     /// entries that were skipped as too short).
     pub pline: usize,
     /// Structural origin within that polyline.
@@ -89,7 +89,7 @@ pub struct SegmentProvenance {
     pub fragment: u32,
 }
 
-/// Per-ring provenance aligned 1:1 with a [`super::WallFootprint2D`]:
+/// Per-ring provenance aligned 1:1 with a [`super::BandFootprint2D`]:
 /// `outer()[k]` describes the outer-ring segment from vertex `k` to
 /// vertex `(k + 1) % n`, and `holes()[h][k]` likewise for hole `h`.
 /// Hole rings are union outputs of the same labelled arrangement, so
@@ -102,14 +102,14 @@ pub struct FootprintProvenance {
 
 impl FootprintProvenance {
     /// Per-segment provenance of the outer ring, aligned with
-    /// `WallFootprint2D::outer()`'s segments.
+    /// `BandFootprint2D::outer()`'s segments.
     #[must_use]
     pub fn outer(&self) -> &[SegmentProvenance] {
         &self.outer
     }
 
     /// Per-segment provenance of each hole ring, aligned with
-    /// `WallFootprint2D::holes()`.
+    /// `BandFootprint2D::holes()`.
     #[must_use]
     pub fn holes(&self) -> &[Vec<SegmentProvenance>] {
         &self.holes
@@ -119,7 +119,7 @@ impl FootprintProvenance {
 // === Crate-internal assembly ===
 
 /// Source description of one stroke-polygon edge, built by
-/// `WallOutline2D` before the union and resolved from the engine's
+/// `CurveBand2D` before the union and resolved from the engine's
 /// [`SegmentSite`]s afterwards.
 pub(super) struct EdgeSource {
     pub pline: usize,
@@ -341,7 +341,7 @@ fn collect_ring_runs<'a>(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::{WallFootprint2D, WallOutline2D};
+    use super::super::{BandFootprint2D, CurveBand2D};
     use super::*;
     use crate::geometry::pline::{Pline, PlineVertex};
     use crate::math::Point3;
@@ -364,8 +364,8 @@ mod tests {
         )
     }
 
-    fn run(plines: Vec<Pline>, hw: f64) -> Vec<(WallFootprint2D, FootprintProvenance)> {
-        WallOutline2D::new(plines, hw)
+    fn run(plines: Vec<Pline>, hw: f64) -> Vec<(BandFootprint2D, FootprintProvenance)> {
+        CurveBand2D::new(plines, hw)
             .execute_faces_with_provenance()
             .expect("execute_faces_with_provenance must succeed")
     }
@@ -374,7 +374,7 @@ mod tests {
     type OwnedRing = (Vec<(f64, f64)>, Vec<SegmentProvenance>);
 
     /// All rings of all faces as `(ring points, ring provenance)` pairs.
-    fn all_rings(result: &[(WallFootprint2D, FootprintProvenance)]) -> Vec<OwnedRing> {
+    fn all_rings(result: &[(BandFootprint2D, FootprintProvenance)]) -> Vec<OwnedRing> {
         let mut out = Vec::new();
         for (f, p) in result {
             let ring_pts = |pl: &Pline| -> Vec<(f64, f64)> {
@@ -392,7 +392,7 @@ mod tests {
     /// count, and that every line-centerline edge lies on the supporting
     /// line its provenance names (within snap tolerance).
     fn assert_aligned_and_on_source_lines(
-        result: &[(WallFootprint2D, FootprintProvenance)],
+        result: &[(BandFootprint2D, FootprintProvenance)],
         plines: &[Pline],
         left_w: f64,
         right_w: f64,
@@ -609,7 +609,7 @@ mod tests {
 
         // Collect (pline, origin, fragment, quantised edge midpoint) for
         // the untouched walls 0 and 1.
-        let collect = |result: &[(WallFootprint2D, FootprintProvenance)]| {
+        let collect = |result: &[(BandFootprint2D, FootprintProvenance)]| {
             let mut items: Vec<(usize, SegmentOrigin, u32, (i64, i64))> = Vec::new();
             for (pts, prov) in all_rings(result) {
                 for (e, sp) in prov.iter().enumerate() {
@@ -729,7 +729,7 @@ mod tests {
             open_pline(&[(0.0, 0.0), (4.0, 0.0)]),
             open_pline(&[(2.0, 0.0), (2.0, 3.0)]),
         ];
-        let plain = WallOutline2D::new(plines.clone(), 0.15)
+        let plain = CurveBand2D::new(plines.clone(), 0.15)
             .execute_faces()
             .unwrap();
         let traced = run(plines, 0.15);
