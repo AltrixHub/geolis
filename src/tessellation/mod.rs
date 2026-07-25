@@ -11,6 +11,7 @@ mod tessellate_with_holes;
 pub use stroke_style::{LineJoin, StrokeStyle};
 pub use tessellate_curve::TessellateCurve;
 pub use tessellate_face::TessellateFace;
+pub(crate) use tessellate_nurbs::boundary_conformance_options;
 pub(crate) use tessellate_nurbs::nurbs_surface_is_open;
 pub(crate) use tessellate_nurbs::tessellate_nurbs_curve_params;
 pub use tessellate_nurbs::{

@@ -10,9 +10,9 @@
 //!
 //! Sampling rules per curve kind:
 //! - NURBS: chord-adaptive curve-intrinsic parameters
-//!   ([`tessellate_nurbs_curve_params`] at [`BOUNDARY_CHORD_TOLERANCE`]) — the
-//!   same algorithm design (a) used, so pre-existing geometric conformance is
-//!   preserved bit-for-bit.
+//!   ([`tessellate_nurbs_curve_params`] at [`boundary_conformance_options`]) —
+//!   the same algorithm design (a) used, so pre-existing geometric conformance
+//!   is preserved bit-for-bit.
 //! - Line: the two endpoints.
 //! - Arc / Circle / Ellipse: the sagitta-bounded segment count previously
 //!   local to the planar face path.
@@ -24,9 +24,7 @@ use crate::geometry::curve::Curve;
 use crate::math::Point3;
 use crate::topology::{EdgeCurve, EdgeId, TopologyStore};
 
-use super::tessellate_nurbs::{
-    tessellate_nurbs_curve_params, CurveTessellationOptions, BOUNDARY_CHORD_TOLERANCE,
-};
+use super::tessellate_nurbs::{boundary_conformance_options, tessellate_nurbs_curve_params};
 use super::TessellationParams;
 
 /// Chord-adaptive samples of one edge: parameters on the edge curve plus the
@@ -106,17 +104,11 @@ fn sample_edge(
         EdgeCurve::Nurbs(nurbs) if nurbs.degree() == 1 => {
             clip_params(breakpoint_params(nurbs.knots()), t_start, t_end)
         }
-        EdgeCurve::Nurbs(nurbs) => {
-            let options = CurveTessellationOptions {
-                chord_tolerance: BOUNDARY_CHORD_TOLERANCE,
-                max_depth: 16,
-            };
-            clip_params(
-                tessellate_nurbs_curve_params(nurbs, &options)?,
-                t_start,
-                t_end,
-            )
-        }
+        EdgeCurve::Nurbs(nurbs) => clip_params(
+            tessellate_nurbs_curve_params(nurbs, &boundary_conformance_options())?,
+            t_start,
+            t_end,
+        ),
     };
 
     let mut points = Vec::with_capacity(ts.len());
@@ -224,14 +216,8 @@ mod tests {
         let circle =
             NurbsCurve3D::circle(Point3::origin(), 0.8, Vector3::z(), Vector3::x()).unwrap();
         let (t0, t1) = circle.parameter_domain();
-        let expected = tessellate_nurbs_curve_params(
-            &circle,
-            &CurveTessellationOptions {
-                chord_tolerance: BOUNDARY_CHORD_TOLERANCE,
-                max_depth: 16,
-            },
-        )
-        .unwrap();
+        let expected =
+            tessellate_nurbs_curve_params(&circle, &boundary_conformance_options()).unwrap();
 
         let (store, edge) = store_with_edge(EdgeCurve::Nurbs(circle), t0, t1);
         let mut cache = EdgeSampleCache::new(TessellationParams::default());

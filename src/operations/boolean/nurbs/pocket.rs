@@ -21,7 +21,7 @@
 use crate::error::{OperationError, Result};
 use crate::geometry::surface::Surface;
 use crate::math::{Point2, TOLERANCE};
-use crate::tessellation::{tessellate_nurbs_curve_params, CurveTessellationOptions};
+use crate::tessellation::tessellate_nurbs_curve_params;
 use crate::topology::{EdgeCurve, EdgeId, FaceId, FaceSurface, TopologyStore, WireId};
 
 use super::loops::CutLoop;
@@ -286,13 +286,8 @@ pub(crate) fn buried_edge_uv(
             OperationError::Failed("pocket buried ring edge must be a NURBS ring".into()).into(),
         );
     };
-    let params = tessellate_nurbs_curve_params(
-        curve,
-        &CurveTessellationOptions {
-            chord_tolerance: 1e-3,
-            max_depth: 16,
-        },
-    )?;
+    let params =
+        tessellate_nurbs_curve_params(curve, &crate::tessellation::boundary_conformance_options())?;
     Ok(params
         .into_iter()
         .map(|t| Point2::new(t, v_boundary))

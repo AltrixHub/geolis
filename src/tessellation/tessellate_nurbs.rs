@@ -160,6 +160,31 @@ fn bisect_curve(
 /// only governs how finely the silhouette itself is approximated.
 pub(crate) const BOUNDARY_CHORD_TOLERANCE: f64 = 1e-3;
 
+/// Bisection depth bound for the boundary-conformance sampling group —
+/// every call that samples a shared boundary curve at
+/// [`BOUNDARY_CHORD_TOLERANCE`] must use THIS depth so coincident
+/// curves keep emitting identical parameters (watertightness).
+///
+/// The chord criterion alone is unbounded in world units: a full-sweep
+/// arc needs `~π·√(r / 2·tol)` chords, so a giant-radius boundary
+/// (degenerate curved wall) asked for tens of thousands of samples and
+/// the downstream CDT degraded quadratically. The depth bounds each
+/// SEED interval (knot span) at `2^depth` sub-chords — a 4-span
+/// rational circle caps at `4·2^8 + 1 = 1025` samples. Per span the
+/// tolerance is honored exactly up to r ≈ 200 m and degrades
+/// gracefully (silhouette-only, still far finer than the interior
+/// grid) beyond.
+pub(crate) const BOUNDARY_MAX_BISECTION_DEPTH: usize = 8;
+
+/// The one [`CurveTessellationOptions`] value every member of the
+/// boundary-conformance group samples with.
+pub(crate) const fn boundary_conformance_options() -> CurveTessellationOptions {
+    CurveTessellationOptions {
+        chord_tolerance: BOUNDARY_CHORD_TOLERANCE,
+        max_depth: BOUNDARY_MAX_BISECTION_DEPTH,
+    }
+}
+
 /// Builds the curve-intrinsic UV boundary polyline for a NURBS face whose outer
 /// boundary is the full parameter rectangle.
 ///
@@ -182,7 +207,7 @@ pub(crate) fn conforming_boundary_uv(
     let ((u_min, u_max), (v_min, v_max)) = surface.parameter_domain();
     let options = CurveTessellationOptions {
         chord_tolerance,
-        max_depth: 16,
+        max_depth: BOUNDARY_MAX_BISECTION_DEPTH,
     };
 
     // Boundary isocurves with their parameter axis:
@@ -542,6 +567,31 @@ mod curve_tests {
         assert_eq!(pts.len(), 2, "degree-1 line must not oversample");
         assert!((pts[0] - Point3::new(0.0, 0.0, 0.0)).norm() < 1e-12);
         assert!((pts[1] - Point3::new(5.0, 0.0, 0.0)).norm() < 1e-12);
+    }
+
+    /// Degenerate-boundary pin (curved-wall CDT cost): the
+    /// boundary-conformance sampling group must stay bounded for
+    /// arbitrarily large curves. The chord criterion alone wants
+    /// `~π·√(r / 2·tol)` samples — tens of thousands for a km-scale
+    /// arc — and the trimmed-face CDT degrades quadratically in that
+    /// count. The shared depth bound caps each knot span at `2^depth`
+    /// sub-chords (a rational circle has 4 spans).
+    #[test]
+    fn boundary_conformance_sampling_is_bounded_for_giant_curves() {
+        // 4 knot spans on a rational circle, 2^depth sub-chords each.
+        let cap = 4 * (1usize << BOUNDARY_MAX_BISECTION_DEPTH) + 1;
+        for radius in [1.0, 1e3, 1e6, 1e9, 1e12] {
+            let curve =
+                NurbsCurve3D::circle(Point3::origin(), radius, Vector3::z(), Vector3::x()).unwrap();
+            let params =
+                tessellate_nurbs_curve_params(&curve, &boundary_conformance_options()).unwrap();
+            assert!(
+                params.len() <= cap,
+                "r={radius:e}: {} params exceed the depth cap {cap}",
+                params.len()
+            );
+            assert!(params.len() >= 3, "r={radius:e}: undersampled circle");
+        }
     }
 
     #[test]
