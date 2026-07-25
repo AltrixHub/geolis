@@ -7,6 +7,6 @@ pub mod surface;
 
 pub use curve::{Arc, Curve, CurveDomain, Line};
 pub use nurbs::{NurbsCurve2D, NurbsCurve3D, NurbsSurface};
-pub use pline::{Pline, PlineVertex};
+pub use pline::{Pline, PlineVertex, MAX_ARC_SUBDIVISIONS};
 pub use pline_sampling::PlineSample;
 pub use surface::{Plane, Surface, SurfaceDomain};
