@@ -11,6 +11,21 @@
 //! The solid is bounded by one planar sloped face per baseline edge (its
 //! straight-skeleton cell plus the overhang band) and a flat bottom cap
 //! at the eave polygon, so it is watertight without vertical sides.
+//!
+//! # Slope clearance
+//!
+//! Inside the overhang band the sloped surface passes *below* the
+//! baseline: `surface_z = baseline_z - slope * distance_outside_baseline`.
+//! A caller that drew the baseline on a wall centreline therefore needs
+//! the whole solid lifted so the surface clears the wall's outer face.
+//! [`MakeHipRoof::with_slope_clearance`] expresses that as a plan
+//! distance: the solid is raised by `slope * clearance`, so the surface at
+//! `clearance` outside the baseline sits back at `baseline_z`.
+//!
+//! The lift belongs to this operation because `slope` is derived from the
+//! skeleton's `max_inset` — it is not knowable from the constructor
+//! arguments, so a caller could only pre-compute the lift by running the
+//! skeleton itself.
 
 use std::collections::HashMap;
 
@@ -39,6 +54,18 @@ pub struct MakeHipRoof {
     rise: f64,
     overhang: f64,
     baseline_z: f64,
+    slope_clearance: f64,
+}
+
+/// The skeleton-derived quantities every public entry point shares.
+struct RoofPlan {
+    skeleton: crate::math::straight_skeleton::StraightSkeleton,
+    /// Rise per unit plan run — the slope of every sloped face.
+    slope: f64,
+    /// Baseline ring offset outward by the overhang (mitred corners).
+    eave: Vec<Point2>,
+    /// The baseline z after the slope-clearance lift.
+    baseline_z: f64,
 }
 
 impl MakeHipRoof {
@@ -50,6 +77,7 @@ impl MakeHipRoof {
             rise,
             overhang: 0.0,
             baseline_z: 0.0,
+            slope_clearance: 0.0,
         }
     }
 
@@ -68,21 +96,50 @@ impl MakeHipRoof {
         self
     }
 
+    /// Lifts the whole solid so the sloped surface at `clearance` (a plan
+    /// distance, measured outward from the baseline) sits at the baseline
+    /// z instead of `slope * clearance` below it.
+    ///
+    /// The lift is `slope * clearance`: a pure z translation, so it changes
+    /// neither the plan-view outline nor the volume nor any surface area.
+    /// A clearance of `0` reproduces the unlifted solid exactly. See the
+    /// module docs for why the lift belongs to this operation.
+    #[must_use]
+    pub fn with_slope_clearance(mut self, clearance: f64) -> Self {
+        self.slope_clearance = clearance;
+        self
+    }
+
+    /// Returns the roof pitch: the rise per unit plan run, i.e. the slope
+    /// of every sloped face (`rise / max_inset` of the baseline skeleton).
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`MakeHipRoof::execute`].
+    pub fn slope(&self) -> Result<f64> {
+        Ok(self.plan()?.slope)
+    }
+
     /// Executes the operation, creating the roof solid in the store.
     ///
     /// # Errors
     ///
     /// Returns [`OperationError::InvalidInput`] when the baseline is not a
     /// simple polygon with at least 3 distinct vertices, `rise` is not
-    /// strictly positive, `overhang` is negative, any parameter is
-    /// non-finite, or the overhang is too large for the footprint (the
-    /// offset eave polygon self-intersects or a mitre explodes). Returns
-    /// [`OperationError::Failed`] on numerically degenerate input.
+    /// strictly positive, `overhang` or the slope clearance is negative,
+    /// any parameter is non-finite, or the overhang is too large for the
+    /// footprint (the offset eave polygon self-intersects or a mitre
+    /// explodes). Returns [`OperationError::Failed`] on numerically
+    /// degenerate input.
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
-        let (skeleton, slope, eave) = self.prepare()?;
-        let lift = |p: Point2, inset: f64| -> Point3 {
-            Point3::new(p.x, p.y, self.baseline_z + slope * inset)
-        };
+        let RoofPlan {
+            skeleton,
+            slope,
+            eave,
+            baseline_z,
+        } = self.plan()?;
+        let lift =
+            |p: Point2, inset: f64| -> Point3 { Point3::new(p.x, p.y, baseline_z + slope * inset) };
 
         let mut mesh = SharedTopology::default();
         let mut faces = Vec::with_capacity(skeleton.cells.len() + 1);
@@ -115,21 +172,18 @@ impl MakeHipRoof {
     ///
     /// Same conditions as [`MakeHipRoof::execute`].
     pub fn eave_ring(&self) -> Result<Vec<Point3>> {
-        let (_, slope, eave) = self.prepare()?;
-        let eave_z = self.baseline_z - slope * self.overhang;
-        Ok(eave.iter().map(|p| Point3::new(p.x, p.y, eave_z)).collect())
+        let plan = self.plan()?;
+        let eave_z = plan.baseline_z - plan.slope * self.overhang;
+        Ok(plan
+            .eave
+            .iter()
+            .map(|p| Point3::new(p.x, p.y, eave_z))
+            .collect())
     }
 
-    /// Validates parameters and computes the skeleton, slope, and eave
-    /// corners shared by [`MakeHipRoof::execute`] and
-    /// [`MakeHipRoof::eave_ring`].
-    fn prepare(
-        &self,
-    ) -> Result<(
-        crate::math::straight_skeleton::StraightSkeleton,
-        f64,
-        Vec<Point2>,
-    )> {
+    /// Validates parameters and computes the skeleton, slope, lifted
+    /// baseline z, and eave corners shared by every public entry point.
+    fn plan(&self) -> Result<RoofPlan> {
         if !self.rise.is_finite() || self.rise <= 0.0 {
             return Err(OperationError::InvalidInput(format!(
                 "hip roof rise must be strictly positive, got {}",
@@ -149,6 +203,13 @@ impl MakeHipRoof {
                 OperationError::InvalidInput("hip roof baseline z must be finite".into()).into(),
             );
         }
+        if !self.slope_clearance.is_finite() || self.slope_clearance < 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "hip roof slope clearance must be non-negative, got {}",
+                self.slope_clearance
+            ))
+            .into());
+        }
         let skeleton = compute_straight_skeleton(&self.baseline)?;
         let ring: Vec<Point2> = skeleton
             .polygon
@@ -163,7 +224,12 @@ impl MakeHipRoof {
         }
         let slope = self.rise / skeleton.max_inset;
         let eave = self.eave_corners(&ring)?;
-        Ok((skeleton, slope, eave))
+        Ok(RoofPlan {
+            skeleton,
+            slope,
+            eave,
+            baseline_z: self.baseline_z + slope * self.slope_clearance,
+        })
     }
 
     /// Computes the mitred outward offset of the baseline ring by the
@@ -537,6 +603,164 @@ mod tests {
         }
     }
 
+    /// The published pitch is `rise / max_inset` of the baseline skeleton
+    /// — the same slope every sloped face rises at. A 4x4 square insets to
+    /// 2, a 6x4 rectangle also to 2.
+    #[test]
+    fn slope_is_rise_over_max_inset() {
+        let slope = MakeHipRoof::new(square(), 2.0).slope().unwrap();
+        assert!((slope - 1.0).abs() < 1e-12, "square slope {slope}");
+        let slope = MakeHipRoof::new(rect(), 1.0).slope().unwrap();
+        assert!((slope - 0.5).abs() < 1e-12, "rect slope {slope}");
+        // The overhang and the baseline z are pure post-skeleton offsets —
+        // neither changes the pitch.
+        let slope = MakeHipRoof::new(square(), 2.0)
+            .with_overhang(0.7)
+            .with_baseline_z(9.0)
+            .slope()
+            .unwrap();
+        assert!((slope - 1.0).abs() < 1e-12, "offsets changed slope {slope}");
+    }
+
+    #[test]
+    fn slope_rejects_the_same_input_execute_rejects() {
+        assert!(MakeHipRoof::new(square(), 0.0).slope().is_err());
+        assert!(MakeHipRoof::new(ring(&[(0.0, 0.0), (4.0, 0.0)]), 1.0)
+            .slope()
+            .is_err());
+    }
+
+    /// A slope clearance lifts the whole solid by `slope * clearance` — a
+    /// pure z translation of both the eave and the ridge.
+    #[test]
+    fn slope_clearance_lifts_the_whole_solid() {
+        // square 4x4, rise 2 -> slope 1. Clearance 0.5 -> lift 0.5.
+        let mut store = TopologyStore::new();
+        let solid = MakeHipRoof::new(square(), 2.0)
+            .with_slope_clearance(0.5)
+            .execute(&mut store)
+            .unwrap();
+        let mesh = TessellateSolid::new(solid, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        let (min_z, max_z) = mesh_z_range(&mesh);
+        assert!((min_z - 0.5).abs() < 1e-9, "eave at {min_z}");
+        assert!((max_z - 2.5).abs() < 1e-9, "ridge at {max_z}");
+        assert_position_weld_watertight(&mesh);
+    }
+
+    /// The guarantee the parameter exists for, pinned exactly: with the
+    /// overhang equal to the clearance, the eave ring lands back on the
+    /// baseline z — i.e. the sloped surface at `clearance` outside the
+    /// baseline is level with the baseline, which is what lets a wall top
+    /// at the baseline z stay under the roof.
+    #[test]
+    fn surface_at_the_clearance_offset_returns_to_the_baseline_z() {
+        let clearance = 0.09;
+        let eave = MakeHipRoof::new(square(), 1.5)
+            .with_overhang(clearance)
+            .with_baseline_z(7.8)
+            .with_slope_clearance(clearance)
+            .eave_ring()
+            .unwrap();
+        for p in &eave {
+            assert!(
+                (p.z - 7.8).abs() < 1e-12,
+                "eave must return to the baseline z, got {}",
+                p.z
+            );
+        }
+
+        // Control: without the lift the same surface dips below it.
+        let flat = MakeHipRoof::new(square(), 1.5)
+            .with_overhang(clearance)
+            .with_baseline_z(7.8)
+            .eave_ring()
+            .unwrap();
+        assert!(flat[0].z < 7.8 - 1e-6, "control eave at {}", flat[0].z);
+    }
+
+    /// A zero clearance must reproduce the unlifted solid bit for bit, so
+    /// the parameter is a pure opt-in.
+    #[test]
+    fn zero_slope_clearance_is_the_unlifted_solid() {
+        let mut store = TopologyStore::new();
+        let plain = MakeHipRoof::new(l_shape(), 1.5)
+            .with_overhang(0.3)
+            .execute(&mut store)
+            .unwrap();
+        let plain_volume = Volume::new(plain).execute(&store).unwrap();
+        let plain_mesh = TessellateSolid::new(plain, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+
+        let mut store2 = TopologyStore::new();
+        let zeroed = MakeHipRoof::new(l_shape(), 1.5)
+            .with_overhang(0.3)
+            .with_slope_clearance(0.0)
+            .execute(&mut store2)
+            .unwrap();
+        let zeroed_volume = Volume::new(zeroed).execute(&store2).unwrap();
+        let zeroed_mesh = TessellateSolid::new(zeroed, TessellationParams::default())
+            .execute(&store2)
+            .unwrap();
+
+        assert!((plain_volume - zeroed_volume).abs() < 1e-12);
+        assert_eq!(mesh_z_range(&plain_mesh), mesh_z_range(&zeroed_mesh));
+    }
+
+    /// The lift is a z translation, so it must leave the volume and the
+    /// sloped surface area untouched.
+    #[test]
+    fn slope_clearance_preserves_volume_and_sloped_area() {
+        let sloped_area = |clearance: f64| -> (f64, f64) {
+            let mut store = TopologyStore::new();
+            let solid = MakeHipRoof::new(l_shape(), 1.5)
+                .with_overhang(0.3)
+                .with_slope_clearance(clearance)
+                .execute(&mut store)
+                .unwrap();
+            (
+                Volume::new(solid).execute(&store).unwrap(),
+                crate::operations::query::Area::new(solid)
+                    .with_facing(crate::math::Vector3::z())
+                    .execute(&store)
+                    .unwrap(),
+            )
+        };
+        let (v0, a0) = sloped_area(0.0);
+        let (v1, a1) = sloped_area(0.4);
+        assert!((v0 - v1).abs() < 1e-9, "volume {v0} vs {v1}");
+        assert!((a0 - a1).abs() < 1e-9, "sloped area {a0} vs {a1}");
+    }
+
+    /// The up-facing area of a hip roof is exactly its roofing surface —
+    /// the sloped faces, with the downward bottom cap excluded. A 4x4
+    /// square at rise 2 (slope 1, i.e. 45 degrees) roofs 16 m2 in plan, so
+    /// the sloped surface is `16 * sqrt(2)`.
+    #[test]
+    fn up_facing_area_is_the_roofing_surface() {
+        let mut store = TopologyStore::new();
+        let solid = MakeHipRoof::new(square(), 2.0).execute(&mut store).unwrap();
+        let sloped = crate::operations::query::Area::new(solid)
+            .with_facing(crate::math::Vector3::z())
+            .execute(&store)
+            .unwrap();
+        let expected = 16.0 * std::f64::consts::SQRT_2;
+        assert!(
+            (sloped - expected).abs() < 1e-9,
+            "sloped area {sloped} vs {expected}"
+        );
+        // The bottom cap is the 16 m2 plan square, so the total is the sum.
+        let total = crate::operations::query::Area::new(solid)
+            .execute(&store)
+            .unwrap();
+        assert!(
+            (total - (expected + 16.0)).abs() < 1e-9,
+            "total area {total}"
+        );
+    }
+
     #[test]
     fn rejects_invalid_parameters() {
         let mut store = TopologyStore::new();
@@ -553,6 +777,14 @@ mod tests {
             .is_err());
         assert!(MakeHipRoof::new(square(), 2.0)
             .with_baseline_z(f64::INFINITY)
+            .execute(&mut store)
+            .is_err());
+        assert!(MakeHipRoof::new(square(), 2.0)
+            .with_slope_clearance(-0.1)
+            .execute(&mut store)
+            .is_err());
+        assert!(MakeHipRoof::new(square(), 2.0)
+            .with_slope_clearance(f64::NAN)
             .execute(&mut store)
             .is_err());
     }
