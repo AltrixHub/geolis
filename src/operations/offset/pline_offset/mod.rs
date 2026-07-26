@@ -3,6 +3,7 @@ mod raw_offset;
 mod self_intersect;
 mod slice;
 mod stitch;
+mod validity;
 
 use crate::error::{OperationError, Result};
 use crate::geometry::pline::Pline;
@@ -13,6 +14,14 @@ use crate::geometry::pline::Pline;
 /// For closed polylines: positive distance = inward, negative = outward.
 /// For open polylines: positive distance = left side, negative = right side.
 /// Returns offset curve(s) without endpoint caps.
+///
+/// # Closed-ring validity
+///
+/// Every closed-ring result is checked against the offset's defining
+/// property — no point of an offset by `d` lies closer than `|d|` to the
+/// source ring — and a loop that violates it is discarded as a phantom
+/// (see [`validity`]). An offset that consumes its own ring therefore
+/// reports the collapse instead of returning an inside-out loop.
 #[derive(Debug)]
 pub struct PlineOffset2D {
     pline: Pline,
@@ -59,19 +68,25 @@ impl PlineOffset2D {
 
         // Step 2: Find all self-intersections.
         let intersections = self_intersect::find_all(&raw);
-        if intersections.is_empty() {
-            return Ok(vec![raw]);
-        }
+        let result = if intersections.is_empty() {
+            vec![raw]
+        } else {
+            // Step 3: Slice at intersection points.
+            let seg_count = raw.segment_count();
+            let slices = slice::build(&raw.vertices, seg_count, &intersections);
 
-        // Step 3: Slice at intersection points.
-        let seg_count = raw.segment_count();
-        let slices = slice::build(&raw.vertices, seg_count, &intersections);
+            // Step 4: Filter slices by distance to original.
+            let valid = filter::apply(&slices, &self.pline, self.distance);
 
-        // Step 4: Filter slices by distance to original.
-        let valid = filter::apply(&slices, &self.pline, self.distance);
+            // Step 5: Stitch valid slices into result polylines.
+            stitch::connect(&valid, true)
+        };
 
-        // Step 5: Stitch valid slices into result polylines.
-        let result = stitch::connect(&valid, true);
+        // Step 6: Discard phantom loops — a ring closer to the source than
+        // the offset distance is not an offset of it (see `validity`). This
+        // also covers the non-self-intersecting path above, where nothing
+        // else inspects the raw offset.
+        let result = validity::keep_valid(result, &self.pline, self.distance);
 
         if result.is_empty() {
             return Err(OperationError::Failed("offset collapsed completely".to_owned()).into());
@@ -415,6 +430,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Closed-ring validity (phantom-loop rejection) ──
+
+    /// 4×3 rectangle (half-extents 2.0 / 1.5) inset by 1.6: the raw offset
+    /// crosses the ring's medial axis in Y and mitres into an inside-out
+    /// rectangle whose sides sit 1.4 from the source — closer than the
+    /// requested 1.6. It never self-intersects, so slice-and-filter never
+    /// sees it; the validity check must reject it as a collapse.
+    #[test]
+    fn inset_past_the_medial_axis_reports_a_collapse() {
+        let ring = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(0.0, 3.0),
+            ],
+            closed: true,
+        };
+        let Err(err) = PlineOffset2D::new(ring, 1.6).execute() else {
+            panic!("a phantom loop must not be returned as an offset");
+        };
+        assert!(
+            err.to_string().contains("collapsed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The same ring inset past BOTH half-extents self-eliminates.
+    #[test]
+    fn inset_past_both_half_extents_reports_a_collapse() {
+        let ring = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(0.0, 3.0),
+            ],
+            closed: true,
+        };
+        assert!(PlineOffset2D::new(ring, 2.5).execute().is_err());
+    }
+
+    /// An arc-carrying ring inset past its arc's radius collapses too —
+    /// the check measures against the true arc, not its chord.
+    #[test]
+    fn arc_ring_inset_past_the_arc_radius_reports_a_collapse() {
+        let ring = Pline {
+            vertices: vec![
+                PlineVertex::new(0.0, 0.0, 0.5),
+                PlineVertex::line(4.0, 0.0),
+                PlineVertex::line(4.0, 3.0),
+                PlineVertex::line(0.0, 3.0),
+            ],
+            closed: true,
+        };
+        assert!(PlineOffset2D::new(ring, 2.5).execute().is_err());
+    }
+
+    /// A well-formed inset survives untouched: every corner of the mitred
+    /// result sits at exactly the offset distance, which must not read as
+    /// "too close".
+    #[test]
+    fn valid_inset_survives_the_validity_check() {
+        let result = PlineOffset2D::new(square_pline(), 1.0).execute().unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].vertices.len(), 4);
+        let xs: Vec<f64> = result[0].vertices.iter().map(|v| v.x).collect();
+        assert!(xs.iter().any(|x| (x - 1.0).abs() < 1e-9));
+        assert!(xs.iter().any(|x| (x - 9.0).abs() < 1e-9));
     }
 
     #[test]

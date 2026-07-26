@@ -8,7 +8,7 @@ use crate::math::distance_2d::point_to_segment_dist;
 
 /// Single epsilon for all geometric decisions in the 2D boolean pipeline.
 ///
-/// Inherited verbatim from the original `wall_outline::polygon_union`
+/// Inherited verbatim from the original `curve_band::polygon_union`
 /// engine so that all existing wall-outline regression fixtures remain
 /// bit-identical after the move into `boolean_2d`.
 pub const WALL_EPS: f64 = 1e-6;
@@ -36,7 +36,7 @@ pub type Polygon = Vec<(f64, f64)>;
 /// and [`crate::operations::boolean_2d::subtract_all_with_holes`].
 /// External callers constructing a `PolygonWithHoles` directly are
 /// responsible for upholding the invariants (use the higher-level
-/// validator types — e.g. `WallFootprint2D::try_from_parts` — when
+/// validator types — e.g. `BandFootprint2D::try_from_parts` — when
 /// crossing crate boundaries with untrusted input).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PolygonWithHoles {

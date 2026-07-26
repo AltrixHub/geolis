@@ -1,8 +1,8 @@
-//! `WallOutline2D` algorithm output — wall outline from centerline networks.
+//! `CurveBand2D` algorithm output — wall outline from centerline networks.
 
 use geolis::geometry::pline::{Pline, PlineVertex};
 use geolis::math::Point3;
-use geolis::operations::offset::WallOutline2D;
+use geolis::operations::offset::CurveBand2D;
 use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
@@ -289,7 +289,7 @@ fn draw_case(
         vertices: pts.iter().map(|&(x, y)| PlineVertex::line(x, y)).collect(),
         closed,
     };
-    let wall = WallOutline2D::new(vec![pline], half_w);
+    let wall = CurveBand2D::new(vec![pline], half_w);
     if let Ok(footprints) = wall.execute_faces() {
         // Render every footprint ring: outer in green, holes in blue.
         let rings = footprints.iter().flat_map(|fp| {

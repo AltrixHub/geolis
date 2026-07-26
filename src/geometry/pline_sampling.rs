@@ -174,7 +174,12 @@ impl Pline {
     }
 
     /// Point + unit tangent at arc-length fraction `t` of segment `i`.
-    fn sample_segment(&self, edge_index: usize, fraction: f64, length_along: f64) -> PlineSample {
+    pub(crate) fn sample_segment(
+        &self,
+        edge_index: usize,
+        fraction: f64,
+        length_along: f64,
+    ) -> PlineSample {
         let n = self.vertices.len();
         let v0 = &self.vertices[edge_index];
         let v1 = &self.vertices[(edge_index + 1) % n];

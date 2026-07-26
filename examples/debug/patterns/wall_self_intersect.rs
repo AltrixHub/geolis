@@ -7,7 +7,7 @@
 use geolis::geometry::pline::{Pline, PlineVertex};
 use geolis::math::distance_2d::point_to_segment_dist;
 use geolis::math::Point3;
-use geolis::operations::offset::WallOutline2D;
+use geolis::operations::offset::CurveBand2D;
 use geolis::tessellation::StrokeStyle;
 use revion_ui::value_objects::Color;
 use revion_ui::MeshStorage;
@@ -294,7 +294,7 @@ fn draw_case(
     // `execute_faces` returns validated, union-assembled footprints. Flatten
     // every footprint's outer ring and holes into a single boundary list so
     // the example's own miter-clip / split pass can run over them.
-    let raw_boundaries: Vec<Pline> = WallOutline2D::new(vec![pline], half_w)
+    let raw_boundaries: Vec<Pline> = CurveBand2D::new(vec![pline], half_w)
         .execute_faces()
         .map(|footprints| {
             footprints
@@ -307,7 +307,7 @@ fn draw_case(
         })
         .unwrap_or_default();
 
-    // LEFT: RED = raw WallOutline2D output (BEFORE any processing)
+    // LEFT: RED = raw CurveBand2D output (BEFORE any processing)
     // Shows self-intersecting boundaries — the problem we're fixing.
 
     // Centreline (gray, thin)
@@ -355,7 +355,7 @@ fn draw_case(
 
 /// Register `wall_self_intersect` pattern meshes.
 ///
-/// Left column: RED = raw `WallOutline2D` output (BEFORE, may self-intersect)
+/// Left column: RED = raw `CurveBand2D` output (BEFORE, may self-intersect)
 /// Right column: GREEN = resolved output (AFTER, miter clip + split + keep both)
 /// One demo case: label, centerline points, half-width.
 type DemoCase = (&'static str, Vec<(f64, f64)>, f64);

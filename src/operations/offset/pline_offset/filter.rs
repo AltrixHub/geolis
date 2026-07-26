@@ -32,7 +32,8 @@ pub fn apply<'a>(slices: &'a [PlineSlice], original: &Pline, distance: f64) -> V
 /// Computes the minimum distance from a point to a polyline.
 ///
 /// Handles both line segments (bulge=0) and arc segments (bulge≠0).
-fn min_dist_to_pline(px: f64, py: f64, pline: &Pline) -> f64 {
+#[must_use]
+pub fn min_dist_to_pline(px: f64, py: f64, pline: &Pline) -> f64 {
     let n = pline.vertices.len();
     let seg_count = pline.segment_count();
     let mut min_d = f64::MAX;

@@ -51,12 +51,12 @@ pub use union::union_all_with_holes;
 
 /// Crate-internal traced union: per-edge [`engine::SegmentSite`] source
 /// tracking for callers that derive stable per-segment provenance
-/// (`wall_outline::WallOutline2D::execute_faces_with_provenance`).
+/// (`curve_band::CurveBand2D::execute_faces_with_provenance`).
 pub(crate) use engine::{RingRef, SegmentSite, TracedFace};
 pub(crate) use union::union_all_with_holes_traced;
 
 /// Crate-internal re-export of the engine's segment-segment intersection
-/// primitive. Used by `wall_outline::try_from_parts` ring-validation
+/// primitive. Used by `curve_band::try_from_parts` ring-validation
 /// helpers to share a single `WALL_EPS`-tolerant implementation with
 /// the arrangement engine.
 pub(crate) use engine::seg_seg_intersect;
