@@ -1,3 +1,4 @@
+mod carve;
 pub(crate) mod polygon_union;
 mod provenance;
 mod stroke;
@@ -9,6 +10,7 @@ use polygon_union::{point_in_polygon_class, seg_seg_intersect, PointClass, WALL_
 use provenance::{footprint_provenances, EdgeSource, InputEdgeSources};
 use stroke::{StrokeLabels, StrokeOrigin};
 
+pub use carve::{carve_band_faces, CarvedFootprintProvenance, CarvedSegmentProvenance};
 pub use provenance::{CapEnd, FootprintProvenance, OffsetSide, SegmentOrigin, SegmentProvenance};
 
 /// A planar band face described by an outer boundary and zero or more holes,
