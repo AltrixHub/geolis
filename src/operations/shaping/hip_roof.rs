@@ -8,9 +8,37 @@
 //! face outward past the baseline (mitred corners), lowering the eave
 //! edge to `baseline_z - slope * overhang`.
 //!
-//! The solid is bounded by one planar sloped face per baseline edge (its
-//! straight-skeleton cell plus the overhang band) and a flat bottom cap
-//! at the eave polygon, so it is watertight without vertical sides.
+//! By default the solid is a wedge, bounded by one planar sloped face per
+//! baseline edge (its straight-skeleton cell plus the overhang band) and a
+//! flat bottom cap at the eave polygon, so it is watertight without
+//! vertical sides.
+//!
+//! # Thickness
+//!
+//! [`MakeHipRoof::with_thickness`] turns the wedge into a roof *shell*:
+//! the sloped faces become the top sheet, a second copy of the same
+//! piecewise-planar height field lowered by `thickness` becomes the
+//! bottom sheet, and a vertical fascia band of height `thickness` closes
+//! the two along the outer eave ring. The flat bottom cap only exists in
+//! the wedge form (`thickness == 0`, the default).
+//!
+//! The offset is **vertical, not normal**: the bottom sheet is the top
+//! sheet translated by `-thickness` in z, so both sheets share the exact
+//! same plan-view decomposition into skeleton cells and overhang bands.
+//! That makes the shell watertight by construction — every interior
+//! ridge/hip edge is shared by the two adjacent cells on its own sheet,
+//! and every eave-ring edge is shared with the fascia quad above or below
+//! it — and it makes the enclosed volume exactly
+//! `plan_area(eave_polygon) * thickness`.
+//!
+//! The consequence of the vertical (rather than normal) offset is that the
+//! shell's thickness measured perpendicular to the roof plane is
+//! `thickness * cos(pitch_angle)`, i.e. `thickness / sqrt(1 + slope^2)`,
+//! not `thickness`. That is the standard simplified-BIM roof
+//! representation: the parameter is the vertical build-up a section cut
+//! shows, and it keeps the eave fascia a clean vertical band instead of
+//! the mitred, self-intersection-prone geometry a true normal offset
+//! would need at hips and valleys.
 //!
 //! # Slope clearance
 //!
@@ -55,6 +83,7 @@ pub struct MakeHipRoof {
     overhang: f64,
     baseline_z: f64,
     slope_clearance: f64,
+    thickness: f64,
 }
 
 /// The skeleton-derived quantities every public entry point shares.
@@ -78,6 +107,7 @@ impl MakeHipRoof {
             overhang: 0.0,
             baseline_z: 0.0,
             slope_clearance: 0.0,
+            thickness: 0.0,
         }
     }
 
@@ -110,6 +140,27 @@ impl MakeHipRoof {
         self
     }
 
+    /// Builds the roof as a shell of this vertical thickness instead of a
+    /// solid wedge: the sloped faces become the top sheet, the same height
+    /// field lowered by `thickness` becomes the bottom sheet, and a
+    /// vertical fascia band closes the two along the eave ring.
+    ///
+    /// The offset is vertical, so the plan-view outline is unchanged and
+    /// the enclosed volume is exactly `plan_area(eave_polygon) *
+    /// thickness`; the thickness measured perpendicular to the roof plane
+    /// is `thickness / sqrt(1 + slope^2)`. See the module docs.
+    ///
+    /// A thickness of `0` (the default) reproduces the solid wedge —
+    /// sloped faces plus a flat bottom cap — exactly. The whole shell
+    /// participates in [`MakeHipRoof::with_slope_clearance`]'s lift, and
+    /// [`MakeHipRoof::slope`] / [`MakeHipRoof::eave_ring`] keep describing
+    /// the top surface.
+    #[must_use]
+    pub fn with_thickness(mut self, thickness: f64) -> Self {
+        self.thickness = thickness;
+        self
+    }
+
     /// Returns the roof pitch: the rise per unit plan run, i.e. the slope
     /// of every sloped face (`rise / max_inset` of the baseline skeleton).
     ///
@@ -126,11 +177,11 @@ impl MakeHipRoof {
     ///
     /// Returns [`OperationError::InvalidInput`] when the baseline is not a
     /// simple polygon with at least 3 distinct vertices, `rise` is not
-    /// strictly positive, `overhang` or the slope clearance is negative,
-    /// any parameter is non-finite, or the overhang is too large for the
-    /// footprint (the offset eave polygon self-intersects or a mitre
-    /// explodes). Returns [`OperationError::Failed`] on numerically
-    /// degenerate input.
+    /// strictly positive, `overhang`, the slope clearance or the thickness
+    /// is negative, any parameter is non-finite, or the overhang is too
+    /// large for the footprint (the offset eave polygon self-intersects or
+    /// a mitre explodes). Returns [`OperationError::Failed`] on
+    /// numerically degenerate input.
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
         let RoofPlan {
             skeleton,
@@ -138,23 +189,55 @@ impl MakeHipRoof {
             eave,
             baseline_z,
         } = self.plan()?;
-        let lift =
+        let top =
             |p: Point2, inset: f64| -> Point3 { Point3::new(p.x, p.y, baseline_z + slope * inset) };
+        // The bottom sheet subtracts from the *evaluated* top height rather
+        // than re-deriving the height field from a lowered base: that keeps
+        // the drop exactly `thickness` at every vertex in floating point,
+        // which is what makes the enclosed volume exactly plan area times
+        // thickness.
+        let thickness = self.thickness;
+        let bottom = |p: Point2, inset: f64| -> Point3 {
+            let t = top(p, inset);
+            Point3::new(t.x, t.y, t.z - thickness)
+        };
 
         let mut mesh = SharedTopology::default();
-        let mut faces = Vec::with_capacity(skeleton.cells.len() + 1);
+        let mut faces = Vec::with_capacity(2 * skeleton.cells.len() + eave.len());
+        // Top sheet: one sloped face per baseline edge.
         for cell in &skeleton.cells {
-            let polygon = face_polygon(cell, &eave, self.overhang, &lift);
+            let polygon = face_polygon(cell, &eave, self.overhang, &top);
             faces.push(mesh.add_face(store, &polygon)?);
         }
 
-        // Bottom cap at the eave plane, wound to face downward.
-        let cap: Vec<Point3> = eave
-            .iter()
-            .rev()
-            .map(|&p| lift(p, -self.overhang))
-            .collect();
-        faces.push(mesh.add_face(store, &cap)?);
+        if thickness > 0.0 {
+            // Bottom sheet: the same height field lowered by `thickness`,
+            // each face reversed so it faces downward.
+            for cell in &skeleton.cells {
+                let mut polygon = face_polygon(cell, &eave, self.overhang, &bottom);
+                polygon.reverse();
+                faces.push(mesh.add_face(store, &polygon)?);
+            }
+            // Eave fascia: one outward-facing vertical quad per eave-ring
+            // edge, closing the two sheets. The eave ring is CCW in plan,
+            // so `start_top -> start_bottom -> end_bottom -> end_top`
+            // winds outward.
+            for i in 0..eave.len() {
+                let j = (i + 1) % eave.len();
+                let quad = [
+                    top(eave[i], -self.overhang),
+                    bottom(eave[i], -self.overhang),
+                    bottom(eave[j], -self.overhang),
+                    top(eave[j], -self.overhang),
+                ];
+                faces.push(mesh.add_face(store, &quad)?);
+            }
+        } else {
+            // Wedge form: flat bottom cap at the eave plane, wound to face
+            // downward.
+            let cap: Vec<Point3> = eave.iter().rev().map(|&p| top(p, -self.overhang)).collect();
+            faces.push(mesh.add_face(store, &cap)?);
+        }
 
         let shell = store.add_shell(ShellData {
             faces,
@@ -207,6 +290,13 @@ impl MakeHipRoof {
             return Err(OperationError::InvalidInput(format!(
                 "hip roof slope clearance must be non-negative, got {}",
                 self.slope_clearance
+            ))
+            .into());
+        }
+        if !self.thickness.is_finite() || self.thickness < 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "hip roof thickness must be non-negative, got {}",
+                self.thickness
             ))
             .into());
         }
@@ -289,32 +379,33 @@ impl MakeHipRoof {
 
 /// Builds the 3D boundary polygon (CCW seen from above) of the roof face
 /// belonging to one baseline edge: the mitred overhang band followed by
-/// the lifted skeleton cell chain.
+/// the skeleton cell chain, with `height` mapping each plan point and its
+/// inset onto the sheet being built (top or thickness-lowered bottom).
 fn face_polygon(
     cell: &SkeletonCell,
     eave: &[Point2],
     overhang: f64,
-    lift: &impl Fn(Point2, f64) -> Point3,
+    height: &impl Fn(Point2, f64) -> Point3,
 ) -> Vec<Point3> {
     let edge = cell.edge_index;
     let mut polygon = Vec::with_capacity(cell.vertices.len() + 2);
     if overhang > 0.0 {
         let next = (edge + 1) % eave.len();
-        polygon.push(lift(eave[edge], -overhang));
-        polygon.push(lift(eave[next], -overhang));
+        polygon.push(height(eave[edge], -overhang));
+        polygon.push(height(eave[next], -overhang));
         // Cell vertices are [start, end, chain from end back to start]:
         // with the eave band in front, traversal continues at the edge end
         // vertex and walks the chain back to the edge start vertex.
         for v in cell.vertices.iter().skip(1) {
-            polygon.push(lift(Point2::new(v.position.x, v.position.y), v.inset));
+            polygon.push(height(Point2::new(v.position.x, v.position.y), v.inset));
         }
-        polygon.push(lift(
+        polygon.push(height(
             Point2::new(cell.vertices[0].position.x, cell.vertices[0].position.y),
             cell.vertices[0].inset,
         ));
     } else {
         for v in &cell.vertices {
-            polygon.push(lift(Point2::new(v.position.x, v.position.y), v.inset));
+            polygon.push(height(Point2::new(v.position.x, v.position.y), v.inset));
         }
     }
     polygon
@@ -385,6 +476,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::error::GeolisError;
     use crate::operations::query::Volume;
     use crate::tessellation::{TessellateSolid, TessellationParams};
 
@@ -758,6 +850,157 @@ mod tests {
         assert!(
             (total - (expected + 16.0)).abs() < 1e-9,
             "total area {total}"
+        );
+    }
+
+    /// A zero thickness must reproduce the solid wedge exactly, so the
+    /// parameter is a pure opt-in.
+    #[test]
+    fn thickness_zero_matches_the_wedge() {
+        let mut store = TopologyStore::new();
+        let solid = MakeHipRoof::new(square(), 2.0)
+            .with_thickness(0.0)
+            .execute(&mut store)
+            .unwrap();
+        // The `square_pyramid` wedge: 4 sloped faces + bottom cap.
+        assert_eq!(face_count(&store, solid), 5);
+        assert!(edge_usage_is_two_everywhere(&store, solid));
+        let volume = Volume::new(solid).execute(&store).unwrap();
+        assert!((volume - 32.0 / 3.0).abs() < 1e-9, "volume {volume}");
+
+        // And identical to the wedge built without the parameter at all.
+        let mut store2 = TopologyStore::new();
+        let plain = MakeHipRoof::new(square(), 2.0)
+            .execute(&mut store2)
+            .unwrap();
+        assert_eq!(face_count(&store2, plain), face_count(&store, solid));
+        let plain_volume = Volume::new(plain).execute(&store2).unwrap();
+        assert!((volume - plain_volume).abs() < 1e-12);
+        let mesh = TessellateSolid::new(solid, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        let plain_mesh = TessellateSolid::new(plain, TessellationParams::default())
+            .execute(&store2)
+            .unwrap();
+        assert_eq!(mesh_z_range(&mesh), mesh_z_range(&plain_mesh));
+    }
+
+    /// The invariant the vertical offset buys: both sheets share the plan
+    /// decomposition, so the shell encloses exactly `plan area * thickness`
+    /// regardless of pitch or footprint convexity.
+    #[test]
+    fn shell_volume_is_plan_area_times_thickness() {
+        let thickness = 0.12;
+
+        // square 4x4, rise 2 -> slope 1; overhang 0.5 makes the eave
+        // polygon the 5x5 square.
+        let mut store = TopologyStore::new();
+        let solid = MakeHipRoof::new(square(), 2.0)
+            .with_overhang(0.5)
+            .with_thickness(thickness)
+            .execute(&mut store)
+            .unwrap();
+        let volume = Volume::new(solid).execute(&store).unwrap();
+        let expected = 5.0 * 5.0 * thickness;
+        assert!(
+            (volume - expected).abs() < 1e-9,
+            "square shell {volume} vs {expected}"
+        );
+
+        // Non-convex control: the L-shape's plan area is 6*6 - 3*3 = 27,
+        // and with no overhang the eave polygon is the baseline itself.
+        let mut store2 = TopologyStore::new();
+        let l_solid = MakeHipRoof::new(l_shape(), 1.5)
+            .with_thickness(thickness)
+            .execute(&mut store2)
+            .unwrap();
+        let l_volume = Volume::new(l_solid).execute(&store2).unwrap();
+        let l_expected = 27.0 * thickness;
+        assert!(
+            (l_volume - l_expected).abs() < 1e-9,
+            "L shell {l_volume} vs {l_expected}"
+        );
+    }
+
+    /// Top sheet + bottom sheet + eave fascia must close the solid: every
+    /// topological edge used exactly twice, and the tessellated mesh free
+    /// of boundary edges after a position weld.
+    #[test]
+    fn shell_is_watertight() {
+        let mut store = TopologyStore::new();
+        let solid = MakeHipRoof::new(l_shape(), 1.5)
+            .with_overhang(0.3)
+            .with_thickness(0.25)
+            .execute(&mut store)
+            .unwrap();
+        // 6 top faces + 6 bottom faces + 6 fascia quads, and no bottom cap.
+        assert_eq!(face_count(&store, solid), 18);
+        assert!(edge_usage_is_two_everywhere(&store, solid));
+        let mesh = TessellateSolid::new(solid, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert_position_weld_watertight(&mesh);
+        // slope = 1.5 / 1.5 = 1: the eave is at -0.3, so the underside of
+        // the fascia sits at -0.55 while the ridge stays at 1.5.
+        let (min_z, max_z) = mesh_z_range(&mesh);
+        assert!((min_z + 0.55).abs() < 1e-9, "underside at {min_z}");
+        assert!((max_z - 1.5).abs() < 1e-9, "ridge at {max_z}");
+    }
+
+    #[test]
+    fn negative_or_nan_thickness_is_a_typed_error() {
+        let mut store = TopologyStore::new();
+        for bad in [-0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = MakeHipRoof::new(square(), 2.0)
+                .with_thickness(bad)
+                .execute(&mut store)
+                .unwrap_err();
+            assert!(
+                matches!(err, GeolisError::Operation(OperationError::InvalidInput(_))),
+                "thickness {bad} gave {err:?}"
+            );
+        }
+        // The check lives in the shared plan, so the pitch query and the
+        // eave ring reject the same input.
+        assert!(MakeHipRoof::new(square(), 2.0)
+            .with_thickness(-1.0)
+            .slope()
+            .is_err());
+        assert!(MakeHipRoof::new(square(), 2.0)
+            .with_thickness(f64::NAN)
+            .eave_ring()
+            .is_err());
+    }
+
+    /// The slope-clearance lift is a pure z translation of the *whole*
+    /// shell — top sheet, bottom sheet and fascia move together.
+    #[test]
+    fn clearance_lifts_the_whole_shell() {
+        // square 4x4, rise 2 -> slope 1. Clearance 0.5 lifts the baseline
+        // to z = 0.5, so the overhang of 0.25 puts the eave at 0.25 and the
+        // fascia's underside at 0.15; the ridge sits at 0.5 + 2 = 2.5.
+        let mut store = TopologyStore::new();
+        let solid = MakeHipRoof::new(square(), 2.0)
+            .with_overhang(0.25)
+            .with_slope_clearance(0.5)
+            .with_thickness(0.1)
+            .execute(&mut store)
+            .unwrap();
+        assert!(edge_usage_is_two_everywhere(&store, solid));
+        let mesh = TessellateSolid::new(solid, TessellationParams::default())
+            .execute(&store)
+            .unwrap();
+        assert_position_weld_watertight(&mesh);
+        let (min_z, max_z) = mesh_z_range(&mesh);
+        assert!((min_z - 0.15).abs() < 1e-9, "underside at {min_z}");
+        assert!((max_z - 2.5).abs() < 1e-9, "ridge at {max_z}");
+        // A translation cannot change the enclosed volume: still the
+        // 4.5x4.5 eave polygon times the thickness.
+        let volume = Volume::new(solid).execute(&store).unwrap();
+        let expected = 4.5 * 4.5 * 0.1;
+        assert!(
+            (volume - expected).abs() < 1e-9,
+            "volume {volume} vs {expected}"
         );
     }
 
