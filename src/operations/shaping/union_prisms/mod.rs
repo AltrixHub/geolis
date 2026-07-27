@@ -33,6 +33,10 @@
 //!    over `region(i) \ region(i + 1)`, both region differences taken with
 //!    the same 2D boolean machinery. The slab below the first and above
 //!    the last is the empty region, so the body is closed at the extremes.
+//! 4. **Corner edges.** Each slab's rings are walked once more and every
+//!    vertex where the boundary genuinely turns yields a vertical segment
+//!    spanning the slab — the arris a caller draws so a wall keeps its
+//!    side definition. See [`corner`] for the angle test.
 //!
 //! Because every z coordinate in the mesh is a breakpoint and every
 //! horizontal boundary is a boolean result, the surface is geometrically
@@ -56,6 +60,7 @@
 //! exactly the way `offset::curve_band::carve_band_faces` does — one
 //! level up from the arrangement engine, never inside it.
 
+mod corner;
 mod mesh;
 mod slab;
 #[cfg(test)]
@@ -63,6 +68,7 @@ mod tests;
 
 use crate::error::{OperationError, Result};
 use crate::geometry::pline::Pline;
+use crate::math::Point3;
 use crate::operations::boolean_2d::{PolygonWithHoles, WALL_EPS};
 use crate::tessellation::TriangleMesh;
 
@@ -71,6 +77,38 @@ use crate::tessellation::TriangleMesh;
 /// [`crate::tessellation::TessellationParams::default`]'s `tolerance`,
 /// the crate-wide default deviation budget for curved boundaries.
 pub const DEFAULT_ARC_TOLERANCE: f64 = 0.01;
+
+/// Default angular threshold above which a boundary vertex counts as a
+/// corner, in radians.
+///
+/// # Derivation
+///
+/// `Pline::to_points` bounds a chord's turn angle by the sagitta
+/// criterion `θ_max = 2·acos(1 − tol / r)`, which for `tol / r ≤ 0.1`
+/// equals its series form `2·√(2·tol / r)`. `θ_max` **decreases** as the
+/// radius grows, so the worst-case facet sits at the smallest radius the
+/// default promises to handle — `r = 10 × arc_tolerance`, a 0.1 fillet at
+/// [`DEFAULT_ARC_TOLERANCE`] and the tightest an architectural footprint
+/// realistically carries:
+///
+/// ```text
+/// θ_max = 2·√(2 / 10) = 0.894427… rad ≈ 51.2°
+/// ```
+///
+/// Rounded up to `0.9` rad (≈ 51.6°) for float margin. That leaves the
+/// threshold above every arc facet a default tessellation can produce and
+/// far below the 90° turn of a wall end or an L / T / X junction, so a
+/// default-tessellated circle yields **zero** corner edges while every
+/// real corner keeps its arris.
+///
+/// # Outside the derivation
+///
+/// An arc with `r < 10 × arc_tolerance` is flattened too coarsely for
+/// *any* angle test to tell its facets from real corners — an `r = 0.05`
+/// circle at the default tolerance turns 60° per chord. Tighten the arc
+/// tolerance (which shrinks `θ_max` with `√tol`) rather than raising this
+/// threshold, or set both explicitly.
+pub const DEFAULT_CORNER_ANGLE_TOLERANCE: f64 = 0.9;
 
 /// Tolerance for every z comparison: breakpoint deduplication, slab
 /// height, and z-interval validation.
@@ -297,12 +335,40 @@ impl PrismSlab {
     }
 }
 
-/// Result of [`UnionPrisms::execute`]: the fused body plus the outline it
-/// was built from.
+/// A vertical arris of the fused body: the segment a caller draws at one
+/// corner of one slab.
+///
+/// Both endpoints share the corner's `(x, y)`; only `z` differs, spanning
+/// the slab the corner belongs to. A corner shared by two stacked slabs
+/// produces two segments that meet at the shared elevation — see
+/// [`corner`] for why they are not merged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CornerEdge {
+    base: Point3,
+    top: Point3,
+}
+
+impl CornerEdge {
+    /// Lower endpoint, at the slab's `z_base`.
+    #[must_use]
+    pub fn base(&self) -> Point3 {
+        self.base
+    }
+
+    /// Upper endpoint, at the slab's `z_top`.
+    #[must_use]
+    pub fn top(&self) -> Point3 {
+        self.top
+    }
+}
+
+/// Result of [`UnionPrisms::execute`]: the fused body, the outline it was
+/// built from, and the vertical arrises of that outline.
 #[derive(Debug, Clone)]
 pub struct FusedPrisms {
     mesh: TriangleMesh,
     slabs: Vec<PrismSlab>,
+    corner_edges: Vec<CornerEdge>,
 }
 
 impl FusedPrisms {
@@ -319,10 +385,22 @@ impl FusedPrisms {
         &self.slabs
     }
 
-    /// Consumes the result into its two halves.
+    /// The vertical corner edges of every slab, bottom to top.
+    ///
+    /// Together with the slab rings — the horizontal outline at each
+    /// interval — these are the edges that give the drawn body its shape:
+    /// the rings say where it is, the corner edges say where it turns.
+    /// Facets of a flattened arc are excluded; see
+    /// [`UnionPrisms::with_corner_angle_tolerance`].
     #[must_use]
-    pub fn into_parts(self) -> (TriangleMesh, Vec<PrismSlab>) {
-        (self.mesh, self.slabs)
+    pub fn corner_edges(&self) -> &[CornerEdge] {
+        &self.corner_edges
+    }
+
+    /// Consumes the result into its three parts.
+    #[must_use]
+    pub fn into_parts(self) -> (TriangleMesh, Vec<PrismSlab>, Vec<CornerEdge>) {
+        (self.mesh, self.slabs, self.corner_edges)
     }
 }
 
@@ -334,15 +412,18 @@ impl FusedPrisms {
 pub struct UnionPrisms {
     profiles: Vec<PrismProfile>,
     arc_tolerance: f64,
+    corner_angle_tolerance: f64,
 }
 
 impl UnionPrisms {
-    /// Creates the operation with [`DEFAULT_ARC_TOLERANCE`].
+    /// Creates the operation with [`DEFAULT_ARC_TOLERANCE`] and
+    /// [`DEFAULT_CORNER_ANGLE_TOLERANCE`].
     #[must_use]
     pub fn new(profiles: Vec<PrismProfile>) -> Self {
         Self {
             profiles,
             arc_tolerance: DEFAULT_ARC_TOLERANCE,
+            corner_angle_tolerance: DEFAULT_CORNER_ANGLE_TOLERANCE,
         }
     }
 
@@ -354,12 +435,29 @@ impl UnionPrisms {
         self
     }
 
-    /// Runs the z-slab decomposition and builds the fused mesh.
+    /// Sets the turn angle, in radians, above which a boundary vertex
+    /// gets a vertical corner edge. Validated by
+    /// [`UnionPrisms::execute`].
+    ///
+    /// The default is derived from [`DEFAULT_ARC_TOLERANCE`] — see
+    /// [`DEFAULT_CORNER_ANGLE_TOLERANCE`]. A caller that tessellates arcs
+    /// finer than the default can lower this in step to keep shallower
+    /// corners: the arc facet bound falls as `2·√(2·tol / r)`.
+    #[must_use]
+    pub fn with_corner_angle_tolerance(mut self, tolerance: f64) -> Self {
+        self.corner_angle_tolerance = tolerance;
+        self
+    }
+
+    /// Runs the z-slab decomposition and builds the fused mesh, outline
+    /// and corner edges.
     ///
     /// # Errors
     ///
     /// - [`OperationError::InvalidInput`] — the arc tolerance is not
-    ///   finite and strictly positive.
+    ///   finite and strictly positive, or the corner angle tolerance is
+    ///   not finite and inside `0 < t < π` (no turn can exceed π, so a
+    ///   threshold at or above it could never fire).
     /// - [`OperationError::Failed`] — propagated from the 2D arrangement
     ///   engine on degenerate input (bilateral classification still
     ///   ambiguous after ε exhaustion, broken parent topology,
@@ -375,14 +473,30 @@ impl UnionPrisms {
             ))
             .into());
         }
+        if !self.corner_angle_tolerance.is_finite()
+            || self.corner_angle_tolerance <= 0.0
+            || self.corner_angle_tolerance >= std::f64::consts::PI
+        {
+            return Err(OperationError::InvalidInput(format!(
+                "UnionPrisms::execute: corner angle tolerance must be finite and in \
+                 (0, π) radians; got {}",
+                self.corner_angle_tolerance
+            ))
+            .into());
+        }
 
         let intervals = slab::slab_regions(&self.profiles, self.arc_tolerance)?;
         let mesh = mesh::build_mesh(&intervals)?;
-        let slabs = intervals
+        let slabs: Vec<PrismSlab> = intervals
             .into_iter()
             .filter(|slab| !slab.faces().is_empty())
             .collect();
-        Ok(FusedPrisms { mesh, slabs })
+        let corner_edges = corner::corner_edges(&slabs, self.corner_angle_tolerance);
+        Ok(FusedPrisms {
+            mesh,
+            slabs,
+            corner_edges,
+        })
     }
 }
 

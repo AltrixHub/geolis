@@ -1,17 +1,18 @@
 //! Fixtures for [`super::UnionPrisms`].
 //!
-//! Every fixture runs [`assert_mesh_sane`], which pins the invariants the
+//! Every fixture runs [`assert_output_sane`], which pins the invariants the
 //! module docs promise: finite geometry, in-range indices, elevations
-//! drawn only from the breakpoint set, and a positive divergence-theorem
-//! volume. Single-slab fixtures additionally pin combinatorial
-//! watertightness — with one cross-section there are no T-junctions, so
-//! every welded edge must be shared by exactly two triangles.
+//! drawn only from the breakpoint set, a positive divergence-theorem
+//! volume, and corner edges that are vertical and slab-aligned.
+//! Single-slab fixtures additionally pin combinatorial watertightness —
+//! with one cross-section there are no T-junctions, so every welded edge
+//! must be shared by exactly two triangles.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
 
-use super::{FusedPrisms, PrismCut, PrismProfile, PrismRegion, UnionPrisms};
+use super::{FusedPrisms, PrismCut, PrismProfile, PrismRegion, UnionPrisms, DEFAULT_ARC_TOLERANCE};
 use crate::geometry::pline::{Pline, PlineVertex};
 use crate::operations::boolean_2d::{signed_area, PolygonWithHoles};
 use crate::tessellation::TriangleMesh;
@@ -160,8 +161,52 @@ fn cap_area(mesh: &TriangleMesh, z: f64, up: bool) -> f64 {
         .sum()
 }
 
-/// Every invariant the module docs promise for an output mesh.
-fn assert_mesh_sane(out: &FusedPrisms) {
+/// Corner edges as `(x, y, z_base, z_top)`, in emission order.
+fn corner_spans(out: &FusedPrisms) -> Vec<(f64, f64, f64, f64)> {
+    out.corner_edges()
+        .iter()
+        .map(|edge| (edge.base().x, edge.base().y, edge.base().z, edge.top().z))
+        .collect()
+}
+
+/// The corner edges standing at plan position `(x, y)`, as `(z_base, z_top)`.
+fn corners_at(out: &FusedPrisms, x: f64, y: f64) -> Vec<(f64, f64)> {
+    corners_near(out, x, y, EXACT_EPS)
+}
+
+/// [`corners_at`] with an explicit plan tolerance, for positions that a
+/// flattened arc only reaches within its chord deviation.
+fn corners_near(out: &FusedPrisms, x: f64, y: f64, tolerance: f64) -> Vec<(f64, f64)> {
+    corner_spans(out)
+        .into_iter()
+        .filter(|&(ex, ey, _, _)| (ex - x).abs() < tolerance && (ey - y).abs() < tolerance)
+        .map(|(_, _, z0, z1)| (z0, z1))
+        .collect()
+}
+
+/// Asserts each corner edge is vertical and spans exactly one slab.
+fn assert_corner_edges_sane(out: &FusedPrisms) {
+    for edge in out.corner_edges() {
+        let (base, top) = (edge.base(), edge.top());
+        assert!(
+            (base.x - top.x).abs() < EXACT_EPS && (base.y - top.y).abs() < EXACT_EPS,
+            "corner edge {base:?} → {top:?} is not vertical"
+        );
+        assert!(base.x.is_finite() && base.y.is_finite());
+        assert!(top.z > base.z, "corner edge must rise");
+        assert!(
+            out.slabs().iter().any(|slab| {
+                (slab.z_base() - base.z).abs() < EXACT_EPS
+                    && (slab.z_top() - top.z).abs() < EXACT_EPS
+            }),
+            "corner edge {base:?} → {top:?} spans no slab"
+        );
+    }
+}
+
+/// Every invariant the module docs promise for an output.
+fn assert_output_sane(out: &FusedPrisms) {
+    assert_corner_edges_sane(out);
     let mesh = out.mesh();
     assert!(!mesh.indices.is_empty(), "mesh must carry triangles");
     assert_eq!(mesh.vertices.len(), mesh.normals.len());
@@ -262,7 +307,7 @@ fn crossing_prisms_fuse_without_internal_side_faces() {
         prism(vec![bar_x()], 0.0, 3.0),
         prism(vec![bar_y()], 0.0, 3.0),
     ]);
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
 
     assert_eq!(out.slabs().len(), 1, "equal spans give a single slab");
     let faces = out.slabs()[0].faces();
@@ -289,7 +334,7 @@ fn different_heights_step_caps_the_lower_slab() {
         prism(vec![bar_x()], 0.0, 3.0),
         prism(vec![bar_y()], 0.0, 6.0),
     ]);
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
 
     assert_eq!(out.slabs().len(), 2, "the step splits the body in two");
     let lower = &out.slabs()[0];
@@ -323,7 +368,7 @@ fn different_heights_step_caps_the_lower_slab() {
 fn mid_height_cut_pierces_only_its_own_interval() {
     let out = run(vec![prism(vec![rect(0.0, 0.0, 10.0, 10.0)], 0.0, 3.0)
         .with_cut(cut(rect(4.0, 4.0, 6.0, 6.0), 1.0, 2.0))]);
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
 
     assert_eq!(out.slabs().len(), 3, "the cut opens two extra breakpoints");
     let [below, pierced, above] = [&out.slabs()[0], &out.slabs()[1], &out.slabs()[2]];
@@ -363,7 +408,7 @@ fn cut_spanning_a_fused_junction_removes_the_neighbour_material() {
         prism(vec![bar_x()], 0.0, 3.0).with_cut(cut(rect(-0.5, -2.0, 0.5, 2.0), 1.0, 2.0)),
         prism(vec![bar_y()], 0.0, 3.0),
     ]);
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
 
     assert_eq!(out.slabs().len(), 3);
     let pierced = &out.slabs()[1];
@@ -392,7 +437,7 @@ fn curved_profile_fuses_with_a_straight_one() {
     .with_arc_tolerance(0.001)
     .execute()
     .expect("curved union must succeed");
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
 
     assert_eq!(out.slabs().len(), 1);
     let faces = out.slabs()[0].faces();
@@ -441,7 +486,7 @@ fn two_l_shapes_enclose_a_courtyard() {
         prism(vec![lower], 0.0, 3.0),
         prism(vec![upper], 0.0, 3.0),
     ]);
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
 
     assert_eq!(out.slabs().len(), 1);
     let faces = out.slabs()[0].faces();
@@ -497,11 +542,16 @@ fn degenerate_rings_are_skipped_not_rejected() {
         prism(vec![], 0.0, 9.0),
         prism(vec![rect(0.0, 0.0, 2.0, 2.0)], 0.0, 3.0),
     ]);
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
 
     assert_eq!(out.slabs().len(), 1, "only the real prism opens a slab");
     assert!((slab_area(out.slabs()[0].faces()) - 4.0).abs() < EXACT_EPS);
     assert!((signed_volume(out.mesh()) - 12.0).abs() < EXACT_EPS);
+    assert_eq!(
+        out.corner_edges().len(),
+        4,
+        "the skipped rings contribute no arris"
+    );
 }
 
 #[test]
@@ -513,7 +563,7 @@ fn a_degenerate_hole_drops_only_that_hole() {
         PrismRegion::try_from_parts(outer, vec![real_hole, flat_hole]).expect("rings are legal");
 
     let out = run(vec![prism(vec![region], 0.0, 2.0)]);
-    assert_mesh_sane(&out);
+    assert_output_sane(&out);
     assert_eq!(out.slabs()[0].faces()[0].holes.len(), 1);
     assert!((slab_area(out.slabs()[0].faces()) - 96.0).abs() < EXACT_EPS);
 }
@@ -533,7 +583,7 @@ fn a_cut_outside_its_profile_changes_nothing() {
     let plain = run(vec![prism(vec![rect(0.0, 0.0, 4.0, 4.0)], 0.0, 3.0)]);
     let with_cut = run(vec![prism(vec![rect(0.0, 0.0, 4.0, 4.0)], 0.0, 3.0)
         .with_cut(cut(rect(1.0, 1.0, 2.0, 2.0), 5.0, 7.0))]);
-    assert_mesh_sane(&with_cut);
+    assert_output_sane(&with_cut);
 
     assert_eq!(with_cut.slabs().len(), plain.slabs().len());
     assert!((signed_volume(with_cut.mesh()) - signed_volume(plain.mesh())).abs() < EXACT_EPS);
@@ -603,6 +653,260 @@ fn a_non_positive_arc_tolerance_is_rejected() {
     assert!(format!("{err}").contains("arc tolerance"));
 }
 
+// ===== Vertical corner edges =====
+
+#[test]
+fn x_cross_emits_one_corner_edge_per_fused_outline_corner() {
+    let out = run(vec![
+        prism(vec![bar_x()], 0.0, 3.0),
+        prism(vec![bar_y()], 0.0, 3.0),
+    ]);
+    assert_output_sane(&out);
+
+    // Every vertex of the plus outline is a 90° / 270° turn, so all 12
+    // become arrises — and nothing else does.
+    let outline = &out.slabs()[0].faces()[0].outer;
+    assert_eq!(outline.len(), 12);
+    assert_eq!(out.corner_edges().len(), 12);
+
+    let mut expected: Vec<(f64, f64)> = outline.clone();
+    let mut actual: Vec<(f64, f64)> = corner_spans(&out)
+        .into_iter()
+        .map(|(x, y, z0, z1)| {
+            assert!((z0 - 0.0).abs() < EXACT_EPS && (z1 - 3.0).abs() < EXACT_EPS);
+            (x, y)
+        })
+        .collect();
+    let sort = |v: &mut Vec<(f64, f64)>| {
+        v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    };
+    sort(&mut expected);
+    sort(&mut actual);
+    assert_eq!(actual, expected, "corner edges sit on the outline corners");
+}
+
+#[test]
+fn a_step_stacks_the_tall_prisms_corner_edges() {
+    let out = run(vec![
+        prism(vec![bar_x()], 0.0, 3.0),
+        prism(vec![bar_y()], 0.0, 6.0),
+    ]);
+    assert_output_sane(&out);
+
+    // 12 corners on the fused lower slab + 4 on the tall prism alone.
+    assert_eq!(out.corner_edges().len(), 16);
+
+    // The tall prism's own corners survive into both slabs, stacked at
+    // the step elevation rather than merged.
+    for (x, y) in [(1.0, 5.0), (-1.0, 5.0), (1.0, -5.0), (-1.0, -5.0)] {
+        let mut spans = corners_at(&out, x, y);
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(
+            spans,
+            vec![(0.0, 3.0), (3.0, 6.0)],
+            "corner ({x}, {y}) must stack across the step"
+        );
+    }
+
+    // A corner that only the short prism contributes stops at the step.
+    assert_eq!(corners_at(&out, 5.0, 1.0), vec![(0.0, 3.0)]);
+}
+
+#[test]
+fn a_default_tessellated_circle_has_no_corner_edges() {
+    let out = run(vec![prism(vec![circle(0.0, 0.0, 2.0)], 0.0, 3.0)]);
+    assert_output_sane(&out);
+
+    assert_eq!(out.slabs().len(), 1);
+    assert!(
+        out.slabs()[0].faces()[0].outer.len() > 8,
+        "the circle must actually be faceted"
+    );
+    assert!(
+        out.corner_edges().is_empty(),
+        "arc facets are not corners: got {:?}",
+        corner_spans(&out)
+    );
+}
+
+/// Pins the [`super::DEFAULT_CORNER_ANGLE_TOLERANCE`] derivation at its
+/// worst case: the smallest radius the default claims to handle,
+/// `10 × DEFAULT_ARC_TOLERANCE`, where the sagitta criterion allows the
+/// widest chord angle. Still zero corner edges.
+#[test]
+fn the_worst_case_arc_facet_clears_the_default_corner_tolerance() {
+    let radius = 10.0 * DEFAULT_ARC_TOLERANCE;
+    let out = run(vec![prism(vec![circle(0.0, 0.0, radius)], 0.0, 1.0)]);
+    assert_output_sane(&out);
+    assert!(
+        out.corner_edges().is_empty(),
+        "r = 10 × arc tolerance must still tessellate below the threshold: {:?}",
+        corner_spans(&out)
+    );
+}
+
+#[test]
+fn circle_and_bar_emit_corners_only_where_the_boundary_really_turns() {
+    let out = UnionPrisms::new(vec![
+        prism(vec![circle(0.0, 0.0, 2.0)], 0.0, 3.0),
+        prism(vec![rect(-6.0, -0.5, 6.0, 0.5)], 0.0, 3.0),
+    ])
+    .with_arc_tolerance(0.001)
+    .execute()
+    .expect("curved union must succeed");
+    assert_output_sane(&out);
+
+    // 4 bar ends + the 4 points where the bar's flanks cross the circle.
+    // Nothing on the arc itself.
+    assert_eq!(out.corner_edges().len(), 8);
+
+    for (x, y) in [(-6.0, -0.5), (-6.0, 0.5), (6.0, -0.5), (6.0, 0.5)] {
+        assert_eq!(
+            corners_at(&out, x, y).len(),
+            1,
+            "expected exactly one corner edge at the bar end ({x}, {y}); got {:?}",
+            corner_spans(&out)
+        );
+    }
+    // The crossings sit on a CHORD of the flattened circle, so they land
+    // within the arc tolerance of the analytic x = √(2² − 0.5²), not on it.
+    let crossing = 3.75_f64.sqrt();
+    for (x, y) in [
+        (-crossing, -0.5),
+        (-crossing, 0.5),
+        (crossing, -0.5),
+        (crossing, 0.5),
+    ] {
+        assert_eq!(
+            corners_near(&out, x, y, 0.01).len(),
+            1,
+            "expected exactly one corner edge at the crossing ({x}, {y}); got {:?}",
+            corner_spans(&out)
+        );
+    }
+}
+
+#[test]
+fn courtyard_corners_emit_and_collinear_seams_do_not() {
+    let lower = region(&[
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 2.0),
+        (2.0, 2.0),
+        (2.0, 10.0),
+        (0.0, 10.0),
+    ]);
+    let upper = region(&[
+        (10.0, 10.0),
+        (0.0, 10.0),
+        (0.0, 8.0),
+        (8.0, 8.0),
+        (8.0, 0.0),
+        (10.0, 0.0),
+    ]);
+    let out = run(vec![
+        prism(vec![lower], 0.0, 3.0),
+        prism(vec![upper], 0.0, 3.0),
+    ]);
+    assert_output_sane(&out);
+
+    // The outer ring carries 8 vertices but only 4 turns: the two extra
+    // are the collinear seams where the L-shapes' edges met.
+    let face = &out.slabs()[0].faces()[0];
+    assert_eq!(face.outer.len(), 8);
+    assert_eq!(out.corner_edges().len(), 8, "4 outer + 4 courtyard corners");
+
+    for (x, y) in [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)] {
+        assert_eq!(corners_at(&out, x, y).len(), 1, "outer corner ({x}, {y})");
+    }
+    for (x, y) in [(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)] {
+        assert_eq!(corners_at(&out, x, y).len(), 1, "hole corner ({x}, {y})");
+    }
+    // The seam vertices themselves — mid-edge, zero turn — emit nothing.
+    for (x, y) in [(8.0, 0.0), (0.0, 8.0), (10.0, 2.0), (2.0, 10.0)] {
+        assert!(
+            corners_at(&out, x, y).is_empty(),
+            "collinear seam ({x}, {y}) must not emit an edge"
+        );
+    }
+}
+
+#[test]
+fn an_opening_emits_corner_edges_only_in_its_own_slab() {
+    let out = run(vec![prism(vec![rect(0.0, 0.0, 10.0, 10.0)], 0.0, 3.0)
+        .with_cut(cut(rect(4.0, 4.0, 6.0, 6.0), 1.0, 2.0))]);
+    assert_output_sane(&out);
+
+    // 4 outer corners per slab (3 slabs) + the opening's 4, in the
+    // pierced slab only.
+    assert_eq!(out.corner_edges().len(), 16);
+    for (x, y) in [(4.0, 4.0), (6.0, 4.0), (6.0, 6.0), (4.0, 6.0)] {
+        assert_eq!(
+            corners_at(&out, x, y),
+            vec![(1.0, 2.0)],
+            "the reveal at ({x}, {y}) spans only the opening"
+        );
+    }
+    assert_eq!(
+        corners_at(&out, 0.0, 0.0),
+        vec![(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)],
+        "the outer corner is stacked once per slab"
+    );
+}
+
+#[test]
+fn an_empty_body_has_no_corner_edges() {
+    let out = UnionPrisms::new(vec![])
+        .execute()
+        .expect("empty input is Ok");
+    assert!(out.corner_edges().is_empty());
+}
+
+#[test]
+fn a_shallower_corner_tolerance_keeps_shallower_turns() {
+    // A chevron band whose apexes turn by 0.583 rad (~33°): below the
+    // default threshold, above an explicitly lowered one.
+    let chevron = region(&[
+        (0.0, 0.0),
+        (4.0, 1.2),
+        (8.0, 0.0),
+        (8.0, 1.0),
+        (4.0, 2.2),
+        (0.0, 1.0),
+    ]);
+    let profiles = || vec![prism(vec![chevron.clone()], 0.0, 2.0)];
+
+    let coarse = UnionPrisms::new(profiles())
+        .execute()
+        .expect("must succeed");
+    assert_output_sane(&coarse);
+    assert_eq!(coarse.corner_edges().len(), 4, "only the four band ends");
+    assert!(corners_at(&coarse, 4.0, 1.2).is_empty());
+
+    let fine = UnionPrisms::new(profiles())
+        .with_corner_angle_tolerance(0.5)
+        .execute()
+        .expect("must succeed");
+    assert_output_sane(&fine);
+    assert_eq!(fine.corner_edges().len(), 6, "the two apexes join in");
+    assert_eq!(corners_at(&fine, 4.0, 1.2).len(), 1);
+    assert_eq!(corners_at(&fine, 4.0, 2.2).len(), 1);
+}
+
+#[test]
+fn a_non_positive_corner_angle_tolerance_is_rejected() {
+    for bad in [0.0, -0.1, f64::NAN, std::f64::consts::PI, 4.0] {
+        let err = UnionPrisms::new(vec![prism(vec![rect(0.0, 0.0, 1.0, 1.0)], 0.0, 1.0)])
+            .with_corner_angle_tolerance(bad)
+            .execute()
+            .expect_err("must be rejected");
+        assert!(
+            format!("{err}").contains("corner angle tolerance"),
+            "{bad}: {err}"
+        );
+    }
+}
+
 #[test]
 fn union_prisms_is_deterministic() {
     let build = || {
@@ -623,4 +927,5 @@ fn union_prisms_is_deterministic() {
     }
     assert_eq!(first.mesh().indices, second.mesh().indices);
     assert_eq!(first.mesh().vertices.len(), second.mesh().vertices.len());
+    assert_eq!(first.corner_edges(), second.corner_edges());
 }

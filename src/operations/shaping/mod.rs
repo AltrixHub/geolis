@@ -9,6 +9,6 @@ pub use hip_roof::MakeHipRoof;
 pub use loft::MakeLoft;
 pub use revolve::Revolve;
 pub use union_prisms::{
-    FusedPrisms, PrismCut, PrismProfile, PrismRegion, PrismSlab, UnionPrisms,
-    DEFAULT_ARC_TOLERANCE, Z_EPS,
+    CornerEdge, FusedPrisms, PrismCut, PrismProfile, PrismRegion, PrismSlab, UnionPrisms,
+    DEFAULT_ARC_TOLERANCE, DEFAULT_CORNER_ANGLE_TOLERANCE, Z_EPS,
 };
