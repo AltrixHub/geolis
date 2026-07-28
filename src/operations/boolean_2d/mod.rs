@@ -49,10 +49,13 @@ pub use types::{
 };
 pub use union::union_all_with_holes;
 
-/// Crate-internal traced union: per-edge [`engine::SegmentSite`] source
+/// Crate-internal traced ops: per-edge [`engine::SegmentSite`] source
 /// tracking for callers that derive stable per-segment provenance
-/// (`curve_band::CurveBand2D::execute_faces_with_provenance`).
+/// (`curve_band::CurveBand2D::execute_faces_with_provenance` from the
+/// traced union, `curve_band::carve_band_faces` from the traced
+/// subtract).
 pub(crate) use engine::{RingRef, SegmentSite, TracedFace};
+pub(crate) use subtract::subtract_all_with_holes_traced;
 pub(crate) use union::union_all_with_holes_traced;
 
 /// Crate-internal re-export of the engine's segment-segment intersection

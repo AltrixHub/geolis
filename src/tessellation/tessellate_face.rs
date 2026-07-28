@@ -924,7 +924,11 @@ fn add_curve_samples(
 }
 
 /// Inserts a closed polygon as constraint edges into the CDT.
-fn insert_constraint_loop(
+///
+/// Shared with `operations::shaping::union_prisms`, whose horizontal caps
+/// are planar regions with holes and must be triangulated by exactly this
+/// pass (paired with [`classify_interior_faces`]).
+pub(crate) fn insert_constraint_loop(
     cdt: &mut ConstrainedDelaunayTriangulation<SpadePoint2<f64>>,
     points: &[SpadePoint2<f64>],
 ) -> Result<()> {
