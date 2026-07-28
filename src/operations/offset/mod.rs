@@ -6,8 +6,8 @@ mod thicken_face;
 mod wire_offset_2d;
 
 pub use curve_band::{
-    BandFootprint2D, CapEnd, CurveBand2D, FootprintProvenance, OffsetSide, SegmentOrigin,
-    SegmentProvenance,
+    carve_band_faces, BandFootprint2D, CapEnd, CarvedFootprintProvenance, CarvedSegmentProvenance,
+    CurveBand2D, FootprintProvenance, OffsetSide, SegmentOrigin, SegmentProvenance,
 };
 pub use curve_offset_2d::CurveOffset2D;
 pub use face_offset::FaceOffset;

@@ -13,7 +13,7 @@
 use crate::error::Result;
 
 use super::diagnose::assess;
-use super::engine::{run_arrangement, SubtractOracle};
+use super::engine::{run_arrangement_traced, RingRef, SegmentSite, SubtractOracle, TracedFace};
 use super::types::{signed_area, PolygonWithHoles};
 use crate::diagnostics::{InputSnapshot, OpDiagnostic, OpHealth};
 
@@ -48,6 +48,53 @@ pub fn subtract_all_with_holes(
     if subtracts.is_empty() {
         return Ok(vec![base]);
     }
+    // Delegates so the segment-input layout — `[base, subtracts…]`, which
+    // the traced variant's site indices are defined against — is written
+    // once. Mirrors `run_arrangement` delegating to
+    // `run_arrangement_traced`.
+    Ok(subtract_all_with_holes_traced(&base, subtracts)?
+        .into_iter()
+        .map(|t| t.face)
+        .collect())
+}
+
+/// [`subtract_all_with_holes`] variant that additionally reports, per
+/// output edge, the [`SegmentSite`] of the input edge it came from.
+/// Sites are threaded through the arrangement (never recovered by
+/// geometric matching), so they are exact and deterministic.
+///
+/// # Input layout — recovering base vs. cutter
+///
+/// The segment-input list is the untraced op's verbatim
+/// `[base, subtracts[0], subtracts[1], …]`, so a site's `input` field
+/// splits the two roles without any geometric test:
+///
+/// | `site.input` | Origin |
+/// |---|---|
+/// | `0` | ring edge of `base` (`site.ring` / `site.edge` index into it) |
+/// | `1 + c` | ring edge of `subtracts[c]` — a cut edge |
+///
+/// When `base` and a subtract contribute geometrically identical
+/// (coincident collinear) sub-edges, the lexicographically smallest site
+/// wins, so `base` — always input `0` — keeps such an edge.
+///
+/// # Empty subtract list
+///
+/// Mirrors [`subtract_all_with_holes`]: `base` is returned verbatim as a
+/// single face, with the identity site for every ring edge
+/// (`{ input: 0, ring, edge }`). The arrangement is not run, so the
+/// vertices are bit-identical to the input's — no `WALL_EPS` snap.
+///
+/// # Errors
+///
+/// Same failure modes as [`subtract_all_with_holes`].
+pub(crate) fn subtract_all_with_holes_traced(
+    base: &PolygonWithHoles,
+    subtracts: &[PolygonWithHoles],
+) -> Result<Vec<TracedFace>> {
+    if subtracts.is_empty() {
+        return Ok(vec![identity_trace(base)]);
+    }
 
     // Feed every ring of base + subtracts into the arrangement so their
     // boundaries split each other where they cross.
@@ -55,11 +102,32 @@ pub fn subtract_all_with_holes(
     segment_inputs.push(base.clone());
     segment_inputs.extend(subtracts.iter().cloned());
 
-    let oracle = SubtractOracle {
-        base: &base,
-        subtracts,
+    let oracle = SubtractOracle { base, subtracts };
+    run_arrangement_traced(&segment_inputs, &oracle)
+}
+
+/// The traced face a no-op subtract produces: `base` itself, with each
+/// ring edge attributed to the ring edge it *is*.
+fn identity_trace(base: &PolygonWithHoles) -> TracedFace {
+    let ring_sites = |ring: RingRef, len: usize| -> Vec<SegmentSite> {
+        (0..len)
+            .map(|edge| SegmentSite {
+                input: 0,
+                ring,
+                edge,
+            })
+            .collect()
     };
-    run_arrangement(&segment_inputs, &oracle)
+    TracedFace {
+        face: base.clone(),
+        outer_sites: ring_sites(RingRef::Outer, base.outer.len()),
+        hole_sites: base
+            .holes
+            .iter()
+            .enumerate()
+            .map(|(h, ring)| ring_sites(RingRef::Hole(h), ring.len()))
+            .collect(),
+    }
 }
 
 /// [`subtract_all_with_holes`] with a health verdict attached for diagnostics.
@@ -153,6 +221,144 @@ mod tests {
         let snap = d.inputs.expect("snapshot attached on non-Ok");
         assert_eq!(snap.op, "boolean_2d::subtract");
         assert!(snap.summary.iter().any(|(k, _)| k == "base_area"));
+    }
+
+    // ===== Traced subtract =====
+
+    /// Every site of a traced result, flattened over all faces and rings.
+    fn all_sites(faces: &[TracedFace]) -> Vec<SegmentSite> {
+        faces
+            .iter()
+            .flat_map(|f| {
+                f.outer_sites
+                    .iter()
+                    .chain(f.hole_sites.iter().flatten())
+                    .copied()
+            })
+            .collect()
+    }
+
+    /// Sites must align 1:1 with the vertex count of every ring.
+    fn assert_sites_aligned(faces: &[TracedFace]) {
+        for f in faces {
+            assert_eq!(
+                f.face.outer.len(),
+                f.outer_sites.len(),
+                "outer sites must align with outer ring"
+            );
+            assert_eq!(f.face.holes.len(), f.hole_sites.len());
+            for (h, sites) in f.hole_sites.iter().enumerate() {
+                assert_eq!(f.face.holes[h].len(), sites.len());
+            }
+        }
+    }
+
+    #[test]
+    fn traced_empty_list_returns_identity_sites() {
+        let base = PolygonWithHoles {
+            outer: rect(0.0, 0.0, 10.0, 10.0),
+            holes: vec![cw_rect(3.0, 3.0, 4.0, 4.0)],
+        };
+        let traced = subtract_all_with_holes_traced(&base, &[]).expect("subtract must succeed");
+        assert_eq!(traced.len(), 1);
+        // Base returned verbatim — no arrangement, so no snap perturbation.
+        assert_eq!(traced[0].face, base);
+        assert_sites_aligned(&traced);
+        for (edge, site) in traced[0].outer_sites.iter().enumerate() {
+            assert_eq!(
+                *site,
+                SegmentSite {
+                    input: 0,
+                    ring: RingRef::Outer,
+                    edge
+                }
+            );
+        }
+        for (edge, site) in traced[0].hole_sites[0].iter().enumerate() {
+            assert_eq!(
+                *site,
+                SegmentSite {
+                    input: 0,
+                    ring: RingRef::Hole(0),
+                    edge
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn traced_corner_cut_splits_sites_into_base_and_cutter() {
+        // Base 10x10 minus a 9x9 corner block → L-shape whose boundary is
+        // part base ring, part cutter ring.
+        let base = pwh_no_holes(rect(0.0, 0.0, 10.0, 10.0));
+        let cut = pwh_no_holes(rect(1.0, 1.0, 9.0, 9.0));
+        let traced = subtract_all_with_holes_traced(&base, std::slice::from_ref(&cut))
+            .expect("subtract must succeed");
+        assert_eq!(traced.len(), 1);
+        assert_sites_aligned(&traced);
+
+        let sites = all_sites(&traced);
+        let from_base = sites.iter().filter(|s| s.input == 0).count();
+        let from_cut = sites.iter().filter(|s| s.input == 1).count();
+        // The L has 6 edges: 4 lie on the base's rings, 2 on the cutter's.
+        assert_eq!(traced[0].face.outer.len(), 6);
+        assert_eq!(from_base, 4, "sites={sites:?}");
+        assert_eq!(from_cut, 2, "sites={sites:?}");
+        assert!(
+            sites.iter().all(|s| s.input <= 1),
+            "input index must stay within [base, cutter]"
+        );
+    }
+
+    #[test]
+    fn traced_two_cutters_report_distinct_input_indices() {
+        // Two disjoint through-cuts split the base into three pieces; each
+        // cut's edges must name its own `input` slot (1 and 2).
+        let base = pwh_no_holes(rect(0.0, 0.0, 12.0, 4.0));
+        let cut_a = pwh_no_holes(rect(3.0, -1.0, 1.0, 6.0));
+        let cut_b = pwh_no_holes(rect(8.0, -1.0, 1.0, 6.0));
+        let traced =
+            subtract_all_with_holes_traced(&base, &[cut_a, cut_b]).expect("subtract must succeed");
+        assert_eq!(traced.len(), 3, "two through-cuts leave three pieces");
+        assert_sites_aligned(&traced);
+
+        let sites = all_sites(&traced);
+        for input in [0usize, 1, 2] {
+            assert!(
+                sites.iter().any(|s| s.input == input),
+                "input {input} must contribute at least one output edge; sites={sites:?}"
+            );
+        }
+        assert!(sites.iter().all(|s| s.input <= 2));
+    }
+
+    #[test]
+    fn traced_coincident_edge_is_attributed_to_base() {
+        // The cutter's left wall is exactly the base's left edge (x = 0), so
+        // that output edge is contributed by both inputs. The dedup rule
+        // gives it to the lexicographically smallest site — the base.
+        let base = pwh_no_holes(rect(0.0, 0.0, 10.0, 4.0));
+        let cut = pwh_no_holes(rect(0.0, 0.0, 4.0, 4.0));
+        let traced = subtract_all_with_holes_traced(&base, std::slice::from_ref(&cut))
+            .expect("subtract must succeed");
+        assert_eq!(traced.len(), 1);
+        assert_sites_aligned(&traced);
+        // The surviving 6x4 strip's left edge is at x = 4 (the cutter's right
+        // wall); the shared x = 0 wall is gone entirely. What matters is that
+        // no output edge is attributed to a cutter ring that the base also
+        // supplied — i.e. every retained x = 0 style coincidence is base's.
+        let base_x = traced[0]
+            .face
+            .outer
+            .iter()
+            .zip(&traced[0].outer_sites)
+            .filter(|(p, _)| p.0.abs() < 1e-9)
+            .map(|(_, s)| s.input)
+            .collect::<Vec<_>>();
+        assert!(
+            base_x.iter().all(|&i| i == 0),
+            "coincident base/cutter edges must stay attributed to the base"
+        );
     }
 
     #[test]
