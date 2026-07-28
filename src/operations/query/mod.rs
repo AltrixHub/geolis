@@ -8,6 +8,7 @@ mod is_valid;
 mod length;
 mod point_on_curve;
 mod point_on_surface;
+mod surface_angle;
 mod volume;
 
 pub use area::Area;
@@ -20,4 +21,5 @@ pub use is_valid::IsValid;
 pub use length::Length;
 pub use point_on_curve::PointOnCurve;
 pub use point_on_surface::PointOnSurface;
+pub use surface_angle::SurfaceAngleAcrossEdge;
 pub use volume::Volume;
