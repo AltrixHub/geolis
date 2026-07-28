@@ -2,7 +2,7 @@ use crate::math::arc_2d::{arc_from_bulge, arc_point_at};
 use crate::math::Point3;
 
 /// Self-intersection detection primitives. `find_self_intersection` is
-/// reused by the `WallOutline2D` test oracle (P3.1 S2) and by the
+/// reused by the `CurveBand2D` test oracle (P3.1 S2) and by the
 /// figure-8 / multi-self-crossing fixture assertions; consequently the
 /// module is test-only — `polygon_union` no longer relies on it for
 /// production output.
@@ -221,22 +221,58 @@ impl Pline {
     }
 }
 
+/// Hard upper bound on the number of chords a single arc segment
+/// tessellates into.
+///
+/// The chordal-tolerance criterion alone is unbounded: the required
+/// count grows as `sweep · √(r / 8·tolerance)`, so a near-degenerate
+/// bulge (radius → ∞ while the sweep stays ≈ 2π, e.g. an arc through
+/// three almost-collinear points) asks for millions of chords — and
+/// once `tolerance / radius` drops below f64 precision the naive
+/// `acos(1 − x)` collapses to `0`, the count overflows, and the cast
+/// saturates at `u32::MAX`. Consumers of the tessellated polyline
+/// (offset stroke, boolean arrangement, CDT) are quadratic in this
+/// count, so one degenerate arc froze the application.
+///
+/// `256` matches the default per-curve cap of the `tessellation`
+/// module (`TessellationParams::n`), keeping both arc samplers on the
+/// same contract: tolerance-driven below the cap, capped fidelity
+/// beyond it.
+pub const MAX_ARC_SUBDIVISIONS: u32 = 256;
+
 /// Computes the number of line segments needed to approximate an arc
-/// within the given tolerance.
+/// within the given tolerance, capped at [`MAX_ARC_SUBDIVISIONS`].
 fn arc_subdivision_count(radius: f64, abs_sweep: f64, tolerance: f64) -> u32 {
+    if !radius.is_finite() || !abs_sweep.is_finite() {
+        return 1;
+    }
     if radius < 1e-12 || abs_sweep < 1e-12 || tolerance <= 0.0 {
         return 1;
     }
-    // From the sagitta formula: sagitta = r * (1 - cos(θ/2))
-    // For a given tolerance: θ = 2 * acos(1 - tolerance/r)
-    let max_angle = if tolerance >= radius {
+    // Sagitta criterion: largest chord angle θ with r·(1 − cos(θ/2)) ≤
+    // tolerance. The closed form θ = 2·acos(1 − tol/r) loses every
+    // significant digit once tol/r approaches f64 epsilon (1 − tol/r
+    // rounds to 1.0, θ to 0). Its series expansion 2·√(2·tol/r) is
+    // exact in that regime and within 1% of the closed form up to
+    // tol/r ≈ 0.1, so branch there.
+    let ratio = tolerance / radius;
+    let max_angle = if ratio >= 1.0 {
         std::f64::consts::PI
+    } else if ratio > 0.1 {
+        2.0 * (1.0 - ratio).acos()
     } else {
-        2.0 * (1.0 - tolerance / radius).acos()
+        2.0 * (2.0 * ratio).sqrt()
     };
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let n = (abs_sweep / max_angle).ceil() as u32;
-    n.max(1)
+    let n = (abs_sweep / max_angle).ceil();
+    if n >= 1.0 {
+        // f64 → u32 saturates on overflow; the cap bounds it either way.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = (n as u32).min(MAX_ARC_SUBDIVISIONS);
+        n
+    } else {
+        // NaN (0/0-style degenerate input) or sub-1 count.
+        1
+    }
 }
 
 #[cfg(test)]
@@ -513,5 +549,63 @@ mod tests {
         // Small tolerance → more subdivisions.
         let n = arc_subdivision_count(1.0, std::f64::consts::PI, 0.001);
         assert!(n > 10, "expected many subdivisions, got {n}");
+    }
+
+    /// Degenerate-boundary pin (curved-wall freeze): the subdivision
+    /// count must stay bounded for EVERY finite radius, including the
+    /// regime where `tolerance / radius` falls below f64 precision and
+    /// the naive `acos(1 − x)` collapses to zero (which used to turn
+    /// the count into `u32::MAX` and freeze every downstream consumer).
+    #[test]
+    fn arc_subdivision_count_bounded_across_degenerate_radii() {
+        let sweep = 2.0 * std::f64::consts::PI;
+        let mut prev = 0;
+        for exp in 0..=300 {
+            let radius = 10.0_f64.powi(exp);
+            let n = arc_subdivision_count(radius, sweep, 0.018);
+            assert!(
+                (1..=MAX_ARC_SUBDIVISIONS).contains(&n),
+                "r=1e{exp}: count {n} out of [1, {MAX_ARC_SUBDIVISIONS}]"
+            );
+            assert!(
+                n >= prev.min(MAX_ARC_SUBDIVISIONS),
+                "r=1e{exp}: count {n} regressed below previous {prev}"
+            );
+            prev = n;
+        }
+        // Non-finite inputs are degenerate, not fuel for a loop.
+        assert_eq!(arc_subdivision_count(f64::INFINITY, sweep, 0.018), 1);
+        assert_eq!(arc_subdivision_count(f64::NAN, sweep, 0.018), 1);
+        assert_eq!(arc_subdivision_count(1.0, f64::NAN, 0.018), 1);
+    }
+
+    /// End-to-end pin on the same boundary: tessellating an arc whose
+    /// bulge makes the radius astronomically large (the arc through
+    /// three almost-collinear points) terminates with a bounded point
+    /// count and finite coordinates — for the whole magnitude ladder up
+    /// to `f64::MAX`-scale bulges.
+    #[test]
+    fn to_points_extreme_bulge_stays_bounded_and_finite() {
+        for bulge in [1.0, 1e3, 1e6, 1e9, 1e12, 1e15, 1e100, 1e300] {
+            for signed in [bulge, -bulge] {
+                let pline = Pline {
+                    vertices: vec![
+                        PlineVertex::new(0.0, 0.0, signed),
+                        PlineVertex::line(4.0, 0.0),
+                    ],
+                    closed: false,
+                };
+                let pts = pline.to_points(0.018);
+                assert!(
+                    pts.len() <= MAX_ARC_SUBDIVISIONS as usize + 1,
+                    "bulge={signed:e}: {} points exceed the cap",
+                    pts.len()
+                );
+                assert!(
+                    pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()),
+                    "bulge={signed:e}: non-finite tessellation point"
+                );
+            }
+        }
     }
 }

@@ -271,6 +271,7 @@ pub(crate) fn run_arrangement_traced(
     segment_inputs: &[PolygonWithHoles],
     oracle: &impl FillOracle,
 ) -> Result<Vec<TracedFace>> {
+    validate_coordinate_envelope(segment_inputs)?;
     let raw_segments = collect_raw_segments(segment_inputs);
     if raw_segments.is_empty() {
         return Ok(Vec::new());
@@ -377,6 +378,43 @@ fn ensure_cdt_safe<'a>(faces: impl Iterator<Item = &'a PolygonWithHoles>) -> Res
 // === Internals ===
 
 type RawSegment = ((f64, f64), (f64, f64));
+
+/// Largest absolute coordinate the arrangement accepts.
+///
+/// The vertex-snap grid quantizes coordinates into `WALL_EPS`-sized
+/// cells keyed by `i64`, and the neighbor walk offsets those keys by
+/// ±1. Coordinates beyond this envelope either quantize past `i64`
+/// range (the cast saturates, the ±1 offset overflows) or land where
+/// one f64 ulp already exceeds `WALL_EPS`, so snapping cannot be
+/// meaningful. `1e12` m keeps a full decade of headroom below both
+/// limits while comfortably covering any real model.
+pub const MAX_ARRANGEMENT_COORD: f64 = 1e12;
+
+/// Typed refusal for inputs outside the numeric envelope the snap grid
+/// can represent. Rejecting up front turns what would be a debug-build
+/// integer-overflow panic (release: silently corrupted cell merges)
+/// into a recoverable operation error.
+fn validate_coordinate_envelope(inputs: &[PolygonWithHoles]) -> Result<()> {
+    for pwh in inputs {
+        let rings = std::iter::once(&pwh.outer).chain(pwh.holes.iter());
+        for ring in rings {
+            for &(x, y) in ring {
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || x.abs() > MAX_ARRANGEMENT_COORD
+                    || y.abs() > MAX_ARRANGEMENT_COORD
+                {
+                    return Err(OperationError::InvalidInput(format!(
+                        "boolean_2d: vertex ({x}, {y}) outside the representable \
+                         coordinate envelope (|coord| <= {MAX_ARRANGEMENT_COORD:e})"
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 fn collect_raw_segments(inputs: &[PolygonWithHoles]) -> Vec<(RawSegment, SegmentSite)> {
     let mut out = Vec::new();
@@ -1214,6 +1252,34 @@ mod tests {
 
     fn cw_rect(x: f64, y: f64, w: f64, h: f64) -> Polygon {
         vec![(x, y), (x, y + h), (x + w, y + h), (x + w, y)]
+    }
+
+    /// Degenerate-boundary pin (curved-wall freeze): coordinates past
+    /// the snap grid's representable envelope are a typed refusal, not
+    /// a debug-overflow panic in the cell-neighbor walk (release build:
+    /// silently aliased cell merges).
+    #[test]
+    fn arrangement_refuses_out_of_envelope_coordinates() {
+        for bad in [2.0 * MAX_ARRANGEMENT_COORD, 1e300, f64::INFINITY, f64::NAN] {
+            let poly = PolygonWithHoles {
+                outer: vec![(0.0, 0.0), (bad, 0.0), (bad, 1.0)],
+                holes: Vec::new(),
+            };
+            let inputs = vec![poly];
+            let oracle = UnionOracle { inputs: &inputs };
+            let result = run_arrangement(&inputs, &oracle);
+            assert!(
+                result.is_err(),
+                "coordinate {bad:e} must be refused, got {result:?}"
+            );
+        }
+        // The envelope boundary itself stays accepted.
+        let inputs = vec![PolygonWithHoles {
+            outer: ccw_rect(0.0, 0.0, 10.0, 10.0),
+            holes: Vec::new(),
+        }];
+        let oracle = UnionOracle { inputs: &inputs };
+        assert!(run_arrangement(&inputs, &oracle).is_ok());
     }
 
     #[test]

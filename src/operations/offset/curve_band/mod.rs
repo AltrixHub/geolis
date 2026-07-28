@@ -1,3 +1,4 @@
+mod carve;
 pub(crate) mod polygon_union;
 mod provenance;
 mod stroke;
@@ -9,10 +10,11 @@ use polygon_union::{point_in_polygon_class, seg_seg_intersect, PointClass, WALL_
 use provenance::{footprint_provenances, EdgeSource, InputEdgeSources};
 use stroke::{StrokeLabels, StrokeOrigin};
 
+pub use carve::{carve_band_faces, CarvedFootprintProvenance, CarvedSegmentProvenance};
 pub use provenance::{CapEnd, FootprintProvenance, OffsetSide, SegmentOrigin, SegmentProvenance};
 
-/// A planar wall face described by an outer boundary and zero or more holes,
-/// as produced by [`WallOutline2D::execute_faces`] and consumed by downstream
+/// A planar band face described by an outer boundary and zero or more holes,
+/// as produced by [`CurveBand2D::execute_faces`] and consumed by downstream
 /// extrusion.
 ///
 /// # Winding contract
@@ -21,17 +23,17 @@ pub use provenance::{CapEnd, FootprintProvenance, OffsetSide, SegmentOrigin, Seg
 /// - Every hole is fully contained in `outer`.
 /// - Sibling holes are non-overlapping.
 /// - Every `PlineVertex` has `bulge == 0` (line segments only — see
-///   [`WallFootprint2D::try_from_parts`]).
+///   [`BandFootprint2D::try_from_parts`]).
 ///
 /// The contract is enforced by `assemble_faces` for outputs of `execute_faces`,
-/// and by [`WallFootprint2D::try_from_parts`] for cross-crate construction.
+/// and by [`BandFootprint2D::try_from_parts`] for cross-crate construction.
 #[derive(Debug, Clone)]
-pub struct WallFootprint2D {
+pub struct BandFootprint2D {
     outer: Pline,
     holes: Vec<Pline>,
 }
 
-impl WallFootprint2D {
+impl BandFootprint2D {
     #[must_use]
     pub fn outer(&self) -> &Pline {
         &self.outer
@@ -83,7 +85,7 @@ impl WallFootprint2D {
         // signed area is meaningless).
         if let Some((i, j)) = ring_self_intersection(&outer_pts) {
             return Err(OperationError::InvalidInput(format!(
-                "WallFootprint2D::try_from_parts: outer is self-intersecting \
+                "BandFootprint2D::try_from_parts: outer is self-intersecting \
                  between edges {i} and {j}"
             ))
             .into());
@@ -92,7 +94,7 @@ impl WallFootprint2D {
         // 5
         if outer_area <= WALL_EPS_SQ {
             return Err(OperationError::InvalidInput(format!(
-                "WallFootprint2D::try_from_parts: outer must be CCW with \
+                "BandFootprint2D::try_from_parts: outer must be CCW with \
                  signed_area > WALL_EPS_SQ; got {outer_area}"
             ))
             .into());
@@ -103,7 +105,7 @@ impl WallFootprint2D {
             // 8: hole simple (before winding)
             if let Some((i, j)) = ring_self_intersection(hp) {
                 return Err(OperationError::InvalidInput(format!(
-                    "WallFootprint2D::try_from_parts: hole[{hi}] is \
+                    "BandFootprint2D::try_from_parts: hole[{hi}] is \
                      self-intersecting between edges {i} and {j}"
                 ))
                 .into());
@@ -112,7 +114,7 @@ impl WallFootprint2D {
             // 6
             if hole_area >= -WALL_EPS_SQ {
                 return Err(OperationError::InvalidInput(format!(
-                    "WallFootprint2D::try_from_parts: hole[{hi}] must be CW \
+                    "BandFootprint2D::try_from_parts: hole[{hi}] must be CW \
                      with signed_area < -WALL_EPS_SQ; got {hole_area}"
                 ))
                 .into());
@@ -123,7 +125,7 @@ impl WallFootprint2D {
                     PointClass::Inside => {}
                     other => {
                         return Err(OperationError::InvalidInput(format!(
-                            "WallFootprint2D::try_from_parts: hole[{hi}] \
+                            "BandFootprint2D::try_from_parts: hole[{hi}] \
                              vertex {vi} ({p:?}) is not strictly inside outer \
                              (got {other:?})"
                         ))
@@ -134,7 +136,7 @@ impl WallFootprint2D {
             // 10: no hole edge crosses any outer edge
             if let Some((i, j)) = rings_edges_cross(hp, &outer_pts) {
                 return Err(OperationError::InvalidInput(format!(
-                    "WallFootprint2D::try_from_parts: hole[{hi}] edge {i} \
+                    "BandFootprint2D::try_from_parts: hole[{hi}] edge {i} \
                      intersects outer edge {j}"
                 ))
                 .into());
@@ -147,7 +149,7 @@ impl WallFootprint2D {
                 for (vi, &p) in hole_pts[hi].iter().enumerate() {
                     if matches!(point_in_polygon_class(p, &hole_pts[hj]), PointClass::Inside) {
                         return Err(OperationError::InvalidInput(format!(
-                            "WallFootprint2D::try_from_parts: hole[{hi}] \
+                            "BandFootprint2D::try_from_parts: hole[{hi}] \
                              vertex {vi} ({p:?}) lies inside hole[{hj}] \
                              (overlapping holes)"
                         ))
@@ -156,7 +158,7 @@ impl WallFootprint2D {
                 }
                 if let Some((i, j)) = rings_edges_cross(&hole_pts[hi], &hole_pts[hj]) {
                     return Err(OperationError::InvalidInput(format!(
-                        "WallFootprint2D::try_from_parts: hole[{hi}] edge \
+                        "BandFootprint2D::try_from_parts: hole[{hi}] edge \
                          {i} intersects hole[{hj}] edge {j}"
                     ))
                     .into());
@@ -214,13 +216,13 @@ fn polygon_signed_area(pts: &[(f64, f64)]) -> f64 {
 fn validate_ring(p: &Pline, label: &str) -> Result<()> {
     if !p.closed {
         return Err(OperationError::InvalidInput(format!(
-            "WallFootprint2D::try_from_parts: {label} must have closed = true"
+            "BandFootprint2D::try_from_parts: {label} must have closed = true"
         ))
         .into());
     }
     if p.vertices.len() < 3 {
         return Err(OperationError::InvalidInput(format!(
-            "WallFootprint2D::try_from_parts: {label} must have at least 3 \
+            "BandFootprint2D::try_from_parts: {label} must have at least 3 \
              vertices; got {}",
             p.vertices.len()
         ))
@@ -229,7 +231,7 @@ fn validate_ring(p: &Pline, label: &str) -> Result<()> {
     for (i, v) in p.vertices.iter().enumerate() {
         if v.bulge.abs() > 0.0 {
             return Err(OperationError::InvalidInput(format!(
-                "WallFootprint2D::try_from_parts: {label} vertex {i} has \
+                "BandFootprint2D::try_from_parts: {label} vertex {i} has \
                  non-zero bulge {} — only line segments are accepted",
                 v.bulge
             ))
@@ -244,7 +246,7 @@ fn validate_ring(p: &Pline, label: &str) -> Result<()> {
         let dy = b.y - a.y;
         if dx * dx + dy * dy < WALL_EPS * WALL_EPS {
             return Err(OperationError::InvalidInput(format!(
-                "WallFootprint2D::try_from_parts: {label} has zero-length \
+                "BandFootprint2D::try_from_parts: {label} has zero-length \
                  edge between vertex {i} and vertex {} (within WALL_EPS)",
                 (i + 1) % n
             ))
@@ -299,27 +301,27 @@ fn rings_edges_cross(a: &[(f64, f64)], b: &[(f64, f64)]) -> Option<(usize, usize
     None
 }
 
-/// Generates wall outlines from one or more centerline polylines.
+/// Strokes one or more baseline polylines into closed band faces.
 ///
-/// Given a collection of `Pline`s representing wall centerlines (potentially with
+/// Given a collection of `Pline`s representing band baselines (potentially with
 /// self-intersecting paths), produces closed outline polygons at the
 /// specified distances. When multiple polylines are provided,
 /// their segments are merged into a single network so that intersections
-/// between separate walls are properly trimmed.
+/// between separate baselines are properly trimmed.
 ///
-/// The wall material spans from `left_width` to the left of each segment to
+/// The band material spans from `left_width` to the left of each segment to
 /// `right_width` to the right (using the segment's forward direction).
-/// Use [`WallOutline2D::new`] for a centred wall (`left == right == half_thickness`)
-/// or [`WallOutline2D::new_asymmetric`] for a wall aligned to one side of the baseline.
+/// Use [`CurveBand2D::new`] for a centred band (`left == right == half_thickness`)
+/// or [`CurveBand2D::new_asymmetric`] for a band aligned to one side of the baseline.
 #[derive(Debug)]
-pub struct WallOutline2D {
+pub struct CurveBand2D {
     plines: Vec<Pline>,
     left_width: f64,
     right_width: f64,
 }
 
-impl WallOutline2D {
-    /// Creates a centred wall outline (equal offset on both sides of the baseline).
+impl CurveBand2D {
+    /// Creates a centred band (equal offset on both sides of the baseline).
     #[must_use]
     pub fn new(plines: Vec<Pline>, half_width: f64) -> Self {
         Self {
@@ -329,12 +331,12 @@ impl WallOutline2D {
         }
     }
 
-    /// Creates a wall outline with independent left and right offsets.
+    /// Creates a band with independent left and right offsets.
     ///
-    /// - `left_width = 0, right_width = thickness`: baseline is the left (inner) boundary;
-    ///   wall material extends entirely to the right.
-    /// - `left_width = thickness, right_width = 0`: baseline is the right (outer) boundary;
-    ///   wall material extends entirely to the left.
+    /// - `left_width = 0, right_width = thickness`: baseline is the left boundary;
+    ///   band material extends entirely to the right.
+    /// - `left_width = thickness, right_width = 0`: baseline is the right boundary;
+    ///   band material extends entirely to the left.
     #[must_use]
     pub fn new_asymmetric(plines: Vec<Pline>, left_width: f64, right_width: f64) -> Self {
         Self {
@@ -344,12 +346,12 @@ impl WallOutline2D {
         }
     }
 
-    /// Executes the wall outline generation, returning typed face topology.
+    /// Executes the band generation, returning typed face topology.
     ///
-    /// Each returned [`WallFootprint2D`] represents one connected wall-material
+    /// Each returned [`BandFootprint2D`] represents one connected band-material
     /// face: a CCW outer boundary (`signed_area > 0`) plus zero or more CW hole
     /// boundaries (`signed_area < 0`). Nested islands at depth ≥ 2 are emitted
-    /// as separate `WallFootprint2D` entries (each filled face becomes one
+    /// as separate `BandFootprint2D` entries (each filled face becomes one
     /// footprint), so the output is always flat-holes-only per face.
     ///
     /// # Output guarantee
@@ -374,7 +376,7 @@ impl WallOutline2D {
     ///   `polygon_union` arrangement / face-assembly stage detected
     ///   broken topology (ambiguous half-edge classification, witness on
     ///   another loop's boundary, orientation/depth mismatch).
-    pub fn execute_faces(&self) -> Result<Vec<WallFootprint2D>> {
+    pub fn execute_faces(&self) -> Result<Vec<BandFootprint2D>> {
         Ok(self
             .execute_faces_with_provenance()?
             .into_iter()
@@ -419,7 +421,7 @@ impl WallOutline2D {
     /// Same failure modes as [`Self::execute_faces`].
     pub fn execute_faces_with_provenance(
         &self,
-    ) -> Result<Vec<(WallFootprint2D, FootprintProvenance)>> {
+    ) -> Result<Vec<(BandFootprint2D, FootprintProvenance)>> {
         let valid: Vec<(usize, &Pline)> = self
             .plines
             .iter()
@@ -438,7 +440,7 @@ impl WallOutline2D {
             && self.right_width.abs() < crate::math::TOLERANCE
         {
             return Err(OperationError::InvalidInput(
-                "WallOutline2D::execute_faces requires non-zero width on at \
+                "CurveBand2D::execute_faces requires non-zero width on at \
                  least one side; zero-width input has no footprint to extrude"
                     .to_owned(),
             )
@@ -528,7 +530,7 @@ impl WallOutline2D {
             .zip(provenances)
             .map(|(t, p)| {
                 (
-                    WallFootprint2D::from_polygon_with_holes_unchecked(t.face),
+                    BandFootprint2D::from_polygon_with_holes_unchecked(t.face),
                     p,
                 )
             })
@@ -593,8 +595,8 @@ mod tests {
     use crate::math::distance_2d::point_to_segment_dist;
     use crate::math::Point3;
 
-    fn run_outline_faces(plines: Vec<Pline>, d: f64) -> Vec<WallFootprint2D> {
-        WallOutline2D::new(plines, d).execute_faces().unwrap()
+    fn run_outline_faces(plines: Vec<Pline>, d: f64) -> Vec<BandFootprint2D> {
+        CurveBand2D::new(plines, d).execute_faces().unwrap()
     }
 
     /// Legacy flat-Pline view for tests written against the pre-`execute_faces`
@@ -1032,9 +1034,9 @@ mod tests {
             "self-intersecting centerline should still produce boundaries"
         );
 
-        // Use the crate-rooted path — `wall_outline/tests` is at
-        // `crate::operations::offset::wall_outline::tests`; its `super`
-        // is `wall_outline`, not `pline`. Only `crate::geometry::pline::*`
+        // Use the crate-rooted path — `curve_band/tests` is at
+        // `crate::operations::offset::curve_band::tests`; its `super`
+        // is `curve_band`, not `pline`. Only `crate::geometry::pline::*`
         // resolves correctly.
         for (idx, b) in result.iter().enumerate() {
             assert!(
@@ -1061,7 +1063,7 @@ mod tests {
     /// Before T6-T10, this case panicked `spade::cdt` with a 2nd-crossing
     /// input.
     ///
-    /// Success criterion: `WallOutline2D::execute` returns Ok(non-empty)
+    /// Success criterion: `CurveBand2D::execute` returns Ok(non-empty)
     /// AND every output boundary is intra-simple. The set-level CDT-safe
     /// guarantee is enforced inside `polygon_union::union_all_with_holes`
     /// by a `#[cfg(debug_assertions)]` post-condition that re-runs spade's
@@ -1196,7 +1198,7 @@ mod tests {
     // -----------------------------------------------------------------
     // P3.1 — Sample-based "outline only" oracle + fixtures
     //
-    // Phase 3 contract: WallOutline2D::execute output edges must be
+    // Phase 3 contract: CurveBand2D::execute output edges must be
     // exactly the boolean-union outline of the stroke-expanded inputs.
     // For every directed edge of every output boundary, "filled" material
     // must be on EXACTLY one side at a small perpendicular ε. The S1
@@ -1466,9 +1468,9 @@ mod tests {
 
     fn run_p3_oracle(plines: Vec<Pline>, half_width: f64, fixture: &str) -> Vec<Pline> {
         let inputs = build_oracle_inputs(&plines, half_width);
-        let faces = WallOutline2D::new(plines, half_width)
+        let faces = CurveBand2D::new(plines, half_width)
             .execute_faces()
-            .unwrap_or_else(|e| panic!("[{fixture}] WallOutline2D::execute_faces failed: {e}"));
+            .unwrap_or_else(|e| panic!("[{fixture}] CurveBand2D::execute_faces failed: {e}"));
         let outputs: Vec<Pline> = faces
             .into_iter()
             .flat_map(|f| {
@@ -1478,7 +1480,7 @@ mod tests {
             .collect();
         assert!(
             !outputs.is_empty(),
-            "[{fixture}] WallOutline2D produced no boundaries"
+            "[{fixture}] CurveBand2D produced no boundaries"
         );
         assert_s1_bilateral_outline_only(&outputs, &inputs, half_width, fixture);
         assert_s2_no_transverse_crossings(&outputs, fixture);
@@ -1762,7 +1764,7 @@ mod tests {
             &[Point3::new(0.0, 0.0, 0.0), Point3::new(5.0, 0.0, 0.0)],
             false,
         );
-        let err = WallOutline2D::new(vec![p], 0.0)
+        let err = CurveBand2D::new(vec![p], 0.0)
             .execute_faces()
             .expect_err("zero width must Err");
         let msg = format!("{err}");
@@ -1797,10 +1799,10 @@ mod tests {
 
         // Just verify it returns in finite time. Empty / non-empty result
         // is both acceptable — the bug is non-termination, not output shape.
-        let _ = WallOutline2D::new(vec![pline], half_thickness).execute_faces();
+        let _ = CurveBand2D::new(vec![pline], half_thickness).execute_faces();
     }
 
-    // ===== WallFootprint2D::try_from_parts tests =====
+    // ===== BandFootprint2D::try_from_parts tests =====
 
     fn closed_pline_xy(points: &[(f64, f64)]) -> Pline {
         Pline {
@@ -1823,7 +1825,7 @@ mod tests {
     #[test]
     fn wall_footprint_try_from_parts_accepts_valid_outer_only() {
         let outer = ccw_square_pline();
-        let f = WallFootprint2D::try_from_parts(outer, vec![]).expect("must succeed");
+        let f = BandFootprint2D::try_from_parts(outer, vec![]).expect("must succeed");
         assert_eq!(f.holes().len(), 0);
     }
 
@@ -1831,7 +1833,7 @@ mod tests {
     fn wall_footprint_try_from_parts_accepts_outer_plus_hole() {
         let outer = ccw_square_pline();
         let hole = cw_square_pline_at(3.0, 3.0, 4.0, 4.0);
-        let f = WallFootprint2D::try_from_parts(outer, vec![hole]).expect("must succeed");
+        let f = BandFootprint2D::try_from_parts(outer, vec![hole]).expect("must succeed");
         assert_eq!(f.holes().len(), 1);
     }
 
@@ -1839,14 +1841,14 @@ mod tests {
     fn wall_footprint_try_from_parts_rejects_unclosed_outer() {
         let mut outer = ccw_square_pline();
         outer.closed = false;
-        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
         assert!(format!("{err}").contains("closed"), "{err}");
     }
 
     #[test]
     fn wall_footprint_try_from_parts_rejects_cw_outer() {
         let outer = closed_pline_xy(&[(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
         assert!(format!("{err}").contains("CCW"), "{err}");
     }
 
@@ -1855,7 +1857,7 @@ mod tests {
         let outer = ccw_square_pline();
         // CCW square inside outer (wrong winding for a hole).
         let hole = closed_pline_xy(&[(3.0, 3.0), (7.0, 3.0), (7.0, 7.0), (3.0, 7.0)]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
         assert!(format!("{err}").contains("CW"), "{err}");
     }
 
@@ -1864,7 +1866,7 @@ mod tests {
         let outer = ccw_square_pline();
         // CW square that pokes outside the outer (vertex at (-1, 5) is outside).
         let hole = closed_pline_xy(&[(-1.0, 4.0), (-1.0, 6.0), (3.0, 6.0), (3.0, 4.0)]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
         assert!(format!("{err}").contains("inside outer"), "{err}");
     }
 
@@ -1873,7 +1875,7 @@ mod tests {
         let outer = ccw_square_pline();
         let h1 = cw_square_pline_at(1.0, 1.0, 5.0, 5.0);
         let h2 = cw_square_pline_at(3.0, 3.0, 5.0, 5.0); // overlaps h1
-        let err = WallFootprint2D::try_from_parts(outer, vec![h1, h2]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![h1, h2]).expect_err("must err");
         let msg = format!("{err}");
         assert!(
             msg.contains("overlapping") || msg.contains("intersects"),
@@ -1884,7 +1886,7 @@ mod tests {
     #[test]
     fn wall_footprint_try_from_parts_rejects_degenerate_outer() {
         let outer = closed_pline_xy(&[(0.0, 0.0), (1.0, 0.0)]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
         assert!(format!("{err}").contains("at least 3"), "{err}");
     }
 
@@ -1892,7 +1894,7 @@ mod tests {
     fn wall_footprint_try_from_parts_rejects_self_intersecting_outer() {
         // Bowtie order — figure-8 quad — non-adjacent edges cross.
         let outer = closed_pline_xy(&[(0.0, 0.0), (10.0, 10.0), (10.0, 0.0), (0.0, 10.0)]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
         assert!(format!("{err}").contains("self-intersecting"), "{err}");
     }
 
@@ -1900,7 +1902,7 @@ mod tests {
     fn wall_footprint_try_from_parts_rejects_arc_segment() {
         let mut outer = ccw_square_pline();
         outer.vertices[0].bulge = 0.5;
-        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
         assert!(format!("{err}").contains("bulge"), "{err}");
     }
 
@@ -1913,7 +1915,7 @@ mod tests {
             (5.0, 5.0),
             (0.0, 5.0),
         ]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
         assert!(format!("{err}").contains("zero-length"), "{err}");
     }
 
@@ -1921,7 +1923,7 @@ mod tests {
     fn wall_footprint_try_from_parts_rejects_closing_duplicate_vertex() {
         // Last vertex coincides with first → closing edge is zero-length.
         let outer = closed_pline_xy(&[(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 0.0)]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![]).expect_err("must err");
         assert!(format!("{err}").contains("zero-length"), "{err}");
     }
 
@@ -1929,7 +1931,7 @@ mod tests {
     fn wall_footprint_try_from_parts_rejects_zero_length_edge_in_hole() {
         let outer = ccw_square_pline();
         let hole = closed_pline_xy(&[(3.0, 3.0), (3.0, 3.0), (3.0, 7.0), (7.0, 7.0), (7.0, 3.0)]);
-        let err = WallFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
+        let err = BandFootprint2D::try_from_parts(outer, vec![hole]).expect_err("must err");
         assert!(format!("{err}").contains("zero-length"), "{err}");
     }
 }

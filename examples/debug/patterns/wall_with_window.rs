@@ -2,7 +2,7 @@ use geolis::geometry::pline::{Pline, PlineVertex};
 use geolis::math::{Point3, Vector3};
 use geolis::operations::boolean::Subtract;
 use geolis::operations::creation::{MakeBox, MakeFace, MakeWire};
-use geolis::operations::offset::{WallFootprint2D, WallOutline2D};
+use geolis::operations::offset::{BandFootprint2D, CurveBand2D};
 use geolis::operations::shaping::Extrude;
 use geolis::tessellation::{StrokeStyle, TessellateSolid, TessellationParams};
 use geolis::topology::TopologyStore;
@@ -47,7 +47,7 @@ fn draw_centerline_and_offset(
     centerline: &Pline,
     bx: f64,
     by: f64,
-) -> Option<WallFootprint2D> {
+) -> Option<BandFootprint2D> {
     let center_pts: Vec<Point3> = centerline
         .vertices
         .iter()
@@ -62,7 +62,7 @@ fn draw_centerline_and_offset(
         GRAY,
     );
 
-    let wall = WallOutline2D::new(vec![centerline.clone()], WALL_HALF_WIDTH);
+    let wall = CurveBand2D::new(vec![centerline.clone()], WALL_HALF_WIDTH);
     wall.execute_faces().ok()?.into_iter().next()
 }
 

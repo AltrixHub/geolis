@@ -1,7 +1,7 @@
 //! Per-segment provenance for wall footprints.
 //!
-//! [`super::WallOutline2D::execute_faces_with_provenance`] reports, for
-//! every boundary segment of every output [`super::WallFootprint2D`],
+//! [`super::CurveBand2D::execute_faces_with_provenance`] reports, for
+//! every boundary segment of every output [`super::BandFootprint2D`],
 //! **where that segment came from in the input centerlines** — which
 //! polyline, which centerline edge, which side (or which end cap), and
 //! which surviving fragment of that source. Consumers derive stable
@@ -77,7 +77,7 @@ pub enum SegmentOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SegmentProvenance {
     /// Index of the source polyline in the `Vec<Pline>` passed to
-    /// [`super::WallOutline2D`] (original input position, including any
+    /// [`super::CurveBand2D`] (original input position, including any
     /// entries that were skipped as too short).
     pub pline: usize,
     /// Structural origin within that polyline.
@@ -89,7 +89,7 @@ pub struct SegmentProvenance {
     pub fragment: u32,
 }
 
-/// Per-ring provenance aligned 1:1 with a [`super::WallFootprint2D`]:
+/// Per-ring provenance aligned 1:1 with a [`super::BandFootprint2D`]:
 /// `outer()[k]` describes the outer-ring segment from vertex `k` to
 /// vertex `(k + 1) % n`, and `holes()[h][k]` likewise for hole `h`.
 /// Hole rings are union outputs of the same labelled arrangement, so
@@ -102,14 +102,14 @@ pub struct FootprintProvenance {
 
 impl FootprintProvenance {
     /// Per-segment provenance of the outer ring, aligned with
-    /// `WallFootprint2D::outer()`'s segments.
+    /// `BandFootprint2D::outer()`'s segments.
     #[must_use]
     pub fn outer(&self) -> &[SegmentProvenance] {
         &self.outer
     }
 
     /// Per-segment provenance of each hole ring, aligned with
-    /// `WallFootprint2D::holes()`.
+    /// `BandFootprint2D::holes()`.
     #[must_use]
     pub fn holes(&self) -> &[Vec<SegmentProvenance>] {
         &self.holes
@@ -119,7 +119,7 @@ impl FootprintProvenance {
 // === Crate-internal assembly ===
 
 /// Source description of one stroke-polygon edge, built by
-/// `WallOutline2D` before the union and resolved from the engine's
+/// `CurveBand2D` before the union and resolved from the engine's
 /// [`SegmentSite`]s afterwards.
 pub(super) struct EdgeSource {
     pub pline: usize,
@@ -150,16 +150,48 @@ impl InputEdgeSources {
     }
 }
 
-/// Borrowed view of one output ring: `(ring points, per-edge sites)`.
-type RingView<'a> = (&'a [(f64, f64)], &'a [SegmentSite]);
+/// Source identity of one band-union output edge: which input polyline,
+/// and which structural part of it.
+type SourceKey = (usize, SegmentOrigin);
+
+/// Where one output ring edge sits along the source it came from.
+///
+/// Compared lexicographically, and only ever against positions of the
+/// *same* source key:
+///
+/// 1. **coarse ordinal** — which sub-source the edge lies on
+///    (tessellation chord ordinal for the band union; band fragment
+///    ordinal for the carve).
+/// 2. **fine ordinal** — position of that sub-source within the source's
+///    own run, for sources whose sub-sources are not collinear and whose
+///    parameters therefore cannot be compared (`0` when the coarse
+///    ordinal already resolves the sub-source).
+/// 3. **parameter** — unnormalised (but monotonic) projection of the
+///    edge's earliest endpoint onto its sub-source, which orders pieces
+///    that were split out of one sub-source.
+pub(super) type SourcePosition = (usize, usize, f64);
+
+/// Per-ring `(source key, position)` pairs of one output face, aligned
+/// with the face's rings exactly like [`FootprintProvenance`]: one entry
+/// per ring edge, `outer` first, then each hole.
+pub(super) struct FaceEdgeKeys<K> {
+    pub outer: Vec<(K, SourcePosition)>,
+    pub holes: Vec<Vec<(K, SourcePosition)>>,
+}
+
+/// Fragment ordinals aligned 1:1 with the rings of a [`FaceEdgeKeys`].
+pub(super) struct FaceFragments {
+    pub outer: Vec<u32>,
+    pub holes: Vec<Vec<u32>>,
+}
 
 /// One maximal cyclic run of consecutive ring edges sharing the same
-/// `(pline, origin)` key — i.e. one surviving fragment of one source.
-struct Run {
-    key: (usize, SegmentOrigin),
-    /// Lexicographic-min `(tess_ord, parameter-along-source)` over the
-    /// run's edges; orders fragments along their source segment.
-    order: (usize, f64),
+/// source key — i.e. one surviving fragment of one source.
+struct Run<K> {
+    key: K,
+    /// Lexicographic-min [`SourcePosition`] over the run's edges; orders
+    /// the fragments of one source along that source.
+    position: SourcePosition,
     face: usize,
     /// 0 = outer ring, `1 + h` = hole `h` (tie-break only).
     ring: usize,
@@ -167,49 +199,41 @@ struct Run {
     edges: Vec<usize>,
 }
 
-/// Compute aligned [`FootprintProvenance`] for every traced face.
-///
-/// Every output edge is prefilled with its own `(pline, origin)` and
-/// fragment `0`; a second pass groups edges into runs per source and
-/// overwrites fragments with the deterministic run ordinal.
-pub(super) fn footprint_provenances(
-    faces: &[TracedFace],
-    sources: &[InputEdgeSources],
-) -> Vec<FootprintProvenance> {
-    let source_of = |site: SegmentSite| -> &EdgeSource { sources[site.input].get(site) };
+/// Lexicographic [`SourcePosition`] comparison. The parameter component
+/// is a plain `f64`; the arrangement never produces NaN coordinates, and
+/// a hypothetical NaN degrades to "equal" rather than poisoning the sort.
+fn cmp_position(a: SourcePosition, b: SourcePosition) -> std::cmp::Ordering {
+    a.0.cmp(&b.0)
+        .then_with(|| a.1.cmp(&b.1))
+        .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+}
 
-    // Prefill with fragment 0.
-    let prefill = |sites: &[SegmentSite]| -> Vec<SegmentProvenance> {
-        sites
-            .iter()
-            .map(|&s| {
-                let src = source_of(s);
-                SegmentProvenance {
-                    pline: src.pline,
-                    origin: src.origin,
-                    fragment: 0,
-                }
-            })
-            .collect()
-    };
-    let mut out: Vec<FootprintProvenance> = faces
+/// Number the surviving fragments of every source deterministically.
+///
+/// Consecutive ring edges sharing a key form one run — one surviving
+/// fragment. Runs are grouped by key, ordered along their source by
+/// [`SourcePosition`], and numbered densely from `0`; the structural
+/// `(face, ring, first edge)` triple breaks any remaining tie so the
+/// result never depends on iteration order.
+///
+/// Shared by the band union ([`footprint_provenances`], keyed by
+/// `(pline, origin)`) and the band carve ([`super::carve`], keyed by
+/// base source or cutter index), so both obey one numbering contract.
+pub(super) fn number_fragments<K: Copy + Ord>(faces: &[FaceEdgeKeys<K>]) -> Vec<FaceFragments> {
+    let mut out: Vec<FaceFragments> = faces
         .iter()
-        .map(|tf| FootprintProvenance {
-            outer: prefill(&tf.outer_sites),
-            holes: tf.hole_sites.iter().map(|s| prefill(s)).collect(),
+        .map(|f| FaceFragments {
+            outer: vec![0; f.outer.len()],
+            holes: f.holes.iter().map(|h| vec![0; h.len()]).collect(),
         })
         .collect();
 
     // Collect runs over every ring of every face.
-    let mut runs: Vec<Run> = Vec::new();
-    for (fi, tf) in faces.iter().enumerate() {
-        let mut rings: Vec<RingView<'_>> =
-            vec![(tf.face.outer.as_slice(), tf.outer_sites.as_slice())];
-        for (h, sites) in tf.hole_sites.iter().enumerate() {
-            rings.push((tf.face.holes[h].as_slice(), sites.as_slice()));
-        }
-        for (ri, (pts, sites)) in rings.into_iter().enumerate() {
-            collect_ring_runs(fi, ri, pts, sites, &source_of, &mut runs);
+    let mut runs: Vec<Run<K>> = Vec::new();
+    for (fi, f) in faces.iter().enumerate() {
+        collect_ring_runs(fi, 0, &f.outer, &mut runs);
+        for (h, ring) in f.holes.iter().enumerate() {
+            collect_ring_runs(fi, 1 + h, ring, &mut runs);
         }
     }
 
@@ -218,31 +242,25 @@ pub(super) fn footprint_provenances(
     runs.sort_by(|x, y| {
         x.key
             .cmp(&y.key)
-            .then_with(|| x.order.0.cmp(&y.order.0))
-            .then_with(|| {
-                x.order
-                    .1
-                    .partial_cmp(&y.order.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| cmp_position(x.position, y.position))
             .then_with(|| (x.face, x.ring, x.edges[0]).cmp(&(y.face, y.ring, y.edges[0])))
     });
 
-    let mut prev_key: Option<(usize, SegmentOrigin)> = None;
+    let mut prev_key: Option<K> = None;
     let mut ordinal: u32 = 0;
     for run in &runs {
         if prev_key != Some(run.key) {
             prev_key = Some(run.key);
             ordinal = 0;
         }
-        let prov = &mut out[run.face];
+        let frag = &mut out[run.face];
         for &e in &run.edges {
             let slot = if run.ring == 0 {
-                &mut prov.outer[e]
+                &mut frag.outer[e]
             } else {
-                &mut prov.holes[run.ring - 1][e]
+                &mut frag.holes[run.ring - 1][e]
             };
-            slot.fragment = ordinal;
+            *slot = ordinal;
         }
         ordinal += 1;
     }
@@ -250,40 +268,20 @@ pub(super) fn footprint_provenances(
     out
 }
 
-/// Split one closed ring into maximal cyclic runs of equal
-/// `(pline, origin)` keys and append them to `runs`.
-fn collect_ring_runs<'a>(
+/// Split one closed ring into maximal cyclic runs of equal key and
+/// append them to `runs`.
+fn collect_ring_runs<K: Copy + Ord>(
     face: usize,
     ring: usize,
-    pts: &[(f64, f64)],
-    sites: &[SegmentSite],
-    source_of: &impl Fn(SegmentSite) -> &'a EdgeSource,
-    runs: &mut Vec<Run>,
+    edges: &[(K, SourcePosition)],
+    runs: &mut Vec<Run<K>>,
 ) {
-    let m = sites.len();
+    let m = edges.len();
     if m == 0 {
         return;
     }
-    debug_assert_eq!(pts.len(), m);
-
-    let key_of = |e: usize| -> (usize, SegmentOrigin) {
-        let src = source_of(sites[e]);
-        (src.pline, src.origin)
-    };
-    // Parameter of point `p` along the source of edge `e` (unnormalised
-    // — monotonic along the supporting line, which is all ordering
-    // needs).
-    let param = |e: usize, p: (f64, f64)| -> f64 {
-        let src = source_of(sites[e]);
-        (p.0 - src.a.0) * (src.b.0 - src.a.0) + (p.1 - src.a.1) * (src.b.1 - src.a.1)
-    };
-    let edge_order = |e: usize| -> (usize, f64) {
-        let t0 = param(e, pts[e]);
-        let t1 = param(e, pts[(e + 1) % m]);
-        (source_of(sites[e]).tess_ord, t0.min(t1))
-    };
-    let min_order = |a: (usize, f64), b: (usize, f64)| -> (usize, f64) {
-        if (b.0, b.1) < (a.0, a.1) {
+    let min_position = |a: SourcePosition, b: SourcePosition| -> SourcePosition {
+        if cmp_position(b, a) == std::cmp::Ordering::Less {
             b
         } else {
             a
@@ -292,16 +290,16 @@ fn collect_ring_runs<'a>(
 
     // Rotate the scan start to a key boundary so no run is split by the
     // ring's arbitrary index origin.
-    let start = (0..m).find(|&e| key_of(e) != key_of((e + m - 1) % m));
+    let start = (0..m).find(|&e| edges[e].0 != edges[(e + m - 1) % m].0);
     let Some(start) = start else {
         // Whole ring is one source: single run.
-        let mut order = edge_order(0);
-        for e in 1..m {
-            order = min_order(order, edge_order(e));
+        let mut position = edges[0].1;
+        for edge in edges.iter().skip(1) {
+            position = min_position(position, edge.1);
         }
         runs.push(Run {
-            key: key_of(0),
-            order,
+            key: edges[0].0,
+            position,
             face,
             ring,
             edges: (0..m).collect(),
@@ -310,38 +308,114 @@ fn collect_ring_runs<'a>(
     };
 
     let mut current_edges: Vec<usize> = Vec::new();
-    let mut current_key = key_of(start);
-    let mut current_order = (usize::MAX, f64::INFINITY);
+    let mut current_key = edges[start].0;
+    let mut current_position = (usize::MAX, usize::MAX, f64::INFINITY);
     for k in 0..m {
         let e = (start + k) % m;
-        let key = key_of(e);
+        let key = edges[e].0;
         if key != current_key && !current_edges.is_empty() {
             runs.push(Run {
                 key: current_key,
-                order: current_order,
+                position: current_position,
                 face,
                 ring,
                 edges: std::mem::take(&mut current_edges),
             });
-            current_order = (usize::MAX, f64::INFINITY);
+            current_position = (usize::MAX, usize::MAX, f64::INFINITY);
         }
         current_key = key;
-        current_order = min_order(current_order, edge_order(e));
+        current_position = min_position(current_position, edges[e].1);
         current_edges.push(e);
     }
     runs.push(Run {
         key: current_key,
-        order: current_order,
+        position: current_position,
         face,
         ring,
         edges: current_edges,
     });
 }
 
+/// Compute aligned [`FootprintProvenance`] for every traced face.
+///
+/// Each output edge resolves its [`SegmentSite`] to the stroke edge it
+/// came from, yielding a `(pline, origin)` key and a position along that
+/// source; [`number_fragments`] then turns runs of equal key into dense
+/// fragment ordinals.
+pub(super) fn footprint_provenances(
+    faces: &[TracedFace],
+    sources: &[InputEdgeSources],
+) -> Vec<FootprintProvenance> {
+    let source_of = |site: SegmentSite| -> &EdgeSource { sources[site.input].get(site) };
+
+    let ring_keys = |pts: &[(f64, f64)],
+                     sites: &[SegmentSite]|
+     -> Vec<(SourceKey, SourcePosition)> {
+        debug_assert_eq!(pts.len(), sites.len());
+        let m = sites.len();
+        (0..m)
+            .map(|e| {
+                let src = source_of(sites[e]);
+                // Parameter along the stroke edge (unnormalised —
+                // monotonic along the supporting line, which is all
+                // ordering needs).
+                let param = |p: (f64, f64)| -> f64 {
+                    (p.0 - src.a.0) * (src.b.0 - src.a.0) + (p.1 - src.a.1) * (src.b.1 - src.a.1)
+                };
+                let t0 = param(pts[e]);
+                let t1 = param(pts[(e + 1) % m]);
+                // The tessellation ordinal already names the sub-source,
+                // so the fine ordinal is unused here.
+                ((src.pline, src.origin), (src.tess_ord, 0, t0.min(t1)))
+            })
+            .collect()
+    };
+
+    let keys: Vec<FaceEdgeKeys<SourceKey>> = faces
+        .iter()
+        .map(|tf| FaceEdgeKeys {
+            outer: ring_keys(&tf.face.outer, &tf.outer_sites),
+            holes: tf
+                .face
+                .holes
+                .iter()
+                .zip(&tf.hole_sites)
+                .map(|(h, s)| ring_keys(h, s))
+                .collect(),
+        })
+        .collect();
+
+    let fragments = number_fragments(&keys);
+
+    let ring_provenance =
+        |ks: &[(SourceKey, SourcePosition)], fs: &[u32]| -> Vec<SegmentProvenance> {
+            ks.iter()
+                .zip(fs)
+                .map(|(&((pline, origin), _), &fragment)| SegmentProvenance {
+                    pline,
+                    origin,
+                    fragment,
+                })
+                .collect()
+        };
+    keys.iter()
+        .zip(fragments)
+        .map(|(k, frag)| FootprintProvenance {
+            outer: ring_provenance(&k.outer, &frag.outer),
+            holes: k
+                .holes
+                .iter()
+                .zip(&frag.holes)
+                .map(|(ks, fs)| ring_provenance(ks, fs))
+                .collect(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::{WallFootprint2D, WallOutline2D};
+    use super::super::{BandFootprint2D, CurveBand2D};
     use super::*;
     use crate::geometry::pline::{Pline, PlineVertex};
     use crate::math::Point3;
@@ -364,8 +438,8 @@ mod tests {
         )
     }
 
-    fn run(plines: Vec<Pline>, hw: f64) -> Vec<(WallFootprint2D, FootprintProvenance)> {
-        WallOutline2D::new(plines, hw)
+    fn run(plines: Vec<Pline>, hw: f64) -> Vec<(BandFootprint2D, FootprintProvenance)> {
+        CurveBand2D::new(plines, hw)
             .execute_faces_with_provenance()
             .expect("execute_faces_with_provenance must succeed")
     }
@@ -374,7 +448,7 @@ mod tests {
     type OwnedRing = (Vec<(f64, f64)>, Vec<SegmentProvenance>);
 
     /// All rings of all faces as `(ring points, ring provenance)` pairs.
-    fn all_rings(result: &[(WallFootprint2D, FootprintProvenance)]) -> Vec<OwnedRing> {
+    fn all_rings(result: &[(BandFootprint2D, FootprintProvenance)]) -> Vec<OwnedRing> {
         let mut out = Vec::new();
         for (f, p) in result {
             let ring_pts = |pl: &Pline| -> Vec<(f64, f64)> {
@@ -392,7 +466,7 @@ mod tests {
     /// count, and that every line-centerline edge lies on the supporting
     /// line its provenance names (within snap tolerance).
     fn assert_aligned_and_on_source_lines(
-        result: &[(WallFootprint2D, FootprintProvenance)],
+        result: &[(BandFootprint2D, FootprintProvenance)],
         plines: &[Pline],
         left_w: f64,
         right_w: f64,
@@ -609,7 +683,7 @@ mod tests {
 
         // Collect (pline, origin, fragment, quantised edge midpoint) for
         // the untouched walls 0 and 1.
-        let collect = |result: &[(WallFootprint2D, FootprintProvenance)]| {
+        let collect = |result: &[(BandFootprint2D, FootprintProvenance)]| {
             let mut items: Vec<(usize, SegmentOrigin, u32, (i64, i64))> = Vec::new();
             for (pts, prov) in all_rings(result) {
                 for (e, sp) in prov.iter().enumerate() {
@@ -729,7 +803,7 @@ mod tests {
             open_pline(&[(0.0, 0.0), (4.0, 0.0)]),
             open_pline(&[(2.0, 0.0), (2.0, 3.0)]),
         ];
-        let plain = WallOutline2D::new(plines.clone(), 0.15)
+        let plain = CurveBand2D::new(plines.clone(), 0.15)
             .execute_faces()
             .unwrap();
         let traced = run(plines, 0.15);

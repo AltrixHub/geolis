@@ -34,6 +34,7 @@
 //!    calls [`engine::run_arrangement`] with the oracle.
 //! 3. Add fixtures exercising the new fill rule.
 
+mod diagnose;
 mod engine;
 mod intersect;
 mod subtract;
@@ -41,21 +42,24 @@ mod types;
 mod union;
 
 pub use intersect::intersect_all_with_holes;
-pub use subtract::subtract_all_with_holes;
+pub use subtract::{subtract_all_with_holes, subtract_all_with_holes_diagnosed};
 pub use types::{
     point_in_polygon_class, signed_area, PointClass, Polygon, PolygonWithHoles, UnionResult,
     WALL_EPS, WALL_EPS_SQ,
 };
 pub use union::union_all_with_holes;
 
-/// Crate-internal traced union: per-edge [`engine::SegmentSite`] source
+/// Crate-internal traced ops: per-edge [`engine::SegmentSite`] source
 /// tracking for callers that derive stable per-segment provenance
-/// (`wall_outline::WallOutline2D::execute_faces_with_provenance`).
+/// (`curve_band::CurveBand2D::execute_faces_with_provenance` from the
+/// traced union, `curve_band::carve_band_faces` from the traced
+/// subtract).
 pub(crate) use engine::{RingRef, SegmentSite, TracedFace};
+pub(crate) use subtract::subtract_all_with_holes_traced;
 pub(crate) use union::union_all_with_holes_traced;
 
 /// Crate-internal re-export of the engine's segment-segment intersection
-/// primitive. Used by `wall_outline::try_from_parts` ring-validation
+/// primitive. Used by `curve_band::try_from_parts` ring-validation
 /// helpers to share a single `WALL_EPS`-tolerant implementation with
 /// the arrangement engine.
 pub(crate) use engine::seg_seg_intersect;
