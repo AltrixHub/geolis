@@ -402,6 +402,28 @@ fn mid_height_cut_pierces_only_its_own_interval() {
 }
 
 #[test]
+fn a_cut_reaching_past_the_material_caps_only_the_overlap() {
+    // The cut is anchored on the prism but runs 3 m past its right edge,
+    // so 2 of its 5 m² lie over empty space. The sill / soffit caps must
+    // cover the OVERLAP only — a cap over the overhang would close a
+    // void that has no walls around it.
+    let out = run(vec![prism(vec![rect(0.0, 0.0, 4.0, 4.0)], 0.0, 3.0)
+        .with_cut(cut(rect(3.0, 1.0, 8.0, 2.0), 1.0, 2.0))]);
+    assert_output_sane(&out);
+
+    assert_eq!(out.slabs().len(), 3, "the cut opens two extra breakpoints");
+    let pierced = &out.slabs()[1];
+    // The cut bites into the right edge, so it opens the boundary rather
+    // than punching an enclosed hole.
+    assert!(pierced.faces()[0].holes.is_empty());
+    assert!((slab_area(pierced.faces()) - (16.0 - 1.0)).abs() < EXACT_EPS);
+
+    assert!((cap_area(out.mesh(), 1.0, true) - 1.0).abs() < EXACT_EPS);
+    assert!((cap_area(out.mesh(), 2.0, false) - 1.0).abs() < EXACT_EPS);
+    assert!((signed_volume(out.mesh()) - (16.0 * 3.0 - 1.0)).abs() < EXACT_EPS);
+}
+
+#[test]
 fn cut_spanning_a_fused_junction_removes_the_neighbour_material() {
     // The cut belongs to the horizontal arm but reaches past it in y, so
     // the material it removes is contributed by the vertical arm. Only

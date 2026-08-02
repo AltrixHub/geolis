@@ -15,7 +15,7 @@ use crate::operations::boolean_2d::{
     WALL_EPS, WALL_EPS_SQ,
 };
 
-use super::{PrismProfile, PrismRegion, PrismSlab, Z_EPS};
+use super::{CutKey, PrismProfile, PrismRegion, PrismSlab, Z_EPS};
 
 /// A profile with every ring flattened to line segments, ready for the
 /// arrangement engine. Degenerate rings are already dropped.
@@ -61,18 +61,19 @@ pub(super) fn slab_regions(
         let mid = 0.5 * (z_base + z_top);
 
         let mut cover: Vec<usize> = Vec::new();
+        let mut cut_keys: Vec<CutKey> = Vec::new();
         let mut cuts: Vec<PolygonWithHoles> = Vec::new();
         for (index, flat) in flats.iter().enumerate() {
             if !covers(flat.z_base, flat.z_top, mid) {
                 continue;
             }
             cover.push(index);
-            cuts.extend(
-                flat.cuts
-                    .iter()
-                    .filter(|cut| covers(cut.z_base, cut.z_top, mid))
-                    .map(|cut| cut.region.clone()),
-            );
+            for (cut_index, cut) in flat.cuts.iter().enumerate() {
+                if covers(cut.z_base, cut.z_top, mid) {
+                    cut_keys.push((index, cut_index));
+                    cuts.push(cut.region.clone());
+                }
+            }
         }
 
         let faces = if cover.is_empty() {
@@ -80,7 +81,13 @@ pub(super) fn slab_regions(
         } else {
             carve(fused_by_cover.get(&cover, &flats)?, &cuts)?
         };
-        slabs.push(PrismSlab::new(z_base, z_top, faces));
+        let parts: Vec<PolygonWithHoles> = cover
+            .iter()
+            .flat_map(|&i| flats[i].faces.iter().cloned())
+            .collect();
+        slabs.push(PrismSlab::new(
+            z_base, z_top, faces, cover, parts, cut_keys, cuts,
+        ));
     }
     Ok(slabs)
 }
