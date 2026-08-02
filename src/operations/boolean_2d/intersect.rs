@@ -38,7 +38,7 @@ pub fn intersect_all_with_holes(
     segment_inputs.push(base.clone());
     segment_inputs.extend(others.iter().cloned());
 
-    let oracle = IntersectOracle { base, others };
+    let oracle = IntersectOracle::new(base, others);
     run_arrangement(&segment_inputs, &oracle)
 }
 

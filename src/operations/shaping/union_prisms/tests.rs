@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 
-use super::{FusedPrisms, PrismCut, PrismProfile, PrismRegion, UnionPrisms, DEFAULT_ARC_TOLERANCE};
+use super::{
+    FusedPrisms, PrismCut, PrismProfile, PrismRegion, PrismSlab, UnionPrisms, DEFAULT_ARC_TOLERANCE,
+};
 use crate::geometry::pline::{Pline, PlineVertex};
 use crate::operations::boolean_2d::{signed_area, PolygonWithHoles};
 use crate::tessellation::TriangleMesh;
@@ -928,4 +930,86 @@ fn union_prisms_is_deterministic() {
     assert_eq!(first.mesh().indices, second.mesh().indices);
     assert_eq!(first.mesh().vertices.len(), second.mesh().vertices.len());
     assert_eq!(first.corner_edges(), second.corner_edges());
+}
+
+/// The material a slab fuses is decided by its cover — which profiles
+/// reach it — so [`super::slab::slab_regions`] computes each distinct
+/// cover's union once and reuses it across every slab that shares it.
+///
+/// This fixture is what stops that reuse from being keyed wrongly:
+/// staggered z spans make EVERY slab a different cover, so a memo that
+/// confused two covers would hand a slab the wrong material. Each slab's
+/// area is checked against a union of exactly the profiles that reach it,
+/// computed independently of the memo.
+#[test]
+fn each_slab_fuses_exactly_the_profiles_that_reach_it() {
+    // Three overlapping bands with staggered spans: 0–3, 1–4, 2–5. The
+    // breakpoints 0,1,2,3,4,5 open five slabs whose covers are
+    // {0}, {0,1}, {0,1,2}, {1,2}, {2} — every one distinct.
+    let spans = [(0.0, 3.0), (1.0, 4.0), (2.0, 5.0)];
+    let footprints = [
+        rect(0.0, 0.0, 6.0, 1.0),
+        rect(2.0, -2.0, 3.0, 4.0),
+        rect(4.0, 0.5, 9.0, 1.5),
+    ];
+    let profiles: Vec<PrismProfile> = spans
+        .iter()
+        .zip(footprints.iter())
+        .map(|(&(z0, z1), f)| prism(vec![f.clone()], z0, z1))
+        .collect();
+
+    let out = run(profiles);
+    assert_eq!(out.slabs().len(), 5, "staggered spans open five slabs");
+
+    for slab in out.slabs() {
+        let mid = 0.5 * (slab.z_base() + slab.z_top());
+        // The cover, recomputed here rather than read out of the memo.
+        let cover: Vec<PrismProfile> = spans
+            .iter()
+            .zip(footprints.iter())
+            .filter(|(&(z0, z1), _)| mid > z0 && mid < z1)
+            .map(|(_, f)| prism(vec![f.clone()], 0.0, 1.0))
+            .collect();
+        assert!(!cover.is_empty(), "every reported slab has material");
+        let expected: f64 = run(cover)
+            .slabs()
+            .iter()
+            .flat_map(PrismSlab::faces)
+            .map(face_area)
+            .sum();
+        let got: f64 = slab.faces().iter().map(face_area).sum();
+        assert!(
+            (got - expected).abs() < EXACT_EPS,
+            "slab [{}, {}] fused {got} of material; its cover unions to {expected}",
+            slab.z_base(),
+            slab.z_top(),
+        );
+    }
+}
+
+/// The same reuse must survive cuts: two slabs can share a cover and
+/// still differ, because a cut carves only the slab its own z span
+/// reaches. A memo that cached the CARVED region instead of the fused
+/// material would leak one slab's opening into the other.
+#[test]
+fn a_shared_cover_still_carves_each_slab_separately() {
+    let footprint = rect(0.0, 0.0, 8.0, 1.0);
+    let opening = rect(2.0, -1.0, 4.0, 2.0);
+    let profile = prism(vec![footprint], 0.0, 3.0).with_cuts(vec![cut(opening, 1.0, 2.0)]);
+    let out = run(vec![profile]);
+
+    assert_eq!(out.slabs().len(), 3, "the cut opens sill and head");
+    let area = |i: usize| -> f64 { out.slabs()[i].faces().iter().map(face_area).sum() };
+    let whole = 8.0;
+    assert!((area(0) - whole).abs() < EXACT_EPS, "below the sill: whole");
+    assert!(
+        (area(1) - (whole - 2.0)).abs() < EXACT_EPS,
+        "across the opening the cut is removed, got {}",
+        area(1),
+    );
+    assert!(
+        (area(2) - whole).abs() < EXACT_EPS,
+        "above the head the band is whole again, got {}",
+        area(2),
+    );
 }
