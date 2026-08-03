@@ -35,6 +35,7 @@
 //!   the lexicographically smallest source — earliest input polyline,
 //!   then ring, then edge — deterministically.
 
+use crate::error::{OperationError, Result};
 use crate::operations::boolean_2d::{RingRef, SegmentSite, TracedFace};
 
 /// Which side of the centerline an offset segment lies on, relative to
@@ -135,17 +136,23 @@ pub(super) struct EdgeSource {
 }
 
 /// Per-input lookup table: `SegmentSite {input, ring, edge}` resolves to
-/// `tables[input].get(ring, edge)`.
+/// `tables[input].get(site)`.
+///
+/// A stroke-expanded band is always a single ring (see
+/// [`super::stroke::stroke_expand_labeled`]), so only `RingRef::Outer`
+/// sites resolve. `None` marks an edge that carries no centerline
+/// provenance — the closed band's internal slit — or a site the stroke
+/// never emitted; both mean the same thing to the caller: an edge that
+/// must not have survived the union.
 pub(super) struct InputEdgeSources {
-    pub outer: Vec<EdgeSource>,
-    pub holes: Vec<Vec<EdgeSource>>,
+    pub edges: Vec<Option<EdgeSource>>,
 }
 
 impl InputEdgeSources {
-    fn get(&self, site: SegmentSite) -> &EdgeSource {
+    fn get(&self, site: SegmentSite) -> Option<&EdgeSource> {
         match site.ring {
-            RingRef::Outer => &self.outer[site.edge],
-            RingRef::Hole(h) => &self.holes[h][site.edge],
+            RingRef::Outer => self.edges.get(site.edge)?.as_ref(),
+            RingRef::Hole(_) => None,
         }
     }
 }
@@ -342,20 +349,38 @@ fn collect_ring_runs<K: Copy + Ord>(
 /// came from, yielding a `(pline, origin)` key and a position along that
 /// source; [`number_fragments`] then turns runs of equal key into dense
 /// fragment ordinals.
+///
+/// # Errors
+///
+/// [`OperationError::Failed`] when an output edge resolves to a stroke
+/// edge that carries no centerline provenance — the closed band's
+/// internal slit, which has material on both sides and must always be
+/// dropped by the arrangement. Reaching an output boundary means the
+/// half-edge classification broke, and provenance is reported as broken
+/// rather than guessed.
 pub(super) fn footprint_provenances(
     faces: &[TracedFace],
     sources: &[InputEdgeSources],
-) -> Vec<FootprintProvenance> {
-    let source_of = |site: SegmentSite| -> &EdgeSource { sources[site.input].get(site) };
+) -> Result<Vec<FootprintProvenance>> {
+    let source_of = |site: SegmentSite| -> Result<&EdgeSource> {
+        sources[site.input].get(site).ok_or_else(|| {
+            OperationError::Failed(format!(
+                "curve_band provenance: output edge resolves to stroke edge \
+                 {site:?}, which bounds no band material (internal slit) — \
+                 the arrangement must drop it"
+            ))
+            .into()
+        })
+    };
 
     let ring_keys = |pts: &[(f64, f64)],
                      sites: &[SegmentSite]|
-     -> Vec<(SourceKey, SourcePosition)> {
+     -> Result<Vec<(SourceKey, SourcePosition)>> {
         debug_assert_eq!(pts.len(), sites.len());
         let m = sites.len();
         (0..m)
             .map(|e| {
-                let src = source_of(sites[e]);
+                let src = source_of(sites[e])?;
                 // Parameter along the stroke edge (unnormalised —
                 // monotonic along the supporting line, which is all
                 // ordering needs).
@@ -366,24 +391,26 @@ pub(super) fn footprint_provenances(
                 let t1 = param(pts[(e + 1) % m]);
                 // The tessellation ordinal already names the sub-source,
                 // so the fine ordinal is unused here.
-                ((src.pline, src.origin), (src.tess_ord, 0, t0.min(t1)))
+                Ok(((src.pline, src.origin), (src.tess_ord, 0, t0.min(t1))))
             })
             .collect()
     };
 
     let keys: Vec<FaceEdgeKeys<SourceKey>> = faces
         .iter()
-        .map(|tf| FaceEdgeKeys {
-            outer: ring_keys(&tf.face.outer, &tf.outer_sites),
-            holes: tf
-                .face
-                .holes
-                .iter()
-                .zip(&tf.hole_sites)
-                .map(|(h, s)| ring_keys(h, s))
-                .collect(),
+        .map(|tf| -> Result<FaceEdgeKeys<SourceKey>> {
+            Ok(FaceEdgeKeys {
+                outer: ring_keys(&tf.face.outer, &tf.outer_sites)?,
+                holes: tf
+                    .face
+                    .holes
+                    .iter()
+                    .zip(&tf.hole_sites)
+                    .map(|(h, s)| ring_keys(h, s))
+                    .collect::<Result<Vec<_>>>()?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let fragments = number_fragments(&keys);
 
@@ -398,7 +425,8 @@ pub(super) fn footprint_provenances(
                 })
                 .collect()
         };
-    keys.iter()
+    Ok(keys
+        .iter()
         .zip(fragments)
         .map(|(k, frag)| FootprintProvenance {
             outer: ring_provenance(&k.outer, &frag.outer),
@@ -409,7 +437,7 @@ pub(super) fn footprint_provenances(
                 .map(|(ks, fs)| ring_provenance(ks, fs))
                 .collect(),
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -795,6 +823,208 @@ mod tests {
                 "CW closed input: outer must be Left sides; got {sp:?}"
             );
         }
+    }
+
+    // ===== Closed centerlines — including self-crossing ones =====
+
+    /// Material area of the whole result: outer rings minus their holes.
+    fn band_area(result: &[(BandFootprint2D, FootprintProvenance)]) -> f64 {
+        let ring_area = |pl: &Pline| -> f64 {
+            let n = pl.vertices.len();
+            (0..n)
+                .map(|i| {
+                    let (a, b) = (&pl.vertices[i], &pl.vertices[(i + 1) % n]);
+                    a.x * b.y - b.x * a.y
+                })
+                .sum::<f64>()
+                * 0.5
+        };
+        result
+            .iter()
+            .map(|(f, _)| ring_area(f.outer()) + f.holes().iter().map(ring_area).sum::<f64>())
+            .sum()
+    }
+
+    /// Whether the band lays material over `p` (inside an outer ring and
+    /// not inside one of its holes).
+    fn band_covers(result: &[(BandFootprint2D, FootprintProvenance)], p: (f64, f64)) -> bool {
+        use crate::operations::boolean_2d::{point_in_polygon_class, PointClass};
+        let ring_pts =
+            |pl: &Pline| -> Vec<(f64, f64)> { pl.vertices.iter().map(|v| (v.x, v.y)).collect() };
+        result.iter().any(|(f, _)| {
+            matches!(
+                point_in_polygon_class(p, &ring_pts(f.outer())),
+                PointClass::Inside | PointClass::Boundary
+            ) && !f
+                .holes()
+                .iter()
+                .any(|h| point_in_polygon_class(p, &ring_pts(h)) == PointClass::Inside)
+        })
+    }
+
+    /// Every segment of a closed centerline must (a) carry material at
+    /// its midpoint and (b) appear on the output boundary with BOTH of
+    /// its offset sides — the two properties the annulus band model
+    /// silently broke on a self-crossing ring.
+    fn assert_every_segment_carries_material(
+        result: &[(BandFootprint2D, FootprintProvenance)],
+        ring: &[(f64, f64)],
+    ) {
+        let mut origins: Vec<SegmentOrigin> = all_rings(result)
+            .iter()
+            .flat_map(|(_, prov)| prov.iter().map(|sp| sp.origin))
+            .collect();
+        origins.sort();
+        origins.dedup();
+        for seg in 0..ring.len() {
+            let a = ring[seg];
+            let b = ring[(seg + 1) % ring.len()];
+            let mid = ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+            assert!(
+                band_covers(result, mid),
+                "segment {seg} (midpoint {mid:?}) carries no material"
+            );
+            for side in [OffsetSide::Left, OffsetSide::Right] {
+                assert!(
+                    origins.contains(&SegmentOrigin::Side { edge: seg, side }),
+                    "segment {seg}'s {side:?} offset is absent from the \
+                     output provenance; present origins: {origins:?}"
+                );
+            }
+        }
+        // A closed centerline has no ends, so the closed band's internal
+        // slit must never reach an output boundary.
+        assert!(
+            !origins
+                .iter()
+                .any(|o| matches!(o, SegmentOrigin::Cap { .. })),
+            "closed centerline reported an end cap: {origins:?}"
+        );
+    }
+
+    /// The user's crossing loop: leg 2 crosses leg 0 at `(2.667, 0)`.
+    /// The annulus band model dropped segments 0 and 3 entirely (area
+    /// 1.68 of an expected 3.05).
+    #[test]
+    fn closed_crossing_ring_keeps_every_segment() {
+        let ring = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (2.0, -2.0)];
+        let result = run(vec![closed_pline(&ring)], 0.09);
+        assert_every_segment_carries_material(&result, &ring);
+        // Swept area = perimeter · thickness, less the crossing overlap.
+        let area = band_area(&result);
+        assert!(
+            (area - 3.053_384).abs() < 1e-4,
+            "crossing loop band area={area}"
+        );
+        // Both lobes of the crossing are enclosed voids, not material.
+        assert!(!band_covers(&result, (3.5, 1.0)), "upper lobe must be void");
+        assert!(
+            !band_covers(&result, (1.5, -0.5)),
+            "lower lobe must be void"
+        );
+    }
+
+    /// A figure-8 ring's lobes wind in opposite directions, so its signed
+    /// area is exactly zero — the annulus model's larger-|area| outer /
+    /// hole pick was a coin flip and it lost three of four segments.
+    #[test]
+    fn closed_figure_8_keeps_every_segment() {
+        let ring = [(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)];
+        let result = run(vec![closed_pline(&ring)], 0.09);
+        assert_every_segment_carries_material(&result, &ring);
+        let area = band_area(&result);
+        assert!((area - 1.705_834).abs() < 1e-4, "figure-8 band area={area}");
+        // The crossing carries material; both lobes stay void.
+        assert!(band_covers(&result, (1.0, 1.0)));
+        assert!(!band_covers(&result, (1.0, 1.6)));
+        assert!(!band_covers(&result, (1.0, 0.4)));
+    }
+
+    /// An asymmetric crossing loop (five legs, the last one cutting back
+    /// across the first). The annulus model lost the returning leg.
+    #[test]
+    fn closed_asymmetric_crossing_keeps_every_segment() {
+        let ring = [(0.0, 0.0), (8.0, 0.0), (8.0, 5.0), (3.0, 5.0), (3.0, -3.0)];
+        let result = run(vec![closed_pline(&ring)], 0.09);
+        assert_every_segment_carries_material(&result, &ring);
+        let area = band_area(&result);
+        assert!(
+            (area - 5.411_275).abs() < 1e-4,
+            "asymmetric crossing band area={area}"
+        );
+    }
+
+    /// A ring that crosses itself repeatedly keeps every segment too.
+    #[test]
+    fn closed_multi_crossing_ring_keeps_every_segment() {
+        let ring = [
+            (0.0, 0.0),
+            (4.0, 4.0),
+            (1.0, 4.0),
+            (4.0, 0.0),
+            (3.0, 4.0),
+            (0.0, 2.0),
+        ];
+        let result = run(vec![closed_pline(&ring)], 0.1);
+        assert_every_segment_carries_material(&result, &ring);
+    }
+
+    /// CONTROL for the crossing fixtures above: a simple closed ring
+    /// still bands to the same annulus, vertex for vertex and provenance
+    /// for provenance. The keyhole assembly reproduces it because its
+    /// slit is dropped and its two offset rings enter the arrangement
+    /// unchanged. (The two miter points the slit touches gather two
+    /// extra members in the vertex-snap cluster average, so they can
+    /// land one ulp off — twelve orders of magnitude below `WALL_EPS`.)
+    #[test]
+    fn simple_closed_square_band_is_unchanged() {
+        let square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let result = run(vec![closed_pline(&square)], 0.3);
+        assert_eq!(result.len(), 1);
+        let (face, prov) = &result[0];
+        assert_eq!(face.holes().len(), 1);
+        let assert_pts = |pl: &Pline, want: &[(f64, f64)]| {
+            let got: Vec<(f64, f64)> = pl.vertices.iter().map(|v| (v.x, v.y)).collect();
+            assert_eq!(got.len(), want.len(), "got {got:?}");
+            for (g, w) in got.iter().zip(want) {
+                assert!(
+                    (g.0 - w.0).abs() < 1e-12 && (g.1 - w.1).abs() < 1e-12,
+                    "got {got:?}, want {want:?}"
+                );
+            }
+        };
+        assert_pts(
+            face.outer(),
+            &[(-0.3, 10.3), (-0.3, -0.3), (10.3, -0.3), (10.3, 10.3)],
+        );
+        assert_pts(
+            &face.holes()[0],
+            &[(0.3, 0.3), (0.3, 9.7), (9.7, 9.7), (9.7, 0.3)],
+        );
+        let side = |edge, side| SegmentProvenance {
+            pline: 0,
+            origin: SegmentOrigin::Side { edge, side },
+            fragment: 0,
+        };
+        assert_eq!(
+            prov.outer(),
+            [
+                side(3, OffsetSide::Right),
+                side(0, OffsetSide::Right),
+                side(1, OffsetSide::Right),
+                side(2, OffsetSide::Right),
+            ]
+        );
+        assert_eq!(
+            prov.holes()[0],
+            [
+                side(3, OffsetSide::Left),
+                side(2, OffsetSide::Left),
+                side(1, OffsetSide::Left),
+                side(0, OffsetSide::Left),
+            ]
+        );
+        assert!((band_area(&result) - 24.0).abs() < 1e-9);
     }
 
     #[test]

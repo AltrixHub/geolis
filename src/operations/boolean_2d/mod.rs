@@ -37,6 +37,7 @@
 mod diagnose;
 mod engine;
 mod intersect;
+mod spatial;
 mod subtract;
 mod types;
 mod union;

@@ -35,7 +35,7 @@ use super::types::{PolygonWithHoles, UnionResult};
 /// - The face-assembly stage cannot pick a unique parent for a nested
 ///   loop, or detects an orientation/depth parity violation.
 pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> Result<UnionResult> {
-    let oracle = UnionOracle { inputs };
+    let oracle = UnionOracle::new(inputs);
     let faces = run_arrangement(inputs, &oracle)?;
     Ok(UnionResult { faces })
 }
@@ -49,7 +49,7 @@ pub fn union_all_with_holes(inputs: &[PolygonWithHoles]) -> Result<UnionResult> 
 ///
 /// Same failure modes as [`union_all_with_holes`].
 pub(crate) fn union_all_with_holes_traced(inputs: &[PolygonWithHoles]) -> Result<Vec<TracedFace>> {
-    let oracle = UnionOracle { inputs };
+    let oracle = UnionOracle::new(inputs);
     run_arrangement_traced(inputs, &oracle)
 }
 

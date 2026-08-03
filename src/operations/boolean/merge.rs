@@ -376,9 +376,7 @@ fn merge_component(
     // input (extreme degeneracy after 3 ε-shrink retries), leave the
     // component unmerged.
     let union_pwhs = {
-        let oracle = UnionOracle {
-            inputs: &input_pwhs,
-        };
+        let oracle = UnionOracle::new(&input_pwhs);
         match run_arrangement(&input_pwhs, &oracle) {
             Ok(r) => r,
             Err(_) => return Ok(Vec::new()),

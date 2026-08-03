@@ -8,7 +8,7 @@ use crate::geometry::pline::{Pline, PlineVertex};
 use crate::operations::boolean_2d::union_all_with_holes_traced;
 use polygon_union::{point_in_polygon_class, seg_seg_intersect, PointClass, WALL_EPS, WALL_EPS_SQ};
 use provenance::{footprint_provenances, EdgeSource, InputEdgeSources};
-use stroke::{StrokeLabels, StrokeOrigin};
+use stroke::StrokeOrigin;
 
 pub use carve::{carve_band_faces, CarvedFootprintProvenance, CarvedSegmentProvenance};
 pub use provenance::{CapEnd, FootprintProvenance, OffsetSide, SegmentOrigin, SegmentProvenance};
@@ -375,7 +375,9 @@ impl CurveBand2D {
     /// - `OperationError::Failed` — no outline can be generated, or the
     ///   `polygon_union` arrangement / face-assembly stage detected
     ///   broken topology (ambiguous half-edge classification, witness on
-    ///   another loop's boundary, orientation/depth mismatch).
+    ///   another loop's boundary, orientation/depth mismatch, or an
+    ///   output edge tracing back to a closed band's internal slit,
+    ///   which has material on both sides and must always be dropped).
     pub fn execute_faces(&self) -> Result<Vec<BandFootprint2D>> {
         Ok(self
             .execute_faces_with_provenance()?
@@ -494,15 +496,18 @@ impl CurveBand2D {
                     seg_src.push(seg_src.last().copied().unwrap_or(0));
                 }
             }
-            let (pwh, labels) = stroke::stroke_expand_labeled(
+            let (ring, labels) = stroke::stroke_expand_labeled(
                 &verts,
                 pline.closed,
                 self.left_width,
                 self.right_width,
             );
-            if pwh.outer.len() >= 3 {
-                wall_sources.push(build_edge_sources(pline_idx, &pwh, &labels, &seg_src));
-                wall_polys.push(pwh);
+            if ring.len() >= 3 {
+                wall_sources.push(build_edge_sources(pline_idx, &ring, &labels, &seg_src));
+                wall_polys.push(polygon_union::PolygonWithHoles {
+                    outer: ring,
+                    holes: Vec::new(),
+                });
             }
         }
 
@@ -523,7 +528,7 @@ impl CurveBand2D {
 
         // Step 3: Resolve sites to centerline provenance and number
         // fragments deterministically.
-        let provenances = footprint_provenances(&traced, &wall_sources);
+        let provenances = footprint_provenances(&traced, &wall_sources)?;
 
         Ok(traced
             .into_iter()
@@ -541,22 +546,27 @@ impl CurveBand2D {
 /// Build the per-edge source table for one stroke-expanded input,
 /// composing the stroke's local origins with the tessellation map
 /// (`seg_src`: stroke segment → original pline segment).
+///
+/// A [`StrokeOrigin::Slit`] edge bounds no material, so it gets no
+/// source: the union always drops it, and an output edge that resolves
+/// to `None` is reported as broken topology by
+/// [`footprint_provenances`].
 fn build_edge_sources(
     pline: usize,
-    pwh: &polygon_union::PolygonWithHoles,
-    labels: &StrokeLabels,
+    ring: &[(f64, f64)],
+    labels: &[StrokeOrigin],
     seg_src: &[usize],
 ) -> InputEdgeSources {
-    let ring = |pts: &[(f64, f64)], origins: &[StrokeOrigin]| -> Vec<EdgeSource> {
-        debug_assert_eq!(pts.len(), origins.len());
-        origins
+    debug_assert_eq!(ring.len(), labels.len());
+    InputEdgeSources {
+        edges: labels
             .iter()
             .enumerate()
             .map(|(e, o)| {
-                let a = pts[e];
-                let b = pts[(e + 1) % pts.len()];
+                let a = ring[e];
+                let b = ring[(e + 1) % ring.len()];
                 match *o {
-                    StrokeOrigin::Side { seg, side } => EdgeSource {
+                    StrokeOrigin::Side { seg, side } => Some(EdgeSource {
                         pline,
                         origin: SegmentOrigin::Side {
                             edge: seg_src[seg],
@@ -565,25 +575,17 @@ fn build_edge_sources(
                         tess_ord: seg,
                         a,
                         b,
-                    },
-                    StrokeOrigin::Cap { end } => EdgeSource {
+                    }),
+                    StrokeOrigin::Cap { end } => Some(EdgeSource {
                         pline,
                         origin: SegmentOrigin::Cap { end },
                         tess_ord: 0,
                         a,
                         b,
-                    },
+                    }),
+                    StrokeOrigin::Slit => None,
                 }
             })
-            .collect()
-    };
-    InputEdgeSources {
-        outer: ring(&pwh.outer, &labels.outer),
-        holes: pwh
-            .holes
-            .iter()
-            .zip(&labels.holes)
-            .map(|(h, l)| ring(h, l))
             .collect(),
     }
 }
@@ -1281,11 +1283,14 @@ mod tests {
             .iter()
             .filter_map(|p| {
                 let verts: Vec<(f64, f64)> = p.vertices.iter().map(|v| (v.x, v.y)).collect();
-                let pwh =
+                let ring =
                     super::stroke::stroke_expand_labeled(&verts, p.closed, half_width, half_width)
                         .0;
-                if pwh.outer.len() >= 3 {
-                    Some(pwh)
+                if ring.len() >= 3 {
+                    Some(polygon_union::PolygonWithHoles {
+                        outer: ring,
+                        holes: Vec::new(),
+                    })
                 } else {
                     None
                 }

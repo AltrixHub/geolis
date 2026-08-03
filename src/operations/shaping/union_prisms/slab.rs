@@ -15,7 +15,7 @@ use crate::operations::boolean_2d::{
     WALL_EPS, WALL_EPS_SQ,
 };
 
-use super::{PrismProfile, PrismRegion, PrismSlab, Z_EPS};
+use super::{CutKey, PrismProfile, PrismRegion, PrismSlab, Z_EPS};
 
 /// A profile with every ring flattened to line segments, ready for the
 /// arrangement engine. Degenerate rings are already dropped.
@@ -55,47 +55,97 @@ pub(super) fn slab_regions(
 
     let breakpoints = z_breakpoints(&flats);
     let mut slabs = Vec::with_capacity(breakpoints.len().saturating_sub(1));
+    let mut fused_by_cover = FusedByCover::default();
     for pair in breakpoints.windows(2) {
         let (z_base, z_top) = (pair[0], pair[1]);
         let mid = 0.5 * (z_base + z_top);
 
-        let mut material: Vec<PolygonWithHoles> = Vec::new();
+        let mut cover: Vec<usize> = Vec::new();
+        let mut cut_keys: Vec<CutKey> = Vec::new();
         let mut cuts: Vec<PolygonWithHoles> = Vec::new();
-        for flat in &flats {
+        for (index, flat) in flats.iter().enumerate() {
             if !covers(flat.z_base, flat.z_top, mid) {
                 continue;
             }
-            material.extend(flat.faces.iter().cloned());
-            cuts.extend(
-                flat.cuts
-                    .iter()
-                    .filter(|cut| covers(cut.z_base, cut.z_top, mid))
-                    .map(|cut| cut.region.clone()),
-            );
+            cover.push(index);
+            for (cut_index, cut) in flat.cuts.iter().enumerate() {
+                if covers(cut.z_base, cut.z_top, mid) {
+                    cut_keys.push((index, cut_index));
+                    cuts.push(cut.region.clone());
+                }
+            }
         }
 
-        let faces = if material.is_empty() {
+        let faces = if cover.is_empty() {
             Vec::new()
         } else {
-            fuse(&material, &cuts)?
+            carve(fused_by_cover.get(&cover, &flats)?, &cuts)?
         };
-        slabs.push(PrismSlab::new(z_base, z_top, faces));
+        let parts: Vec<PolygonWithHoles> = cover
+            .iter()
+            .flat_map(|&i| flats[i].faces.iter().cloned())
+            .collect();
+        slabs.push(PrismSlab::new(
+            z_base, z_top, faces, cover, parts, cut_keys, cuts,
+        ));
     }
     Ok(slabs)
 }
 
-/// `⋃ material ∩ ¬⋃ cuts`, as typed face topology.
-fn fuse(material: &[PolygonWithHoles], cuts: &[PolygonWithHoles]) -> Result<Vec<PolygonWithHoles>> {
-    let fused = union_all_with_holes(material)?.faces;
+/// Memo of `⋃ material` keyed by the set of profiles covering a slab.
+///
+/// A slab's material is decided entirely by *which* profiles reach it, so
+/// two slabs with the same cover have the same union — and a floor's
+/// slabs almost always do: every opening in the group opens two
+/// breakpoints, and the walls that span them are the same walls. Without
+/// this the identical union of every element on the floor was recomputed
+/// once per slab, which is how one window turned the fusion into three
+/// full-floor unions and ten windows into three unions of ten times the
+/// material.
+///
+/// The cover is a sorted index list, so equality is exact — no geometry
+/// is compared and nothing is approximated. Lookup is a linear scan
+/// because the number of DISTINCT covers on one floor is small (it grows
+/// only when elements have genuinely different z spans), and each entry
+/// is one `Vec<usize>` comparison.
+#[derive(Default)]
+struct FusedByCover {
+    entries: Vec<(Vec<usize>, Vec<PolygonWithHoles>)>,
+}
+
+impl FusedByCover {
+    /// The fused material of `cover`, computing it on first request.
+    ///
+    /// `cover` is built by ascending index in [`slab_regions`], so it is
+    /// already sorted and two equal covers compare equal.
+    fn get(&mut self, cover: &[usize], flats: &[FlatProfile]) -> Result<&[PolygonWithHoles]> {
+        let hit = self.entries.iter().position(|(key, _)| key == cover);
+        let index = if let Some(index) = hit {
+            index
+        } else {
+            let material: Vec<PolygonWithHoles> = cover
+                .iter()
+                .flat_map(|&i| flats[i].faces.iter().cloned())
+                .collect();
+            let fused = union_all_with_holes(&material)?.faces;
+            self.entries.push((cover.to_vec(), fused));
+            self.entries.len() - 1
+        };
+        Ok(&self.entries[index].1)
+    }
+}
+
+/// `fused ∩ ¬⋃ cuts`, as typed face topology.
+fn carve(fused: &[PolygonWithHoles], cuts: &[PolygonWithHoles]) -> Result<Vec<PolygonWithHoles>> {
     if cuts.is_empty() {
-        return Ok(fused);
+        return Ok(fused.to_vec());
     }
     // The fused faces are disjoint, so subtracting from each in turn is
     // the same region as one global subtraction — and lets a face no cut
     // reaches keep its vertices verbatim.
     let mut carved = Vec::with_capacity(fused.len());
     for face in fused {
-        carved.extend(subtract_all_with_holes(face, cuts)?);
+        carved.extend(subtract_all_with_holes(face.clone(), cuts)?);
     }
     Ok(carved)
 }

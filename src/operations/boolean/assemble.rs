@@ -364,7 +364,7 @@ fn build_faces_via_planar_arrangement(
         holes: holes_uv,
     };
     let inputs = [pwh];
-    let oracle = UnionOracle { inputs: &inputs };
+    let oracle = UnionOracle::new(&inputs);
     let Ok(arranged) = run_arrangement(&inputs, &oracle) else {
         return Ok(Vec::new());
     };

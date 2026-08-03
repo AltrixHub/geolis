@@ -102,7 +102,7 @@ pub(crate) fn subtract_all_with_holes_traced(
     segment_inputs.push(base.clone());
     segment_inputs.extend(subtracts.iter().cloned());
 
-    let oracle = SubtractOracle { base, subtracts };
+    let oracle = SubtractOracle::new(base, subtracts);
     run_arrangement_traced(&segment_inputs, &oracle)
 }
 
