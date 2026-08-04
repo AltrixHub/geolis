@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 
 use super::{
-    FusedPrisms, PrismCut, PrismProfile, PrismRegion, PrismSlab, UnionPrisms, DEFAULT_ARC_TOLERANCE,
+    CapFace, CapFacing, FusedPrisms, PrismCut, PrismProfile, PrismRegion, PrismSlab, UnionPrisms,
+    DEFAULT_ARC_TOLERANCE,
 };
 use crate::geometry::pline::{Pline, PlineVertex};
 use crate::operations::boolean_2d::{signed_area, PolygonWithHoles};
@@ -163,6 +164,55 @@ fn cap_area(mesh: &TriangleMesh, z: f64, up: bool) -> f64 {
         .sum()
 }
 
+// ===== Cap readers =====
+
+/// The cap regions at elevation `z` with the given facing.
+fn caps_at(out: &FusedPrisms, z: f64, facing: CapFacing) -> Vec<&PolygonWithHoles> {
+    out.caps()
+        .iter()
+        .filter(|cap| cap.facing() == facing && (cap.z() - z).abs() < EXACT_EPS)
+        .map(CapFace::region)
+        .collect()
+}
+
+/// Total area of the caps at `(z, facing)`.
+fn cap_face_area(out: &FusedPrisms, z: f64, facing: CapFacing) -> f64 {
+    caps_at(out, z, facing)
+        .into_iter()
+        .map(face_area)
+        .sum::<f64>()
+}
+
+/// Axis-aligned plan extent of a set of cap regions — outer rings and
+/// holes alike, since a caller draws every ring. `None` when the set is
+/// empty.
+fn cap_extent(regions: &[&PolygonWithHoles]) -> Option<(f64, f64, f64, f64)> {
+    let points = regions.iter().flat_map(|region| {
+        std::iter::once(&region.outer)
+            .chain(region.holes.iter())
+            .flatten()
+    });
+    points.fold(None, |extent, &(x, y)| {
+        Some(
+            extent.map_or((x, y, x, y), |(x0, y0, x1, y1): (f64, f64, f64, f64)| {
+                (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
+            }),
+        )
+    })
+}
+
+/// Asserts a cap set spans exactly `(min_x, min_y, max_x, max_y)` — the
+/// assertion that catches a cap (and hence a drawn line) running past the
+/// area it is meant to close.
+fn assert_cap_extent(regions: &[&PolygonWithHoles], expected: (f64, f64, f64, f64)) {
+    let got = cap_extent(regions).expect("a cap to measure");
+    let close = (got.0 - expected.0).abs() < EXACT_EPS
+        && (got.1 - expected.1).abs() < EXACT_EPS
+        && (got.2 - expected.2).abs() < EXACT_EPS
+        && (got.3 - expected.3).abs() < EXACT_EPS;
+    assert!(close, "cap spans {got:?}, expected {expected:?}");
+}
+
 /// Corner edges as `(x, y, z_base, z_top)`, in emission order.
 fn corner_spans(out: &FusedPrisms) -> Vec<(f64, f64, f64, f64)> {
     out.corner_edges()
@@ -253,6 +303,32 @@ fn assert_output_sane(out: &FusedPrisms) {
         signed_volume(mesh) > 0.0,
         "outward orientation must give a positive volume"
     );
+
+    // The caps a caller draws are exactly the caps the mesh triangulated:
+    // same elevations, same facings, same areas. Every horizontal
+    // triangle sits at a breakpoint, so walking the breakpoints covers
+    // the whole surface — including the elevations that must carry NO cap
+    // at all, which is where a full-section ring would show up.
+    for &z in &breakpoints {
+        for facing in [CapFacing::Down, CapFacing::Up] {
+            let drawn = cap_face_area(out, z, facing);
+            let meshed = cap_area(mesh, z, facing == CapFacing::Up);
+            assert!(
+                (drawn - meshed).abs() < EXACT_EPS,
+                "cap area at z = {z} facing {facing:?}: the caps report {drawn}, \
+                 the mesh carries {meshed}"
+            );
+        }
+    }
+    for cap in out.caps() {
+        assert!(
+            breakpoints
+                .iter()
+                .any(|&z| (cap.z() - z).abs() <= EXACT_EPS),
+            "cap z {} is not a breakpoint of {breakpoints:?}",
+            cap.z(),
+        );
+    }
 }
 
 /// Quantizes positions and asserts every undirected triangle edge is
@@ -553,6 +629,132 @@ fn two_l_shapes_enclose_a_courtyard() {
 
     assert!((signed_volume(out.mesh()) - 64.0 * 3.0).abs() < EXACT_EPS);
     assert_position_weld_watertight(out.mesh());
+}
+
+// ===== Caps are the body's horizontal edges =====
+
+/// The asymmetry this output exists to remove: one opening splits the
+/// whole group into three slabs, but at the sill and head elevations the
+/// material is CONTINUOUS everywhere except across the opening itself.
+/// Those two elevations must therefore carry exactly one cap each — the
+/// opening's own footprint — so a caller drawing the caps draws the sill
+/// and head lines bounded to the opening, not a line the length of the
+/// band. Drawing each slab's ring at both its ends is what produced the
+/// full-length lines.
+#[test]
+fn an_opening_caps_only_its_own_footprint() {
+    // A cut deeper than the band, so it pierces the full thickness.
+    let out = run(vec![prism(vec![rect(0.0, 0.0, 8.0, 1.0)], 0.0, 3.0)
+        .with_cut(cut(rect(2.0, -1.0, 4.0, 2.0), 1.0, 2.0))]);
+    assert_output_sane(&out);
+    assert_eq!(out.slabs().len(), 3, "the cut opens sill and head");
+
+    // The extremes cap the whole cross-section — unchanged.
+    let bottom = caps_at(&out, 0.0, CapFacing::Down);
+    assert_eq!(bottom.len(), 1);
+    assert!((face_area(bottom[0]) - 8.0).abs() < EXACT_EPS);
+    assert_cap_extent(&bottom, (0.0, 0.0, 8.0, 1.0));
+    let top = caps_at(&out, 3.0, CapFacing::Up);
+    assert_eq!(top.len(), 1);
+    assert!((face_area(top[0]) - 8.0).abs() < EXACT_EPS);
+    assert_cap_extent(&top, (0.0, 0.0, 8.0, 1.0));
+
+    // Sill and head: the opening's footprint, and nothing else.
+    for (z, facing) in [(1.0, CapFacing::Up), (2.0, CapFacing::Down)] {
+        let opening = caps_at(&out, z, facing);
+        assert_eq!(opening.len(), 1, "one face closes the opening at z = {z}");
+        assert!((face_area(opening[0]) - 2.0).abs() < EXACT_EPS);
+        assert_cap_extent(&opening, (2.0, 0.0, 4.0, 1.0));
+    }
+    // The other facing is interior material: the slab across the opening
+    // is a SUBSET of the whole band, so nothing of it is uncovered.
+    assert!(
+        caps_at(&out, 1.0, CapFacing::Down).is_empty(),
+        "the band is continuous under the sill"
+    );
+    assert!(
+        caps_at(&out, 2.0, CapFacing::Up).is_empty(),
+        "and continuous over the head"
+    );
+    assert_eq!(out.caps().len(), 4, "two extremes plus sill and head");
+}
+
+/// The reported bug's own geometry: the opening belongs to ONE member of
+/// a fused group. Its sill and head must still cap only the opening —
+/// a cap spanning the group would draw a line across every member of it.
+#[test]
+fn an_opening_in_one_member_caps_only_that_opening() {
+    let out = run(vec![
+        prism(vec![bar_x()], 0.0, 3.0).with_cut(cut(rect(2.0, -2.0, 3.0, 2.0), 1.0, 2.0)),
+        prism(vec![bar_y()], 0.0, 3.0),
+    ]);
+    assert_output_sane(&out);
+    assert_eq!(out.slabs().len(), 3, "the cut opens sill and head");
+
+    for (z, facing) in [(1.0, CapFacing::Up), (2.0, CapFacing::Down)] {
+        let opening = caps_at(&out, z, facing);
+        assert_eq!(opening.len(), 1, "one face closes the opening at z = {z}");
+        // 1 m of the bar's length × its full 2 m depth.
+        assert!((face_area(opening[0]) - 2.0).abs() < EXACT_EPS);
+        // The whole point: it stops at the cut, 2 m short of the fused
+        // body's own extent at x = 5 and nowhere near the crossing bar.
+        assert_cap_extent(&opening, (2.0, -1.0, 3.0, 1.0));
+    }
+    assert!(caps_at(&out, 1.0, CapFacing::Down).is_empty());
+    assert!(caps_at(&out, 2.0, CapFacing::Up).is_empty());
+    assert_eq!(out.caps().len(), 4, "two extremes plus sill and head");
+}
+
+/// Two runs stacked with the same footprint: their interface is interior
+/// material, so it carries no cap and hence no drawn line. The covers
+/// differ here (a different profile reaches each slab), so this is the
+/// direct region difference rather than the shared-material shortcut.
+#[test]
+fn stacked_profiles_that_cover_each_other_cap_nothing_between_them() {
+    let out = run(vec![
+        prism(vec![rect(0.0, 0.0, 4.0, 1.0)], 0.0, 3.0),
+        prism(vec![rect(0.0, 0.0, 4.0, 1.0)], 3.0, 6.0),
+    ]);
+    assert_output_sane(&out);
+    assert_eq!(out.slabs().len(), 2, "the shared elevation splits the body");
+
+    assert!(caps_at(&out, 3.0, CapFacing::Up).is_empty());
+    assert!(caps_at(&out, 3.0, CapFacing::Down).is_empty());
+    assert_eq!(out.caps().len(), 2, "only the bottom and the top cap");
+    assert!((cap_face_area(&out, 0.0, CapFacing::Down) - 4.0).abs() < EXACT_EPS);
+    assert!((cap_face_area(&out, 6.0, CapFacing::Up) - 4.0).abs() < EXACT_EPS);
+}
+
+/// A height step caps only the area the taller run leaves exposed, so
+/// the step reads as a line around that area and not around the whole
+/// lower cross-section.
+#[test]
+fn a_height_step_caps_only_the_exposed_area() {
+    let out = run(vec![
+        prism(vec![bar_x()], 0.0, 3.0),
+        prism(vec![bar_y()], 0.0, 6.0),
+    ]);
+    assert_output_sane(&out);
+
+    let step = caps_at(&out, 3.0, CapFacing::Up);
+    assert_eq!(step.len(), 2, "the tall bar splits the exposure in two");
+    let area: f64 = step.iter().copied().map(face_area).sum();
+    assert!(
+        (area - (PLUS_AREA - 20.0)).abs() < EXACT_EPS,
+        "only the shorter run's exposed top is capped; got {area}"
+    );
+    for region in &step {
+        for &(x, _) in &region.outer {
+            assert!(
+                x <= -1.0 + EXACT_EPS || x >= 1.0 - EXACT_EPS,
+                "a step cap reached over the tall bar at x = {x}"
+            );
+        }
+    }
+    assert!(
+        caps_at(&out, 3.0, CapFacing::Down).is_empty(),
+        "the upper cross-section is a subset of the lower one"
+    );
 }
 
 // ===== Degenerate input is skipped =====
