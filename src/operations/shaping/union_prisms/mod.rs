@@ -36,16 +36,31 @@
 //!    all fuse the same walls. Measured on a 31-band floor with ten
 //!    windows (release, M2 Air), fusing three slabs from one cover
 //!    instead of three: 1.43 ms → 0.79 ms per call.
-//! 3. **Mesh.** Each slab contributes a vertical wall per boundary
-//!    segment of its region, plus horizontal caps wherever coverage
-//!    changes: a bottom cap over `region(i) \ region(i - 1)` and a top cap
-//!    over `region(i) \ region(i + 1)`, both region differences taken with
-//!    the same 2D boolean machinery. The slab below the first and above
-//!    the last is the empty region, so the body is closed at the extremes.
-//! 4. **Corner edges.** Each slab's rings are walked once more and every
+//! 3. **Caps.** Horizontal faces appear wherever coverage changes: a
+//!    down-facing cap over `region(i) \ region(i - 1)` at the slab's base
+//!    and an up-facing cap over `region(i) \ region(i + 1)` at its top,
+//!    both region differences taken with the same 2D boolean machinery.
+//!    The slab below the first and above the last is the empty region, so
+//!    the body is closed at the extremes. See [`cap`].
+//! 4. **Mesh.** Each slab contributes a vertical wall per boundary
+//!    segment of its region; each cap is triangulated at its elevation.
+//! 5. **Corner edges.** Each slab's rings are walked once more and every
 //!    vertex where the boundary genuinely turns yields a vertical segment
 //!    spanning the slab — the arris a caller draws so a wall keeps its
 //!    side definition. See [`corner`] for the angle test.
+//!
+//! # Drawing the result
+//!
+//! The body's edges are the cap rings ([`FusedPrisms::caps`], horizontal)
+//! plus the corner edges ([`FusedPrisms::corner_edges`], vertical) — and
+//! nothing else. A slab's own rings are NOT edges of the body: two
+//! stacked slabs share the material along their whole common
+//! cross-section, so the surface runs straight through the interface and
+//! only the part a cap covers is a real horizontal arris. That is why the
+//! caps are the drawn horizontal outline: one opening splits the whole
+//! group into three slabs, and drawing each slab's ring at both its ends
+//! would paint a line across every element of the group at that opening's
+//! sill and head, where the material is in fact continuous.
 //!
 //! Because every z coordinate in the mesh is a breakpoint and every
 //! horizontal boundary is a boolean result, the surface is geometrically
@@ -69,6 +84,7 @@
 //! exactly the way `offset::curve_band::carve_band_faces` does — one
 //! level up from the arrangement engine, never inside it.
 
+mod cap;
 mod corner;
 mod mesh;
 mod slab;
@@ -307,8 +323,12 @@ impl PrismProfile {
 /// The fused cross-section over one z interval.
 ///
 /// `faces` is the interval's boundary as typed face topology — CCW outer,
-/// CW holes, every hole inside its outer — i.e. exactly the outline a
-/// caller draws as edges at this elevation.
+/// CW holes, every hole inside its outer — i.e. the plan shape the
+/// interval's vertical surface is extruded from.
+///
+/// It is NOT the horizontal outline at this elevation: a boundary shared
+/// with the neighbouring slab carries no horizontal edge at all. The
+/// drawn horizontal edges are [`FusedPrisms::caps`].
 #[derive(Debug, Clone)]
 pub struct PrismSlab {
     z_base: f64,
@@ -391,6 +411,66 @@ impl PrismSlab {
     }
 }
 
+/// Which way a horizontal cap faces, i.e. which side of the interface
+/// carries the material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapFacing {
+    /// Outward normal `-z`, at a slab's `z_base`: the body's underside
+    /// there — the soffit over an opening, or the bottom of the stack.
+    Down,
+    /// Outward normal `+z`, at a slab's `z_top`: the body's upper
+    /// surface there — the sill under an opening, the exposed step of a
+    /// lower run, or the top of the stack.
+    Up,
+}
+
+/// One horizontal face of the fused body: the part of a slab's
+/// cross-section its neighbour across the interface does NOT cover, at
+/// the elevation where the two meet.
+///
+/// # Contract
+///
+/// These faces are the body's only horizontal surfaces, so their rings —
+/// outer and holes alike — are the body's only horizontal edges. A
+/// caller drawing the body draws every ring of every cap at its own
+/// [`Self::z`], and takes the vertical half from
+/// [`FusedPrisms::corner_edges`]; see the module docs for why a slab's
+/// own rings are not edges.
+///
+/// The same faces are what the mesh stage triangulates, so the drawn
+/// outline and the meshed surface can never describe different bodies.
+#[derive(Debug, Clone)]
+pub struct CapFace {
+    z: f64,
+    facing: CapFacing,
+    region: PolygonWithHoles,
+}
+
+impl CapFace {
+    pub(super) fn new(z: f64, facing: CapFacing, region: PolygonWithHoles) -> Self {
+        Self { z, facing, region }
+    }
+
+    /// The elevation the cap lies at — always a slab bound, hence a z
+    /// breakpoint.
+    #[must_use]
+    pub fn z(&self) -> f64 {
+        self.z
+    }
+
+    /// Which way the cap's outward normal points.
+    #[must_use]
+    pub fn facing(&self) -> CapFacing {
+        self.facing
+    }
+
+    /// The capped area, as typed face topology — CCW outer, CW holes.
+    #[must_use]
+    pub fn region(&self) -> &PolygonWithHoles {
+        &self.region
+    }
+}
+
 /// A vertical arris of the fused body: the segment a caller draws at one
 /// corner of one slab.
 ///
@@ -418,12 +498,13 @@ impl CornerEdge {
     }
 }
 
-/// Result of [`UnionPrisms::execute`]: the fused body, the outline it was
-/// built from, and the vertical arrises of that outline.
+/// Result of [`UnionPrisms::execute`]: the fused body, the cross-sections
+/// it was built from, and the horizontal + vertical edges that draw it.
 #[derive(Debug, Clone)]
 pub struct FusedPrisms {
     mesh: TriangleMesh,
     slabs: Vec<PrismSlab>,
+    caps: Vec<CapFace>,
     corner_edges: Vec<CornerEdge>,
 }
 
@@ -441,22 +522,32 @@ impl FusedPrisms {
         &self.slabs
     }
 
+    /// The horizontal caps of the body, bottom to top: a slab's base caps
+    /// before its top caps.
+    ///
+    /// These are the body's horizontal edges — see [`CapFace`] and the
+    /// module docs. Empty exactly when the body is.
+    #[must_use]
+    pub fn caps(&self) -> &[CapFace] {
+        &self.caps
+    }
+
     /// The vertical corner edges of every slab, bottom to top.
     ///
-    /// Together with the slab rings — the horizontal outline at each
-    /// interval — these are the edges that give the drawn body its shape:
-    /// the rings say where it is, the corner edges say where it turns.
-    /// Facets of a flattened arc are excluded; see
+    /// Together with the cap rings — the body's horizontal edges — these
+    /// are the edges that give the drawn body its shape: the caps say
+    /// where it steps, the corner edges say where it turns. Facets of a
+    /// flattened arc are excluded; see
     /// [`UnionPrisms::with_corner_angle_tolerance`].
     #[must_use]
     pub fn corner_edges(&self) -> &[CornerEdge] {
         &self.corner_edges
     }
 
-    /// Consumes the result into its three parts.
+    /// Consumes the result into its four parts.
     #[must_use]
-    pub fn into_parts(self) -> (TriangleMesh, Vec<PrismSlab>, Vec<CornerEdge>) {
-        (self.mesh, self.slabs, self.corner_edges)
+    pub fn into_parts(self) -> (TriangleMesh, Vec<PrismSlab>, Vec<CapFace>, Vec<CornerEdge>) {
+        (self.mesh, self.slabs, self.caps, self.corner_edges)
     }
 }
 
@@ -542,7 +633,11 @@ impl UnionPrisms {
         }
 
         let intervals = slab::slab_regions(&self.profiles, self.arc_tolerance)?;
-        let mesh = mesh::build_mesh(&intervals)?;
+        // Neighbour coverage is read off `i ± 1`, so the caps are taken
+        // from the CONTIGUOUS interval list, before the empty ones are
+        // dropped from the public result.
+        let caps = cap::cap_faces(&intervals)?;
+        let mesh = mesh::build_mesh(&intervals, &caps)?;
         let slabs: Vec<PrismSlab> = intervals
             .into_iter()
             .filter(|slab| !slab.faces().is_empty())
@@ -551,6 +646,7 @@ impl UnionPrisms {
         Ok(FusedPrisms {
             mesh,
             slabs,
+            caps,
             corner_edges,
         })
     }
