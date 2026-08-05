@@ -313,11 +313,33 @@ fn rings_edges_cross(a: &[(f64, f64)], b: &[(f64, f64)]) -> Option<(usize, usize
 /// `right_width` to the right (using the segment's forward direction).
 /// Use [`CurveBand2D::new`] for a centred band (`left == right == half_thickness`)
 /// or [`CurveBand2D::new_asymmetric`] for a band aligned to one side of the baseline.
+///
+/// # Arc tessellation
+///
+/// The union arrangement this operation runs on is straight-segment only, so
+/// an arc-carrying baseline is tessellated into chords before stroking. The
+/// maximum sagitta of those chords is [`CurveBand2D::with_arc_tolerance`]'s
+/// parameter; unset, it defaults to [`DEFAULT_ARC_TOLERANCE_WIDTH_FRACTION`]
+/// of the band's widest side, which scales the facet size with the band but
+/// says nothing about the accuracy the CALLER needs (a 0.18 m wall then
+/// tessellates at a 9 mm sagitta). A caller that measures against the band's
+/// boundary — snapping to a face, or comparing it to an analytic arc — states
+/// its own tolerance instead.
 #[derive(Debug)]
 pub struct CurveBand2D {
     plines: Vec<Pline>,
     left_width: f64,
     right_width: f64,
+    arc_tolerance: f64,
+}
+
+/// Fraction of the band's widest side used as the arc-tessellation sagitta
+/// when the caller states no [`CurveBand2D::with_arc_tolerance`].
+pub const DEFAULT_ARC_TOLERANCE_WIDTH_FRACTION: f64 = 0.1;
+
+/// The width-derived arc tolerance both constructors start from.
+fn default_arc_tolerance(left_width: f64, right_width: f64) -> f64 {
+    left_width.max(right_width) * DEFAULT_ARC_TOLERANCE_WIDTH_FRACTION
 }
 
 impl CurveBand2D {
@@ -328,6 +350,7 @@ impl CurveBand2D {
             plines,
             left_width: half_width,
             right_width: half_width,
+            arc_tolerance: default_arc_tolerance(half_width, half_width),
         }
     }
 
@@ -343,7 +366,36 @@ impl CurveBand2D {
             plines,
             left_width,
             right_width,
+            arc_tolerance: default_arc_tolerance(left_width, right_width),
         }
+    }
+
+    /// Sets the maximum sagitta between a baseline arc and the chords it is
+    /// tessellated into before stroking, replacing the width-derived default
+    /// (see the type docs).
+    ///
+    /// The bound is on the BASELINE arc; each side of the band inherits it
+    /// scaled by `r_offset / r`, so the outer face's chords deviate slightly
+    /// more and the inner face's slightly less. A bound below the
+    /// arrangement's own coordinate resolution (`WALL_EPS`) is raised to it:
+    /// finer than the snap grid the union runs on is not a finer answer.
+    ///
+    /// # Errors
+    ///
+    /// [`OperationError::InvalidInput`] when `tolerance` is not strictly
+    /// positive and finite — a zero or negative sagitta bound describes no
+    /// tessellation, and silently substituting the default would hide the
+    /// caller's mistake behind geometry that merely looks plausible.
+    pub fn with_arc_tolerance(mut self, tolerance: f64) -> Result<Self> {
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "CurveBand2D::with_arc_tolerance requires a strictly positive \
+                 finite sagitta bound; got {tolerance}"
+            ))
+            .into());
+        }
+        self.arc_tolerance = tolerance;
+        Ok(self)
     }
 
     /// Executes the band generation, returning typed face topology.
@@ -454,17 +506,18 @@ impl CurveBand2D {
         let mut wall_polys: Vec<polygon_union::PolygonWithHoles> = Vec::new();
         let mut wall_sources: Vec<InputEdgeSources> = Vec::new();
 
+        // Arc baselines are tessellated at the caller's sagitta bound
+        // (width-derived by default — see the type docs), floored at the
+        // arrangement's own coordinate resolution.
+        let arc_tolerance = self.arc_tolerance.max(polygon_union::WALL_EPS);
+
         for &(pline_idx, pline) in &valid {
-            // Tessellate arc segments into line segments.
-            // Tolerance scales with wall width for consistent arc resolution.
             let has_arcs = pline.vertices.iter().any(|v| v.bulge.abs() > 1e-12);
-            let arc_tolerance = self.left_width.max(self.right_width) * 0.1;
             // `seg_src[k]` = original pline segment index of stroke segment
             // `k` (identity for line-only inputs; each tessellated arc
             // chord maps back to its arc segment).
             let (mut verts, mut seg_src): (Vec<(f64, f64)>, Vec<usize>) = if has_arcs {
-                let (pts, src) =
-                    pline.to_points_with_sources(arc_tolerance.max(polygon_union::WALL_EPS));
+                let (pts, src) = pline.to_points_with_sources(arc_tolerance);
                 (pts.iter().map(|p| (p.x, p.y)).collect(), src)
             } else {
                 let v: Vec<(f64, f64)> = pline.vertices.iter().map(|v| (v.x, v.y)).collect();
@@ -1805,6 +1858,115 @@ mod tests {
         // Just verify it returns in finite time. Empty / non-empty result
         // is both acceptable — the bug is non-termination, not output shape.
         let _ = CurveBand2D::new(vec![pline], half_thickness).execute_faces();
+    }
+
+    // ===== Arc tessellation tolerance =====
+
+    /// Worst deviation of `face`'s outer ring from the circle
+    /// `(centre, radius)`, over the run of the ring that approximates it.
+    ///
+    /// A stroked arc face straddles its ideal circle: the miter joints fall
+    /// just outside it, the chord midpoints one baseline sagitta inside, so
+    /// both are measured. Vertices further than `band` from the circle
+    /// belong to another part of the boundary (a cap, the opposite face) and
+    /// are skipped.
+    fn max_deviation_from_circle(
+        face: &BandFootprint2D,
+        centre: (f64, f64),
+        radius: f64,
+        band: f64,
+    ) -> f64 {
+        let ring = &face.outer().vertices;
+        let n = ring.len();
+        let deviation = |x: f64, y: f64| (x - centre.0).hypot(y - centre.1) - radius;
+        let mut worst = 0.0_f64;
+        for i in 0..n {
+            let a = &ring[i];
+            let b = &ring[(i + 1) % n];
+            if deviation(a.x, a.y).abs() > band {
+                continue;
+            }
+            worst = worst.max(deviation(a.x, a.y).abs());
+            if deviation(b.x, b.y).abs() <= band {
+                worst = worst.max(deviation((a.x + b.x) * 0.5, (a.y + b.y) * 0.5).abs());
+            }
+        }
+        worst
+    }
+
+    /// A stated `arc_tolerance` bounds how far the band's face strays from
+    /// the exact offset circle, and the width-derived default does not: the
+    /// same semicircular baseline stroked at the default deviates by ~a
+    /// tenth of the width, and at 1 mm by at most 1 mm.
+    #[test]
+    fn arc_tolerance_bounds_the_band_sagitta() {
+        // Semicircle from (2, 0) to (-2, 0) through (0, 2): centre at the
+        // origin, radius 2, bulge 1.
+        let baseline = Pline {
+            vertices: vec![
+                PlineVertex::new(2.0, 0.0, 1.0),
+                PlineVertex::line(-2.0, 0.0),
+            ],
+            closed: false,
+        };
+        let hw = 0.09;
+        let outer_radius = 2.0 + hw;
+        // Wide enough to admit the whole outer face, narrow enough to reject
+        // the caps (r ≈ 2.002) and the inner face (r ≈ 1.91).
+        let band = hw / 2.0;
+
+        let default_face = CurveBand2D::new(vec![baseline.clone()], hw)
+            .execute_faces()
+            .unwrap()
+            .remove(0);
+        let default_deviation =
+            max_deviation_from_circle(&default_face, (0.0, 0.0), outer_radius, band);
+        assert!(
+            default_deviation > 0.005,
+            "the width-derived default is a coarse bound (hw / 10 = {}); got \
+             {default_deviation}",
+            hw * DEFAULT_ARC_TOLERANCE_WIDTH_FRACTION,
+        );
+
+        let tolerance = 0.001;
+        let tight_face = CurveBand2D::new(vec![baseline], hw)
+            .with_arc_tolerance(tolerance)
+            .unwrap()
+            .execute_faces()
+            .unwrap()
+            .remove(0);
+        let tight_deviation =
+            max_deviation_from_circle(&tight_face, (0.0, 0.0), outer_radius, band);
+        assert!(
+            tight_deviation > 0.0,
+            "the outer face must still be a tessellation, not a single chord"
+        );
+        assert!(
+            tight_deviation <= tolerance,
+            "the outer face must stay within the stated sagitta bound \
+             {tolerance}; got {tight_deviation}",
+        );
+        assert!(
+            tight_face.outer().vertices.len() > default_face.outer().vertices.len(),
+            "a tighter bound must tessellate finer",
+        );
+    }
+
+    #[test]
+    fn with_arc_tolerance_rejects_a_non_positive_bound() {
+        let baseline = Pline {
+            vertices: vec![
+                PlineVertex::new(2.0, 0.0, 1.0),
+                PlineVertex::line(-2.0, 0.0),
+            ],
+            closed: false,
+        };
+        for bad in [0.0, -0.001, f64::NAN, f64::INFINITY] {
+            let err = CurveBand2D::new(vec![baseline.clone()], 0.09)
+                .with_arc_tolerance(bad)
+                .expect_err("a non-positive sagitta bound describes no tessellation");
+            assert!(format!("{err}").contains("with_arc_tolerance"), "{err}");
+        }
     }
 
     // ===== BandFootprint2D::try_from_parts tests =====
