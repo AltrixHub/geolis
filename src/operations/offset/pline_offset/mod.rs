@@ -5,6 +5,8 @@ mod slice;
 mod stitch;
 mod validity;
 
+pub use raw_offset::{RawOffset, RawOffsetSegment};
+
 use crate::error::{OperationError, Result};
 use crate::geometry::pline::Pline;
 
@@ -64,7 +66,7 @@ impl PlineOffset2D {
     /// pipeline.
     fn execute_closed(&self) -> Result<Vec<Pline>> {
         // Step 1: Build raw offset polyline.
-        let raw = raw_offset::build(&self.pline, self.distance)?;
+        let raw = RawOffset::build(&self.pline, self.distance)?.into_pline();
 
         // Step 2: Find all self-intersections.
         let intersections = self_intersect::find_all(&raw);
@@ -102,7 +104,7 @@ impl PlineOffset2D {
     /// polyline(s) without endpoint caps.
     fn execute_open(&self) -> Result<Vec<Pline>> {
         // Step 1: Build raw offset polyline.
-        let raw = raw_offset::build(&self.pline, self.distance)?;
+        let raw = RawOffset::build(&self.pline, self.distance)?.into_pline();
 
         // Step 2: Find all self-intersections.
         let intersections = self_intersect::find_all(&raw);
