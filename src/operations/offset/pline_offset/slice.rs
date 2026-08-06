@@ -1,5 +1,5 @@
 use crate::geometry::pline::PlineVertex;
-use crate::math::arc_2d::{arc_from_bulge, arc_point_at};
+use crate::math::arc_2d::{arc_from_bulge, arc_point_at, sub_arc_bulge};
 
 use super::self_intersect::Intersection;
 
@@ -89,7 +89,7 @@ fn build_slice_verts(
         // Both split points on the same segment: single sub-segment.
         let start_pos = point_on_segment(vertices, n, seg_start, t_start);
         let end_pos = point_on_segment(vertices, n, seg_end, t_end);
-        let bulge = sub_bulge(vertices[seg_start].bulge, t_start, t_end);
+        let bulge = sub_arc_bulge(vertices[seg_start].bulge, t_start, t_end);
         verts.push(PlineVertex::new(start_pos.0, start_pos.1, bulge));
         verts.push(PlineVertex::line(end_pos.0, end_pos.1));
         return verts;
@@ -97,7 +97,7 @@ fn build_slice_verts(
 
     // Start vertex: connects to the end of seg_start (or next full vertex).
     let start_pos = point_on_segment(vertices, n, seg_start, t_start);
-    let start_bulge = sub_bulge(vertices[seg_start].bulge, t_start, 1.0);
+    let start_bulge = sub_arc_bulge(vertices[seg_start].bulge, t_start, 1.0);
     verts.push(PlineVertex::new(start_pos.0, start_pos.1, start_bulge));
 
     // Walk full interior segments from seg_start+1 to seg_end-1.
@@ -112,7 +112,7 @@ fn build_slice_verts(
 
     // Last original vertex before the end split point.
     let v_end_start = &vertices[seg_end];
-    let end_bulge = sub_bulge(v_end_start.bulge, 0.0, t_end);
+    let end_bulge = sub_arc_bulge(v_end_start.bulge, 0.0, t_end);
     verts.push(PlineVertex::new(v_end_start.x, v_end_start.y, end_bulge));
 
     // End point.
@@ -138,17 +138,4 @@ fn point_on_segment(vertices: &[PlineVertex], n: usize, seg_idx: usize, t: f64) 
         let (cx, cy, r, sa, sw) = arc_from_bulge(v0.x, v0.y, v1.x, v1.y, v0.bulge);
         arc_point_at(cx, cy, r, sa, sw, t)
     }
-}
-
-/// Computes the bulge for a sub-arc spanning parameter range `[t_start, t_end]`.
-///
-/// For line segments (bulge ≈ 0), returns 0.
-/// For arc segments, computes `tan(sub_sweep / 4)` where `sub_sweep = sweep * (t_end - t_start)`.
-fn sub_bulge(original_bulge: f64, t_start: f64, t_end: f64) -> f64 {
-    if original_bulge.abs() < 1e-12 {
-        return 0.0;
-    }
-    let sweep = 4.0 * original_bulge.atan();
-    let sub_sweep = sweep * (t_end - t_start);
-    (sub_sweep / 4.0).tan()
 }

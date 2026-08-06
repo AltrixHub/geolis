@@ -51,7 +51,98 @@ const ANGULAR_EPS: f64 = 1e-9;
 
 /// Keeps the joint clear of both endpoints so that neither sub-chord
 /// collapses, whatever `joint_ratio` the caller passes.
-const JOINT_RATIO_MARGIN: f64 = 1e-6;
+///
+/// [`biarc_from_hermite`] clamps into `[JOINT_RATIO_MARGIN, 1 -
+/// JOINT_RATIO_MARGIN]`, so that closed interval is the family a caller
+/// can actually address — and the range
+/// [`biarc_joint_ratio`] answers within.
+pub const JOINT_RATIO_MARGIN: f64 = 1e-6;
+
+/// Relative distance (against the chord length) within which a
+/// re-solved joint counts as the requested one.
+const JOINT_MATCH_TOL: f64 = 1e-9;
+
+/// The chord frame both the forward and the inverse solve read: the
+/// chord `p0 -> p1` plus the offset of each tangent from it.
+#[derive(Debug, Clone, Copy)]
+struct ChordFrame {
+    chord_len: f64,
+    chord_angle: f64,
+    start_offset: f64,
+    end_offset: f64,
+}
+
+impl ChordFrame {
+    /// `None` for a degenerate element: a zero-length chord, a
+    /// zero-length tangent, or any non-finite input.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        x0: f64,
+        y0: f64,
+        tx0: f64,
+        ty0: f64,
+        x1: f64,
+        y1: f64,
+        tx1: f64,
+        ty1: f64,
+    ) -> Option<Self> {
+        if ![x0, y0, tx0, ty0, x1, y1, tx1, ty1]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return None;
+        }
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let chord_len = (dx * dx + dy * dy).sqrt();
+        if chord_len < EPS
+            || (tx0 * tx0 + ty0 * ty0).sqrt() < EPS
+            || (tx1 * tx1 + ty1 * ty1).sqrt() < EPS
+        {
+            return None;
+        }
+        let chord_angle = dy.atan2(dx);
+        Some(Self {
+            chord_len,
+            chord_angle,
+            start_offset: wrap_signed(ty0.atan2(tx0) - chord_angle),
+            end_offset: wrap_signed(ty1.atan2(tx1) - chord_angle),
+        })
+    }
+
+    /// Both tangents already point along the chord, so the element is a
+    /// straight segment.
+    fn is_straight(&self) -> bool {
+        self.start_offset.abs() < ANGULAR_EPS && self.end_offset.abs() < ANGULAR_EPS
+    }
+
+    /// Half the total turn from the start tangent to the end tangent —
+    /// half the sweep of the locus arc the joint lives on.
+    fn half_turn(&self) -> f64 {
+        wrap_signed(self.end_offset - self.start_offset) * 0.5
+    }
+
+    /// The joint at `ratio` on the locus, as an offset from `p0`.
+    ///
+    /// Its sub-chord from `p0` has direction `chord_angle + half *
+    /// (ratio - 1)` and length `chord_len * sin(half * ratio) /
+    /// sin(half)`, both read off the tangent-chord relation on the locus
+    /// arc; the length ratio tends to `ratio` as that arc flattens.
+    fn joint_offset(&self, ratio: f64) -> (f64, f64) {
+        let half = self.half_turn();
+        let sin_half = half.sin();
+        let scale = if sin_half.abs() < EPS {
+            ratio
+        } else {
+            (half * ratio).sin() / sin_half
+        };
+        let angle = self.chord_angle + half * (ratio - 1.0);
+        (
+            self.chord_len * scale * angle.cos(),
+            self.chord_len * scale * angle.sin(),
+        )
+    }
+}
 
 /// The curve produced by [`biarc_from_hermite`].
 ///
@@ -129,39 +220,17 @@ pub fn biarc_from_hermite(
     ty1: f64,
     joint_ratio: f64,
 ) -> BiarcShape {
-    if ![x0, y0, tx0, ty0, x1, y1, tx1, ty1]
-        .iter()
-        .all(|v| v.is_finite())
-    {
+    let Some(frame) = ChordFrame::new(x0, y0, tx0, ty0, x1, y1, tx1, ty1) else {
+        return BiarcShape::Straight;
+    };
+    if frame.is_straight() {
         return BiarcShape::Straight;
     }
-
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let chord_len = (dx * dx + dy * dy).sqrt();
-    if chord_len < EPS
-        || (tx0 * tx0 + ty0 * ty0).sqrt() < EPS
-        || (tx1 * tx1 + ty1 * ty1).sqrt() < EPS
-    {
-        return BiarcShape::Straight;
-    }
-
-    // Tangent directions relative to the chord.
-    let chord_angle = dy.atan2(dx);
-    let start_offset = wrap_signed(ty0.atan2(tx0) - chord_angle);
-    let end_offset = wrap_signed(ty1.atan2(tx1) - chord_angle);
-    if start_offset.abs() < ANGULAR_EPS && end_offset.abs() < ANGULAR_EPS {
-        return BiarcShape::Straight;
-    }
-
-    // Total turn from the start tangent to the end tangent. This is the
-    // sweep of the locus arc the joint lives on.
-    let total_turn = wrap_signed(end_offset - start_offset);
 
     // One arc may already do the job; its sweep then reaches t1 exactly
     // (possibly after a full turn, e.g. a 270-degree arc).
     let single = bulge_from_chord_tangent(x0, y0, x1, y1, tx0, ty0);
-    if wrap_signed(4.0 * single.atan() - total_turn).abs() < ANGULAR_EPS {
+    if wrap_signed(4.0 * single.atan() - 2.0 * frame.half_turn()).abs() < ANGULAR_EPS {
         return BiarcShape::SingleArc { bulge: single };
     }
 
@@ -171,21 +240,9 @@ pub fn biarc_from_hermite(
         0.5
     };
 
-    // Joint on the locus arc. Its sub-chord from p0 has direction
-    // `chord_angle - half + half * ratio` and length
-    // `chord_len * sin(half * ratio) / sin(half)`, both read off the
-    // tangent-chord relation on that arc; the length ratio tends to
-    // `ratio` as the arc flattens.
-    let half = total_turn * 0.5;
-    let sin_half = half.sin();
-    let scale = if sin_half.abs() < EPS {
-        ratio
-    } else {
-        (half * ratio).sin() / sin_half
-    };
-    let sub_chord_angle = chord_angle + half * (ratio - 1.0);
-    let joint_x = x0 + chord_len * scale * sub_chord_angle.cos();
-    let joint_y = y0 + chord_len * scale * sub_chord_angle.sin();
+    let (offset_x, offset_y) = frame.joint_offset(ratio);
+    let joint_x = x0 + offset_x;
+    let joint_y = y0 + offset_y;
 
     // The first arc is built forward from p0; the second is built
     // backwards from p1 (and negated) so that both prescribed tangents
@@ -198,6 +255,86 @@ pub fn biarc_from_hermite(
         joint_y,
         bulge_first,
         bulge_second,
+    }
+}
+
+/// Recovers the `joint_ratio` that puts a biarc's joint at `(joint_x,
+/// joint_y)` — the inverse of [`biarc_from_hermite`].
+///
+/// This is what makes an authored biarc closed under splitting: cut one
+/// of its arcs, and the surviving joint is reproduced exactly by the
+/// ratio this returns for the remaining Hermite element, so the curve
+/// does not move when a vertex is inserted on it.
+///
+/// Returns `None` when no admissible ratio produces that joint:
+///
+/// - the Hermite data is degenerate, or does not need two arcs at all
+///   (see [`BiarcShape`]) — there is no joint to place;
+/// - the requested joint is not on the biarc family's joint locus for
+///   that data (checked by re-solving, within [`JOINT_MATCH_TOL`] of the
+///   chord length);
+/// - the ratio it would need lies outside
+///   `[JOINT_RATIO_MARGIN, 1 - JOINT_RATIO_MARGIN]`, the interval
+///   [`biarc_from_hermite`] clamps to — i.e. the joint sits (all but) on
+///   an endpoint.
+///
+/// # Panics
+///
+/// Does not panic.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn biarc_joint_ratio(
+    x0: f64,
+    y0: f64,
+    tx0: f64,
+    ty0: f64,
+    x1: f64,
+    y1: f64,
+    tx1: f64,
+    ty1: f64,
+    joint_x: f64,
+    joint_y: f64,
+) -> Option<f64> {
+    if !joint_x.is_finite() || !joint_y.is_finite() {
+        return None;
+    }
+    let frame = ChordFrame::new(x0, y0, tx0, ty0, x1, y1, tx1, ty1)?;
+
+    let jdx = joint_x - x0;
+    let jdy = joint_y - y0;
+    if (jdx * jdx + jdy * jdy).sqrt() < EPS {
+        return None;
+    }
+
+    let half = frame.half_turn();
+    let ratio = if half.sin().abs() < EPS {
+        // The locus has flattened onto the chord, where the joint's
+        // parameter is simply how far along the chord it sits.
+        (jdx * frame.chord_angle.cos() + jdy * frame.chord_angle.sin()) / frame.chord_len
+    } else {
+        // `ChordFrame::joint_offset` aims the joint `half * (ratio - 1)`
+        // off the chord direction. That offset is under a quarter turn
+        // in magnitude (`|half| <= pi / 2`, `ratio` in the unit
+        // interval), so measuring it back inverts without ambiguity.
+        1.0 + wrap_signed(jdy.atan2(jdx) - frame.chord_angle) / half
+    };
+    if !(JOINT_RATIO_MARGIN..=1.0 - JOINT_RATIO_MARGIN).contains(&ratio) {
+        return None;
+    }
+
+    // Direction alone cannot tell a joint that is ON the locus from one
+    // merely aimed at it, so confirm by re-solving.
+    match biarc_from_hermite(x0, y0, tx0, ty0, x1, y1, tx1, ty1, ratio) {
+        BiarcShape::Biarc {
+            joint_x: solved_x,
+            joint_y: solved_y,
+            ..
+        } if (solved_x - joint_x).hypot(solved_y - joint_y)
+            <= JOINT_MATCH_TOL * frame.chord_len =>
+        {
+            Some(ratio)
+        }
+        _ => None,
     }
 }
 
@@ -521,6 +658,75 @@ mod tests {
             solve(c_curve(), 0.5),
             "NaN ratio must behave like 0.5"
         );
+    }
+
+    /// The inverse solve, applied to a configuration's own joint.
+    fn recover(config: (f64, f64, f64, f64, f64, f64, f64, f64), jx: f64, jy: f64) -> Option<f64> {
+        let (x0, y0, tx0, ty0, x1, y1, tx1, ty1) = config;
+        biarc_joint_ratio(x0, y0, tx0, ty0, x1, y1, tx1, ty1, jx, jy)
+    }
+
+    #[test]
+    fn joint_ratio_round_trips_through_the_solver() {
+        // S_CURVE turns by zero in total, so it exercises the flattened
+        // locus; c_curve exercises the curved one.
+        for config in [S_CURVE, c_curve()] {
+            for ratio in [0.05, 0.25, 0.5, 0.8, 0.95] {
+                let (jx, jy, _, _) = expect_biarc(solve(config, ratio));
+                let recovered = recover(config, jx, jy);
+                match recovered {
+                    Some(value) => assert!(
+                        (value - ratio).abs() < TOL,
+                        "ratio={ratio} recovered={value}"
+                    ),
+                    None => panic!("no ratio recovered for {ratio}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joint_ratio_rejects_shapes_without_a_joint() {
+        // A straight element: nothing to place.
+        assert_eq!(
+            biarc_joint_ratio(0.0, 0.0, 3.0, 4.0, 3.0, 4.0, 0.6, 0.8, 1.5, 2.0),
+            None
+        );
+        // A single arc already meets both tangents.
+        let (x0, y0, x1, y1) = (-1.3, 0.7, 2.4, -0.9);
+        let (t0, t1) = segment_tangents(x0, y0, x1, y1, 0.4);
+        assert_eq!(
+            biarc_joint_ratio(x0, y0, t0.0, t0.1, x1, y1, t1.0, t1.1, 0.5, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn joint_ratio_rejects_a_joint_off_the_locus() {
+        let (jx, jy, _, _) = expect_biarc(solve(c_curve(), 0.4));
+        assert!(recover(c_curve(), jx, jy).is_some(), "the locus joint");
+        assert_eq!(recover(c_curve(), jx, jy + 0.2), None, "displaced joint");
+        // An endpoint is on the locus but outside the addressable range.
+        assert_eq!(recover(c_curve(), 2.0, 0.0), None, "end point");
+    }
+
+    #[test]
+    fn joint_ratio_rejects_degenerate_input() {
+        let (jx, jy, _, _) = expect_biarc(solve(c_curve(), 0.4));
+        // Non-finite joint.
+        assert_eq!(recover(c_curve(), f64::NAN, jy), None);
+        assert_eq!(recover(c_curve(), jx, f64::INFINITY), None);
+        // Zero-length chord and zero-length tangent.
+        assert_eq!(
+            biarc_joint_ratio(1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.5),
+            None
+        );
+        assert_eq!(
+            biarc_joint_ratio(0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 0.5),
+            None
+        );
+        // A joint sitting on p0 has no direction to read.
+        assert_eq!(recover(c_curve(), 0.0, 0.0), None);
     }
 
     #[test]

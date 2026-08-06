@@ -7,7 +7,7 @@ pub mod pline_sampling;
 pub mod pline_shatter;
 pub mod surface;
 
-pub use biarc::{biarc_from_hermite, BiarcShape};
+pub use biarc::{biarc_from_hermite, biarc_joint_ratio, BiarcShape, JOINT_RATIO_MARGIN};
 pub use curve::{Arc, Curve, CurveDomain, Line};
 pub use nurbs::{NurbsCurve2D, NurbsCurve3D, NurbsSurface};
 pub use pline::{Pline, PlineVertex, MAX_ARC_SUBDIVISIONS};

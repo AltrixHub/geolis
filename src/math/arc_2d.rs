@@ -79,6 +79,29 @@ pub fn bulge_from_arc(x0: f64, y0: f64, x1: f64, y1: f64, cx: f64, cy: f64, is_c
     (sweep / 4.0).tan()
 }
 
+/// Returns the bulge of the `f0 -> f1` sub-arc of a segment whose bulge
+/// is `bulge`, where `f0` and `f1` are parameters along that segment in
+/// the [`arc_point_at`] convention.
+///
+/// A circular arc's parameter fraction is its angle fraction, so the
+/// sub-arc sweeps `(f1 - f0) * sweep` and keeps the segment's center and
+/// radius EXACTLY — this is what makes cutting an arc in two a
+/// shape-preserving operation. A straight segment stays straight, and
+/// reversing the range (`f1 < f0`) negates the bulge, matching the
+/// reversed sub-arc.
+///
+/// # Panics
+///
+/// Does not panic.
+#[must_use]
+pub fn sub_arc_bulge(bulge: f64, f0: f64, f1: f64) -> f64 {
+    if bulge.abs() < 1e-12 {
+        return 0.0;
+    }
+    let sweep = 4.0 * bulge.atan();
+    ((f1 - f0) * sweep / 4.0).tan()
+}
+
 /// Maximum absolute tangent-chord angle, in radians (160 degrees).
 ///
 /// The sweep of an arc is twice its tangent-chord angle, so this caps a
@@ -413,6 +436,56 @@ mod tests {
         let inside = 159.0_f64.to_radians();
         let b = bulge_from_chord_tangent(0.0, 0.0, 1.0, 0.0, inside.cos(), inside.sin());
         assert!((b + (inside * 0.5).tan()).abs() < 1e-12, "bulge={b}");
+    }
+
+    #[test]
+    fn sub_arc_bulge_over_the_whole_range_is_the_input() {
+        for bulge in [1.0, -1.0, 0.5, -0.5, 3.0, -3.0, 1e-4] {
+            let whole = sub_arc_bulge(bulge, 0.0, 1.0);
+            assert!((whole - bulge).abs() < TOL, "bulge={bulge} whole={whole}");
+        }
+    }
+
+    #[test]
+    fn sub_arc_bulge_keeps_the_center_and_radius() {
+        // Splitting an arc at f must leave both halves on the SAME
+        // circle, and each half must reach the split point exactly.
+        let (x0, y0, x1, y1) = (-1.3, 0.7, 2.4, -0.9);
+        for bulge in [0.3, -0.3, 1.0, -1.0, 2.5] {
+            let (cx, cy, r, sa, sw) = arc_from_bulge(x0, y0, x1, y1, bulge);
+            for f in [0.1, 0.5, 0.9] {
+                let (mx, my) = arc_point_at(cx, cy, r, sa, sw, f);
+
+                let first = sub_arc_bulge(bulge, 0.0, f);
+                let (fx, fy, fr, fsa, fsw) = arc_from_bulge(x0, y0, mx, my, first);
+                assert!((fx - cx).abs() < 1e-9 && (fy - cy).abs() < 1e-9, "center");
+                assert!((fr - r).abs() < 1e-9, "radius {fr} vs {r}");
+                let end = arc_point_at(fx, fy, fr, fsa, fsw, 1.0);
+                assert!(
+                    (end.0 - mx).abs() < 1e-9 && (end.1 - my).abs() < 1e-9,
+                    "end"
+                );
+
+                let second = sub_arc_bulge(bulge, f, 1.0);
+                let (sx, sy, sr, ssa, ssw) = arc_from_bulge(mx, my, x1, y1, second);
+                assert!((sx - cx).abs() < 1e-9 && (sy - cy).abs() < 1e-9, "center");
+                assert!((sr - r).abs() < 1e-9, "radius {sr} vs {r}");
+                let tail = arc_point_at(sx, sy, sr, ssa, ssw, 1.0);
+                assert!(
+                    (tail.0 - x1).abs() < 1e-9 && (tail.1 - y1).abs() < 1e-9,
+                    "tail"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sub_arc_bulge_is_straight_and_reversible() {
+        assert!(sub_arc_bulge(0.0, 0.0, 0.5).abs() < TOL);
+        assert!(sub_arc_bulge(1e-13, 0.0, 0.5).abs() < TOL);
+        let forward = sub_arc_bulge(0.8, 0.2, 0.7);
+        let backward = sub_arc_bulge(0.8, 0.7, 0.2);
+        assert!((forward + backward).abs() < TOL, "{forward} {backward}");
     }
 
     #[test]
