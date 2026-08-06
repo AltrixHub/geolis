@@ -8,9 +8,10 @@ mod wire_offset_2d;
 pub use curve_band::{
     carve_band_faces, BandFootprint2D, CapEnd, CarvedFootprintProvenance, CarvedSegmentProvenance,
     CurveBand2D, FootprintProvenance, OffsetSide, SegmentOrigin, SegmentProvenance,
+    DEFAULT_ARC_TOLERANCE_WIDTH_FRACTION,
 };
 pub use curve_offset_2d::CurveOffset2D;
 pub use face_offset::FaceOffset;
-pub use pline_offset::PlineOffset2D;
+pub use pline_offset::{PlineOffset2D, RawOffset, RawOffsetSegment};
 pub use thicken_face::ThickenFace;
 pub use wire_offset_2d::WireOffset2D;

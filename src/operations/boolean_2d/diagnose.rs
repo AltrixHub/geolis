@@ -18,22 +18,30 @@ pub const MIN_FACE_AREA: f64 = WALL_EPS;
 
 /// Assess a 2D boolean result. `expect_nonempty` = the op should have left at
 /// least one face (e.g. subtracting a cut that must not consume the whole base).
+///
+/// Takes the faces as a re-iterable borrow so a traced op — whose faces sit
+/// beside their provenance — is assessed without cloning them out.
 #[must_use]
-pub fn assess(faces: &[PolygonWithHoles], expect_nonempty: bool) -> OpHealth {
+pub fn assess<'a, F>(faces: F, expect_nonempty: bool) -> OpHealth
+where
+    F: IntoIterator<Item = &'a PolygonWithHoles> + Clone,
+{
     let mut degenerate = Vec::new();
     let mut suspicious = Vec::new();
 
-    if let Some(at) = first_nonfinite(faces) {
+    if let Some(at) = first_nonfinite(faces.clone()) {
         degenerate.push(Reason::NonFinite { at });
     }
-    if expect_nonempty && faces.is_empty() {
-        degenerate.push(Reason::EmptyResult);
-    }
+    let mut empty = true;
     for face in faces {
+        empty = false;
         let area = signed_area(&face.outer).abs();
         if area < MIN_FACE_AREA {
             suspicious.push(Reason::ZeroAreaFace { scale: area });
         }
+    }
+    if expect_nonempty && empty {
+        degenerate.push(Reason::EmptyResult);
     }
 
     if !degenerate.is_empty() {
@@ -50,7 +58,9 @@ fn ring_finite(ring: &Polygon) -> bool {
 }
 
 /// Where the first non-finite coordinate appears, if any.
-fn first_nonfinite(faces: &[PolygonWithHoles]) -> Option<&'static str> {
+fn first_nonfinite<'a>(
+    faces: impl IntoIterator<Item = &'a PolygonWithHoles>,
+) -> Option<&'static str> {
     for face in faces {
         if !ring_finite(&face.outer) {
             return Some("outer ring");
