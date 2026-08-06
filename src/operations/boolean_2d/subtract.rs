@@ -106,6 +106,182 @@ pub(crate) fn subtract_all_with_holes_traced(
     run_arrangement_traced(&segment_inputs, &oracle)
 }
 
+/// Where one boundary segment of a subtracted face came from.
+///
+/// Wraps — rather than exposes — the engine's internal [`SegmentSite`],
+/// so the base/cut split the traced input layout already guarantees is
+/// stated in the type instead of in an index convention the caller has
+/// to remember. `ring` / `edge` index the INPUT ring the segment lies
+/// on (edge `e` runs from ring vertex `e` to vertex `(e + 1) % n`), so a
+/// caller holding its own per-edge lineage for that input can look it up
+/// directly.
+///
+/// geolis stays identity-dumb: a cut segment names its cutter only by
+/// **index into the `cutters` slice**, never by a caller-supplied name
+/// or id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubtractSegmentProvenance {
+    /// A surviving piece of `base`'s own boundary.
+    Base {
+        /// Ring of `base` the segment lies on.
+        ring: RingRef,
+        /// Edge index within that ring.
+        edge: usize,
+    },
+    /// A seam the subtraction created: the segment lies on the boundary
+    /// of a cutter and is interior to `base`.
+    Cut {
+        /// Index of the cutter in the `cutters` slice passed to
+        /// [`subtract_faces_traced`].
+        cutter: usize,
+        /// Ring of that cutter the segment lies on.
+        ring: RingRef,
+        /// Edge index within that ring.
+        edge: usize,
+    },
+}
+
+/// Per-ring provenance aligned 1:1 with a subtracted [`PolygonWithHoles`]:
+/// `outer()[k]` describes the outer-ring segment from vertex `k` to
+/// vertex `(k + 1) % n`, and `holes()[h][k]` likewise for hole `h`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtractFootprintProvenance {
+    outer: Vec<SubtractSegmentProvenance>,
+    holes: Vec<Vec<SubtractSegmentProvenance>>,
+}
+
+impl SubtractFootprintProvenance {
+    /// Per-segment provenance of the outer ring, aligned with
+    /// [`PolygonWithHoles::outer`]'s segments.
+    #[must_use]
+    pub fn outer(&self) -> &[SubtractSegmentProvenance] {
+        &self.outer
+    }
+
+    /// Per-segment provenance of each hole ring, aligned with
+    /// [`PolygonWithHoles::holes`].
+    #[must_use]
+    pub fn holes(&self) -> &[Vec<SubtractSegmentProvenance>] {
+        &self.holes
+    }
+
+    /// Read one traced face's sites through the input layout
+    /// (`0` = base, `1 + c` = cutter `c`).
+    fn of(face: &TracedFace) -> Self {
+        let site = |s: &SegmentSite| match s.input.checked_sub(1) {
+            None => SubtractSegmentProvenance::Base {
+                ring: s.ring,
+                edge: s.edge,
+            },
+            Some(cutter) => SubtractSegmentProvenance::Cut {
+                cutter,
+                ring: s.ring,
+                edge: s.edge,
+            },
+        };
+        Self {
+            outer: face.outer_sites.iter().map(site).collect(),
+            holes: face
+                .hole_sites
+                .iter()
+                .map(|ring| ring.iter().map(site).collect())
+                .collect(),
+        }
+    }
+}
+
+/// [`subtract_all_with_holes`] with per-segment provenance: every
+/// boundary segment of every surviving face reports the input edge it
+/// came from (see [`SubtractSegmentProvenance`]).
+///
+/// The faces are `subtract_all_with_holes`'s own, in its order and with
+/// its vertices — this is the same call, with the labels the engine
+/// already threaded kept instead of dropped. Labels are **threaded**
+/// through the arrangement, never recovered by geometric matching, so
+/// they survive the engine's `WALL_EPS` vertex snapping unharmed.
+///
+/// # Empty cutter list
+///
+/// `base` is returned verbatim as a single face — bit-identical
+/// vertices, no arrangement, no `WALL_EPS` snap — with the identity
+/// provenance for every ring edge (`Base { ring, edge }` naming the edge
+/// it *is*).
+///
+/// # Errors
+///
+/// Same failure modes as [`subtract_all_with_holes`].
+pub fn subtract_faces_traced(
+    base: &PolygonWithHoles,
+    cutters: &[PolygonWithHoles],
+) -> Result<Vec<(PolygonWithHoles, SubtractFootprintProvenance)>> {
+    Ok(subtract_all_with_holes_traced(base, cutters)?
+        .into_iter()
+        .map(|face| {
+            let provenance = SubtractFootprintProvenance::of(&face);
+            (face.face, provenance)
+        })
+        .collect())
+}
+
+/// [`subtract_faces_traced`] with a health verdict attached, on the same
+/// contract as [`subtract_all_with_holes_diagnosed`]: the result is
+/// returned verbatim and the verdict is non-`Ok` when the op errored,
+/// when a real cut consumed the whole base, or when a sliver face
+/// survived.
+#[must_use]
+pub fn subtract_faces_traced_diagnosed(
+    base: &PolygonWithHoles,
+    cutters: &[PolygonWithHoles],
+) -> OpDiagnostic<Result<Vec<(PolygonWithHoles, SubtractFootprintProvenance)>>> {
+    let inputs = InputFacts::of(base, cutters);
+    let result = subtract_faces_traced(base, cutters);
+    let health = match &result {
+        Err(e) => OpHealth::Failed(e.to_string()),
+        Ok(faces) => assess(faces.iter().map(|(face, _)| face), inputs.expect_nonempty),
+    };
+    inputs.attach(result, health)
+}
+
+/// The cheap input facts both diagnosed entry points report, gathered
+/// before the op runs (the untraced one moves its `base` into the call).
+struct InputFacts {
+    base_outer_verts: usize,
+    base_holes: usize,
+    base_area: f64,
+    cutters: usize,
+    /// A real cut against a real base should leave geometry behind; a
+    /// fully empty result then means the cut swallowed the whole base.
+    expect_nonempty: bool,
+}
+
+impl InputFacts {
+    fn of(base: &PolygonWithHoles, cutters: &[PolygonWithHoles]) -> Self {
+        let base_area = signed_area(&base.outer).abs();
+        Self {
+            base_outer_verts: base.outer.len(),
+            base_holes: base.holes.len(),
+            base_area,
+            cutters: cutters.len(),
+            expect_nonempty: !cutters.is_empty() && base_area > super::diagnose::MIN_FACE_AREA,
+        }
+    }
+
+    /// Pair `result` with `health`, building the readable snapshot only
+    /// when the verdict is non-`Ok` — so the clean path costs nothing
+    /// beyond the assessment.
+    fn attach<T>(self, result: T, health: OpHealth) -> OpDiagnostic<T> {
+        if health.is_ok() {
+            return OpDiagnostic::ok(result);
+        }
+        let snapshot = InputSnapshot::new("boolean_2d::subtract")
+            .with("base_outer_verts", self.base_outer_verts)
+            .with("base_holes", self.base_holes)
+            .with("base_area", self.base_area)
+            .with("cutters", self.cutters);
+        OpDiagnostic::flagged(result, health, snapshot)
+    }
+}
+
 /// The traced face a no-op subtract produces: `base` itself, with each
 /// ring edge attributed to the ring edge it *is*.
 fn identity_trace(base: &PolygonWithHoles) -> TracedFace {
@@ -144,31 +320,16 @@ pub fn subtract_all_with_holes_diagnosed(
     base: PolygonWithHoles,
     subtracts: &[PolygonWithHoles],
 ) -> OpDiagnostic<Result<Vec<PolygonWithHoles>>> {
-    let base_outer_verts = base.outer.len();
-    let base_holes = base.holes.len();
-    let base_area = signed_area(&base.outer).abs();
-    let cutters = subtracts.len();
-    // A real cut against a real base should leave geometry behind; a fully
-    // empty result then means the cut swallowed the whole base.
-    let expect_nonempty = !subtracts.is_empty() && base_area > super::diagnose::MIN_FACE_AREA;
+    // Facts are gathered before `base` moves into the call.
+    let inputs = InputFacts::of(&base, subtracts);
 
     let result = subtract_all_with_holes(base, subtracts);
 
     let health = match &result {
         Err(e) => OpHealth::Failed(e.to_string()),
-        Ok(faces) => assess(faces, expect_nonempty),
+        Ok(faces) => assess(faces, inputs.expect_nonempty),
     };
-
-    if health.is_ok() {
-        OpDiagnostic::ok(result)
-    } else {
-        let snapshot = InputSnapshot::new("boolean_2d::subtract")
-            .with("base_outer_verts", base_outer_verts)
-            .with("base_holes", base_holes)
-            .with("base_area", base_area)
-            .with("cutters", cutters);
-        OpDiagnostic::flagged(result, health, snapshot)
-    }
+    inputs.attach(result, health)
 }
 
 #[cfg(test)]
@@ -182,7 +343,7 @@ mod tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     use super::super::intersect_all_with_holes;
-    use super::super::types::{signed_area, Polygon};
+    use super::super::types::{signed_area, Polygon, WALL_EPS};
     use super::*;
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> Polygon {
@@ -358,6 +519,196 @@ mod tests {
         assert!(
             base_x.iter().all(|&i| i == 0),
             "coincident base/cutter edges must stay attributed to the base"
+        );
+    }
+
+    // ===== Published traced subtract (`subtract_faces_traced`) =====
+
+    /// The named input ring's edge `edge`, as an endpoint pair.
+    fn input_edge(pwh: &PolygonWithHoles, ring: RingRef, edge: usize) -> ((f64, f64), (f64, f64)) {
+        let pts = match ring {
+            RingRef::Outer => &pwh.outer,
+            RingRef::Hole(h) => &pwh.holes[h],
+        };
+        (pts[edge], pts[(edge + 1) % pts.len()])
+    }
+
+    /// Distance from `p` to the infinite line through `a → b`.
+    fn line_distance(a: (f64, f64), b: (f64, f64), p: (f64, f64)) -> f64 {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = dx.hypot(dy);
+        assert!(len > 0.0, "input edge must have positive length");
+        ((p.0 - a.0) * dy - (p.1 - a.1) * dx).abs() / len
+    }
+
+    /// Walk every output edge of every face and hand `(provenance, p0, p1)`
+    /// to `check`, so a contract can be stated once over both ring kinds.
+    fn for_each_output_edge(
+        faces: &[(PolygonWithHoles, SubtractFootprintProvenance)],
+        mut check: impl FnMut(SubtractSegmentProvenance, (f64, f64), (f64, f64)),
+    ) {
+        for (face, provenance) in faces {
+            let rings = std::iter::once((&face.outer, provenance.outer())).chain(
+                face.holes
+                    .iter()
+                    .zip(provenance.holes())
+                    .map(|(pts, prov)| (pts, prov.as_slice())),
+            );
+            for (pts, prov) in rings {
+                assert_eq!(
+                    pts.len(),
+                    prov.len(),
+                    "provenance must align 1:1 with the ring's segments"
+                );
+                for (edge, &segment) in prov.iter().enumerate() {
+                    check(segment, pts[edge], pts[(edge + 1) % pts.len()]);
+                }
+            }
+        }
+    }
+
+    /// The published contract: every output edge names an INPUT edge whose
+    /// supporting line contains both of its endpoints. This is what lets a
+    /// caller carry its own per-edge lineage across the subtraction — a
+    /// provenance that named the wrong edge would silently relabel geometry.
+    #[test]
+    fn published_provenance_names_an_input_edge_that_contains_the_segment() {
+        // A base with a hole, cut by a block that crosses both the outer
+        // ring and the hole ring, so all three provenance sources appear.
+        let base = PolygonWithHoles {
+            outer: rect(0.0, 0.0, 10.0, 10.0),
+            holes: vec![cw_rect(3.0, 3.0, 4.0, 4.0)],
+        };
+        let cut = pwh_no_holes(rect(4.0, -1.0, 2.0, 12.0));
+        let faces = subtract_faces_traced(&base, std::slice::from_ref(&cut)).expect("subtract");
+        assert_eq!(
+            faces.len(),
+            2,
+            "a through-cut splits the ringed base in two"
+        );
+
+        let (mut from_base, mut from_cut) = (0_usize, 0_usize);
+        for_each_output_edge(&faces, |segment, p0, p1| {
+            let (source, ring, edge) = match segment {
+                SubtractSegmentProvenance::Base { ring, edge } => {
+                    from_base += 1;
+                    (&base, ring, edge)
+                }
+                SubtractSegmentProvenance::Cut { cutter, ring, edge } => {
+                    from_cut += 1;
+                    assert_eq!(cutter, 0, "only one cutter was supplied");
+                    (&cut, ring, edge)
+                }
+            };
+            let (a, b) = input_edge(source, ring, edge);
+            for p in [p0, p1] {
+                let d = line_distance(a, b, p);
+                assert!(
+                    d < WALL_EPS,
+                    "output point {p:?} is {d} from the line of the {segment:?} it \
+                     names ({a:?} -> {b:?})",
+                );
+            }
+        });
+        assert!(from_base > 0 && from_cut > 0, "both sources must appear");
+        // The hole ring must be named as such, not folded into the outer.
+        let holes_named = faces.iter().any(|(_, p)| {
+            p.outer().iter().chain(p.holes().iter().flatten()).any(
+                |s| matches!(s, SubtractSegmentProvenance::Base { ring, .. } if *ring == RingRef::Hole(0)),
+            )
+        });
+        assert!(holes_named, "the base's hole ring must name Hole(0)");
+    }
+
+    /// The identity fast path is verbatim: no arrangement runs, so the
+    /// vertices are bit-identical to the input's and every edge names the
+    /// ring edge it *is*.
+    #[test]
+    fn published_empty_cutter_list_returns_the_base_verbatim() {
+        let base = PolygonWithHoles {
+            outer: rect(0.0, 0.0, 10.0, 10.0),
+            holes: vec![cw_rect(3.0, 3.0, 4.0, 4.0)],
+        };
+        let faces = subtract_faces_traced(&base, &[]).expect("subtract");
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].0, base, "bit-identical vertices, no WALL_EPS snap");
+        let expected_outer: Vec<SubtractSegmentProvenance> = (0..base.outer.len())
+            .map(|edge| SubtractSegmentProvenance::Base {
+                ring: RingRef::Outer,
+                edge,
+            })
+            .collect();
+        assert_eq!(faces[0].1.outer(), expected_outer.as_slice());
+        let expected_hole: Vec<SubtractSegmentProvenance> = (0..base.holes[0].len())
+            .map(|edge| SubtractSegmentProvenance::Base {
+                ring: RingRef::Hole(0),
+                edge,
+            })
+            .collect();
+        assert_eq!(faces[0].1.holes(), &[expected_hole]);
+    }
+
+    /// Reordering the cutter slice permutes the cutter INDEX and nothing
+    /// else: the faces are bit-identical and each seam still names the same
+    /// cutter, now at its new position. Provenance a reorder could scramble
+    /// would be unusable as a lineage carrier.
+    #[test]
+    fn published_provenance_is_deterministic_under_cutter_reordering() {
+        let base = pwh_no_holes(rect(0.0, 0.0, 12.0, 4.0));
+        let cut_a = pwh_no_holes(rect(3.0, -1.0, 1.0, 6.0));
+        let cut_b = pwh_no_holes(rect(8.0, -1.0, 1.0, 6.0));
+
+        let forward =
+            subtract_faces_traced(&base, &[cut_a.clone(), cut_b.clone()]).expect("subtract");
+        let reversed = subtract_faces_traced(&base, &[cut_b, cut_a]).expect("subtract");
+        assert_eq!(forward.len(), 3, "two through-cuts leave three pieces");
+        assert_eq!(forward.len(), reversed.len());
+
+        // `[a, b]` -> `[b, a]`: cutter 0 and cutter 1 swap places.
+        let swapped = |s: SubtractSegmentProvenance| match s {
+            SubtractSegmentProvenance::Cut { cutter, ring, edge } => {
+                SubtractSegmentProvenance::Cut {
+                    cutter: 1 - cutter,
+                    ring,
+                    edge,
+                }
+            }
+            base @ SubtractSegmentProvenance::Base { .. } => base,
+        };
+        for ((face, prov), (other_face, other_prov)) in forward.iter().zip(&reversed) {
+            assert_eq!(
+                face, other_face,
+                "faces must not move with the cutter order"
+            );
+            let remapped: Vec<SubtractSegmentProvenance> =
+                other_prov.outer().iter().copied().map(swapped).collect();
+            assert_eq!(prov.outer(), remapped.as_slice());
+            assert_eq!(prov.holes().len(), other_prov.holes().len());
+            for (ring, other_ring) in prov.holes().iter().zip(other_prov.holes()) {
+                let remapped: Vec<SubtractSegmentProvenance> =
+                    other_ring.iter().copied().map(swapped).collect();
+                assert_eq!(ring.as_slice(), remapped.as_slice());
+            }
+        }
+    }
+
+    /// The diagnosed traced entry point reports the same verdicts as its
+    /// untraced twin — the app's degenerate-output warning must not depend
+    /// on which of the two it calls.
+    #[test]
+    fn published_diagnosed_traced_matches_the_untraced_verdict() {
+        let base = pwh_no_holes(rect(0.0, 0.0, 10.0, 10.0));
+        let inner = pwh_no_holes(rect(3.0, 3.0, 2.0, 2.0));
+        let clean = subtract_faces_traced_diagnosed(&base, std::slice::from_ref(&inner));
+        assert!(clean.health.is_ok() && clean.inputs.is_none());
+
+        let cover = pwh_no_holes(rect(-1.0, -1.0, 12.0, 12.0));
+        let consumed = subtract_faces_traced_diagnosed(&base, std::slice::from_ref(&cover));
+        let untraced = subtract_all_with_holes_diagnosed(base, std::slice::from_ref(&cover));
+        assert_eq!(consumed.health, untraced.health, "same verdict");
+        assert!(
+            consumed.inputs.is_some(),
+            "a flagged verdict carries inputs"
         );
     }
 

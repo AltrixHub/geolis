@@ -12,6 +12,7 @@
 //! |---|---|
 //! | [`union_all_with_holes`] | `⋃ inputs[i]` (OR-of-PWH-filled) |
 //! | [`subtract_all_with_holes`] | `base ∩ (¬⋃ subtracts)` |
+//! | [`subtract_faces_traced`] | as above, plus per-edge [`SubtractSegmentProvenance`] |
 //!
 //! Both return typed face topology (zero or more
 //! [`PolygonWithHoles`]) where every output is guaranteed:
@@ -42,8 +43,12 @@ mod subtract;
 mod types;
 mod union;
 
+pub use engine::RingRef;
 pub use intersect::intersect_all_with_holes;
-pub use subtract::{subtract_all_with_holes, subtract_all_with_holes_diagnosed};
+pub use subtract::{
+    subtract_all_with_holes, subtract_all_with_holes_diagnosed, subtract_faces_traced,
+    subtract_faces_traced_diagnosed, SubtractFootprintProvenance, SubtractSegmentProvenance,
+};
 pub use types::{
     point_in_polygon_class, signed_area, PointClass, Polygon, PolygonWithHoles, UnionResult,
     WALL_EPS, WALL_EPS_SQ,
@@ -54,8 +59,9 @@ pub use union::union_all_with_holes;
 /// tracking for callers that derive stable per-segment provenance
 /// (`curve_band::CurveBand2D::execute_faces_with_provenance` from the
 /// traced union, `curve_band::carve_band_faces` from the traced
-/// subtract).
-pub(crate) use engine::{RingRef, SegmentSite, TracedFace};
+/// subtract). The subtract's own provenance is published — see
+/// [`subtract_faces_traced`].
+pub(crate) use engine::{SegmentSite, TracedFace};
 pub(crate) use subtract::subtract_all_with_holes_traced;
 pub(crate) use union::union_all_with_holes_traced;
 

@@ -79,9 +79,14 @@ pub enum BoundaryRef {
 /// `Ord` follows variant order (`Outer < Hole(0) < Hole(1) < …`), which
 /// fixes the deterministic tie-break used when coincident sub-edges from
 /// different rings are deduplicated (smallest [`SegmentSite`] wins).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum RingRef {
+///
+/// Public because the traced ops' published provenance
+/// ([`super::SubtractSegmentProvenance`]) names input rings with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RingRef {
+    /// The outer ring.
     Outer,
+    /// Hole ring `h`, indexed into [`PolygonWithHoles::holes`].
     Hole(usize),
 }
 
