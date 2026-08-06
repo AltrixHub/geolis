@@ -79,6 +79,61 @@ pub fn bulge_from_arc(x0: f64, y0: f64, x1: f64, y1: f64, cx: f64, cy: f64, is_c
     (sweep / 4.0).tan()
 }
 
+/// Maximum absolute tangent-chord angle, in radians (160 degrees).
+///
+/// The sweep of an arc is twice its tangent-chord angle, so this caps a
+/// single arc at 320 degrees (`|bulge| = tan(80°) ≈ 5.671`). The bulge
+/// diverges as the tangent-chord angle approaches 180 degrees (the arc
+/// closes into a full circle), so near-closed configurations are clamped
+/// instead of producing an unbounded — eventually infinite — bulge.
+pub const MAX_TANGENT_CHORD_ANGLE: f64 = 160.0 * PI / 180.0;
+
+/// Returns the bulge of the unique circular arc that starts at
+/// `(x0, y0)` with tangent direction `(tx, ty)` and ends at `(x1, y1)`.
+///
+/// By the tangent-chord angle theorem the signed angle `α` from the
+/// chord to the start tangent is half the sweep. With this module's
+/// convention (`bulge > 0` = counter-clockwise, center left of the
+/// chord) the start tangent lies `sweep / 2` *clockwise* of the chord,
+/// so `sweep = -2α` and
+///
+/// ```text
+/// bulge = tan(sweep / 4) = -tan(α / 2)
+/// ```
+///
+/// `α` is clamped to [`MAX_TANGENT_CHORD_ANGLE`]. The tangent does not
+/// need to be normalized; only its direction is used.
+///
+/// # Panics
+///
+/// Does not panic. Degenerate input (zero-length chord, zero-length
+/// tangent, non-finite coordinates) returns `0.0` — a straight segment.
+#[must_use]
+pub fn bulge_from_chord_tangent(x0: f64, y0: f64, x1: f64, y1: f64, tx: f64, ty: f64) -> f64 {
+    if !(x0.is_finite()
+        && y0.is_finite()
+        && x1.is_finite()
+        && y1.is_finite()
+        && tx.is_finite()
+        && ty.is_finite())
+    {
+        return 0.0;
+    }
+
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    if (dx * dx + dy * dy).sqrt() < 1e-12 || (tx * tx + ty * ty).sqrt() < 1e-12 {
+        return 0.0;
+    }
+
+    // Signed angle from the chord to the tangent, in (-π, π].
+    let alpha = (dx * ty - dy * tx)
+        .atan2(dx * tx + dy * ty)
+        .clamp(-MAX_TANGENT_CHORD_ANGLE, MAX_TANGENT_CHORD_ANGLE);
+
+    -(alpha * 0.5).tan()
+}
+
 /// Evaluates a point on an arc at parameter `t` in `[0, 1]`.
 #[must_use]
 pub fn arc_point_at(
@@ -290,5 +345,85 @@ mod tests {
         assert!(r > 100.0, "r={r}");
         assert!(sw.abs() < 0.01, "sweep={sw}");
         let _ = (cx, cy); // just checking it doesn't panic
+    }
+
+    #[test]
+    fn bulge_from_chord_tangent_roundtrips_through_arc_from_bulge() {
+        // The start tangent produced by arc_from_bulge + arc_tangent_at
+        // must reproduce the bulge it was built from.
+        let chords = [
+            (0.0, 0.0, 2.0, 0.0),
+            (-1.3, 0.7, 2.4, -0.9),
+            (5.0, 5.0, 5.0, -3.0),
+        ];
+        let bulges = [
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+            (PI / 8.0).tan(),
+            -(PI / 8.0).tan(),
+            1e-4,
+            -1e-4,
+            3.0,
+            -3.0,
+        ];
+
+        for (x0, y0, x1, y1) in chords {
+            for bulge in bulges {
+                let (_, _, _, sa, sw) = arc_from_bulge(x0, y0, x1, y1, bulge);
+                let (tx, ty) = arc_tangent_at(sa, sw, 0.0);
+                let recovered = bulge_from_chord_tangent(x0, y0, x1, y1, tx, ty);
+                assert!(
+                    (recovered - bulge).abs() < 1e-9,
+                    "bulge={bulge} recovered={recovered} chord=({x0},{y0})-({x1},{y1})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bulge_from_chord_tangent_along_chord_is_straight() {
+        // Tangent parallel to the chord → no turn → bulge exactly 0.
+        let b = bulge_from_chord_tangent(1.0, 2.0, 4.0, 6.0, 3.0, 4.0);
+        assert!(b.abs() < TOL, "bulge={b}");
+    }
+
+    #[test]
+    fn bulge_from_chord_tangent_ignores_tangent_length() {
+        let short = bulge_from_chord_tangent(0.0, 0.0, 2.0, 0.0, 0.0, -1.0);
+        let long = bulge_from_chord_tangent(0.0, 0.0, 2.0, 0.0, 0.0, -1000.0);
+        assert!((short - long).abs() < TOL, "short={short} long={long}");
+        // Straight down at the start of a chord along +x is the CCW semicircle.
+        assert!((short - 1.0).abs() < TOL, "bulge={short}");
+    }
+
+    #[test]
+    fn bulge_from_chord_tangent_clamps_near_full_circle() {
+        // Tangent almost antiparallel to the chord: the exact arc would
+        // approach a full circle, so the tangent-chord angle is clamped.
+        let limit = (MAX_TANGENT_CHORD_ANGLE * 0.5).tan();
+        for angle_deg in [161.0_f64, 175.0, 179.999] {
+            let angle = angle_deg.to_radians();
+            let b = bulge_from_chord_tangent(0.0, 0.0, 1.0, 0.0, angle.cos(), angle.sin());
+            assert!(b.is_finite(), "bulge={b} for {angle_deg} deg");
+            assert!((b + limit).abs() < 1e-9, "bulge={b} for {angle_deg} deg");
+        }
+        // Just inside the guard the exact value is kept.
+        let inside = 159.0_f64.to_radians();
+        let b = bulge_from_chord_tangent(0.0, 0.0, 1.0, 0.0, inside.cos(), inside.sin());
+        assert!((b + (inside * 0.5).tan()).abs() < 1e-12, "bulge={b}");
+    }
+
+    #[test]
+    fn bulge_from_chord_tangent_degenerate_inputs_are_straight() {
+        // Zero-length chord.
+        assert!(bulge_from_chord_tangent(1.0, 1.0, 1.0, 1.0, 1.0, 0.0).abs() < TOL);
+        // Zero-length tangent.
+        assert!(bulge_from_chord_tangent(0.0, 0.0, 1.0, 0.0, 0.0, 0.0).abs() < TOL);
+        // Non-finite coordinates and tangents.
+        assert!(bulge_from_chord_tangent(f64::NAN, 0.0, 1.0, 0.0, 1.0, 1.0).abs() < TOL);
+        assert!(bulge_from_chord_tangent(0.0, 0.0, f64::INFINITY, 0.0, 1.0, 1.0).abs() < TOL);
+        assert!(bulge_from_chord_tangent(0.0, 0.0, 1.0, 0.0, f64::NAN, 1.0).abs() < TOL);
     }
 }
