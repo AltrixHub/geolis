@@ -14,7 +14,7 @@
 //! | [`subtract_all_with_holes`] | `base ∩ (¬⋃ subtracts)` |
 //! | [`subtract_faces_traced`] | as above, plus per-edge [`SubtractSegmentProvenance`] |
 //!
-//! Both return typed face topology (zero or more
+//! All return typed face topology (zero or more
 //! [`PolygonWithHoles`]) where every output is guaranteed:
 //! - CCW outer with `signed_area > 0`, CW holes with
 //!   `signed_area < 0`.

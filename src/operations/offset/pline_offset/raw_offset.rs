@@ -85,6 +85,11 @@ impl Join {
 pub struct RawOffsetSegment {
     /// Index of the source segment: the one running from
     /// `pline.vertices[source]` to the next vertex.
+    ///
+    /// The raw stage prunes nothing, so today `segments[i].source == i`
+    /// unconditionally. It is carried explicitly so a caller stays
+    /// source-addressable if a later stage ever drops or splits a
+    /// segment — the lineage question this type exists to answer.
     pub source: usize,
     /// Offset start, after the corner join with the previous segment.
     pub start: (f64, f64),
@@ -93,6 +98,10 @@ pub struct RawOffsetSegment {
     /// Bulge re-derived from `start` and `end` about the exact offset
     /// circle, so a joined arc stays concentric with its source. `0` for a
     /// straight segment.
+    ///
+    /// Meaningless when `signed_length` is negative: the endpoints then
+    /// run backwards, so the bulge names the EXPLEMENT arc rather than the
+    /// segment. Check `signed_length` first.
     pub bulge: f64,
     /// Length along the segment's OWN curve — the arc length for a bulged
     /// segment, which is strictly greater than the chord — signed by the
@@ -569,7 +578,7 @@ fn circle_circle_intersections(a: (f64, f64), ra: f64, b: (f64, f64), rb: f64) -
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use std::f64::consts::{FRAC_PI_2, PI};
+    use std::f64::consts::FRAC_PI_2;
 
     use super::*;
 
