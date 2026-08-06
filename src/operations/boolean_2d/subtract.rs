@@ -312,15 +312,13 @@ fn identity_trace(base: &PolygonWithHoles) -> TracedFace {
 /// non-`Ok` when the op errored (`Failed`), when a real cut consumed the whole
 /// base (`Degenerate` / `EmptyResult`), or when a sliver face survived
 /// (`Suspicious`); in those cases a readable [`InputSnapshot`] is attached for
-/// the app to log or dump. Cheap input facts are gathered before `base` moves,
-/// and the snapshot is built only when the verdict is non-`Ok` — so the clean
-/// path costs nothing beyond the assessment.
+/// the app to log or dump. See [`InputFacts::attach`] for when that snapshot
+/// is built.
 #[must_use]
 pub fn subtract_all_with_holes_diagnosed(
     base: PolygonWithHoles,
     subtracts: &[PolygonWithHoles],
 ) -> OpDiagnostic<Result<Vec<PolygonWithHoles>>> {
-    // Facts are gathered before `base` moves into the call.
     let inputs = InputFacts::of(&base, subtracts);
 
     let result = subtract_all_with_holes(base, subtracts);
@@ -414,12 +412,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn traced_empty_list_returns_identity_sites() {
-        let base = PolygonWithHoles {
+    /// A 10x10 base with one square hole — the fixture for the identity
+    /// (no-cutter) paths, where the interesting property is that a RINGED
+    /// base comes back with both rings' provenance intact.
+    fn ringed_base() -> PolygonWithHoles {
+        PolygonWithHoles {
             outer: rect(0.0, 0.0, 10.0, 10.0),
             holes: vec![cw_rect(3.0, 3.0, 4.0, 4.0)],
-        };
+        }
+    }
+
+    /// A 12x4 bar and two disjoint through-cuts that split it into three
+    /// pieces — the fixture for everything that needs more than one cutter
+    /// to be distinguishable.
+    fn two_through_cuts() -> (PolygonWithHoles, PolygonWithHoles, PolygonWithHoles) {
+        (
+            pwh_no_holes(rect(0.0, 0.0, 12.0, 4.0)),
+            pwh_no_holes(rect(3.0, -1.0, 1.0, 6.0)),
+            pwh_no_holes(rect(8.0, -1.0, 1.0, 6.0)),
+        )
+    }
+
+    #[test]
+    fn traced_empty_list_returns_identity_sites() {
+        let base = ringed_base();
         let traced = subtract_all_with_holes_traced(&base, &[]).expect("subtract must succeed");
         assert_eq!(traced.len(), 1);
         // Base returned verbatim — no arrangement, so no snap perturbation.
@@ -473,11 +489,8 @@ mod tests {
 
     #[test]
     fn traced_two_cutters_report_distinct_input_indices() {
-        // Two disjoint through-cuts split the base into three pieces; each
-        // cut's edges must name its own `input` slot (1 and 2).
-        let base = pwh_no_holes(rect(0.0, 0.0, 12.0, 4.0));
-        let cut_a = pwh_no_holes(rect(3.0, -1.0, 1.0, 6.0));
-        let cut_b = pwh_no_holes(rect(8.0, -1.0, 1.0, 6.0));
+        // Each cut's edges must name its own `input` slot (1 and 2).
+        let (base, cut_a, cut_b) = two_through_cuts();
         let traced =
             subtract_all_with_holes_traced(&base, &[cut_a, cut_b]).expect("subtract must succeed");
         assert_eq!(traced.len(), 3, "two through-cuts leave three pieces");
@@ -625,10 +638,7 @@ mod tests {
     /// ring edge it *is*.
     #[test]
     fn published_empty_cutter_list_returns_the_base_verbatim() {
-        let base = PolygonWithHoles {
-            outer: rect(0.0, 0.0, 10.0, 10.0),
-            holes: vec![cw_rect(3.0, 3.0, 4.0, 4.0)],
-        };
+        let base = ringed_base();
         let faces = subtract_faces_traced(&base, &[]).expect("subtract");
         assert_eq!(faces.len(), 1);
         assert_eq!(faces[0].0, base, "bit-identical vertices, no WALL_EPS snap");
@@ -654,9 +664,7 @@ mod tests {
     /// would be unusable as a lineage carrier.
     #[test]
     fn published_provenance_is_deterministic_under_cutter_reordering() {
-        let base = pwh_no_holes(rect(0.0, 0.0, 12.0, 4.0));
-        let cut_a = pwh_no_holes(rect(3.0, -1.0, 1.0, 6.0));
-        let cut_b = pwh_no_holes(rect(8.0, -1.0, 1.0, 6.0));
+        let (base, cut_a, cut_b) = two_through_cuts();
 
         let forward =
             subtract_faces_traced(&base, &[cut_a.clone(), cut_b.clone()]).expect("subtract");

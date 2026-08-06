@@ -1894,21 +1894,27 @@ mod tests {
         worst
     }
 
+    /// Semicircle from `(2, 0)` to `(-2, 0)` through `(0, 2)`: centre at
+    /// the origin, radius 2, bulge 1. The arc-tolerance tests all stroke
+    /// this one baseline, so a sagitta bound is always measured against a
+    /// circle whose exact radius is known.
+    fn semicircle_baseline() -> Pline {
+        Pline {
+            vertices: vec![
+                PlineVertex::new(2.0, 0.0, 1.0),
+                PlineVertex::line(-2.0, 0.0),
+            ],
+            closed: false,
+        }
+    }
+
     /// A stated `arc_tolerance` bounds how far the band's face strays from
     /// the exact offset circle, and the width-derived default does not: the
     /// same semicircular baseline stroked at the default deviates by ~a
     /// tenth of the width, and at 1 mm by at most 1 mm.
     #[test]
     fn arc_tolerance_bounds_the_band_sagitta() {
-        // Semicircle from (2, 0) to (-2, 0) through (0, 2): centre at the
-        // origin, radius 2, bulge 1.
-        let baseline = Pline {
-            vertices: vec![
-                PlineVertex::new(2.0, 0.0, 1.0),
-                PlineVertex::line(-2.0, 0.0),
-            ],
-            closed: false,
-        };
+        let baseline = semicircle_baseline();
         let hw = 0.09;
         let outer_radius = 2.0 + hw;
         // Wide enough to admit the whole outer face, narrow enough to reject
@@ -1954,13 +1960,7 @@ mod tests {
 
     #[test]
     fn with_arc_tolerance_rejects_a_non_positive_bound() {
-        let baseline = Pline {
-            vertices: vec![
-                PlineVertex::new(2.0, 0.0, 1.0),
-                PlineVertex::line(-2.0, 0.0),
-            ],
-            closed: false,
-        };
+        let baseline = semicircle_baseline();
         for bad in [0.0, -0.001, f64::NAN, f64::INFINITY] {
             let err = CurveBand2D::new(vec![baseline.clone()], 0.09)
                 .with_arc_tolerance(bad)

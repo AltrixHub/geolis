@@ -20,7 +20,10 @@ pub const MIN_FACE_AREA: f64 = WALL_EPS;
 /// least one face (e.g. subtracting a cut that must not consume the whole base).
 ///
 /// Takes the faces as a re-iterable borrow so a traced op — whose faces sit
-/// beside their provenance — is assessed without cloning them out.
+/// beside their provenance — is assessed without cloning them out. The
+/// `Clone` bound is on the ITERATOR, not the faces, and must stay cheap:
+/// the walk runs twice. Pass a `&[PolygonWithHoles]` or a borrowing `map`,
+/// never a collected `Vec<&PolygonWithHoles>`.
 #[must_use]
 pub fn assess<'a, F>(faces: F, expect_nonempty: bool) -> OpHealth
 where
