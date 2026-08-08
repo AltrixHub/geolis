@@ -129,7 +129,10 @@ impl Pline {
     /// Returns a new polyline with vertices in reverse order and negated bulges.
     ///
     /// For a segment `v[i] → v[i+1]` with bulge `b`, the reversed segment
-    /// `v[i+1] → v[i]` has bulge `-b` (arc direction flips).
+    /// `v[i+1] → v[i]` has bulge `-b` (arc direction flips). On a CLOSED
+    /// polyline the last vertex owns the closing segment `v[m-1] → v[0]`,
+    /// and its reverse is the new closing segment — so its bulge carries
+    /// over (negated) instead of being dropped.
     #[must_use]
     pub fn reversed(&self) -> Self {
         let m = self.vertices.len();
@@ -140,9 +143,13 @@ impl Pline {
         for j in 0..m {
             let orig_idx = m - 1 - j;
             // In the reversed polyline, vertex j connects to vertex j+1,
-            // which corresponds to the reverse of original segment (m-2-j).
+            // which corresponds to the reverse of original segment (m-2-j);
+            // the last new vertex owns the reversed CLOSING segment when
+            // the polyline is closed, and no segment at all when open.
             let bulge = if j < m - 1 {
                 -self.vertices[m - 2 - j].bulge
+            } else if self.closed {
+                -self.vertices[m - 1].bulge
             } else {
                 0.0
             };
@@ -402,6 +409,40 @@ mod tests {
         // Seg 1 (2→0): reverse of original seg 0 (v[0].bulge=0) → bulge = 0
         assert!((rev.vertices[0].bulge - (-1.0)).abs() < 1e-12); // (4,0), CW semicircle to (2,0)
         assert!(rev.vertices[1].bulge.abs() < 1e-12); // (2,0), line to (0,0)
+    }
+
+    /// A closed polyline's LAST vertex owns the closing segment, so its
+    /// arc must survive reversal (negated) — dropping it silently
+    /// straightened the closing edge of every reversed closed ring.
+    #[test]
+    fn reversed_closed_ring_keeps_the_closing_arc() {
+        let pline = Pline {
+            vertices: vec![
+                PlineVertex::line(0.0, 0.0),
+                PlineVertex::line(2.0, 0.0),
+                PlineVertex::new(2.0, 2.0, 0.5), // arc on the closing segment's neighbour
+                PlineVertex::new(0.0, 2.0, -0.3), // arc on the CLOSING segment (v3 -> v0)
+            ],
+            closed: true,
+        };
+        let rev = pline.reversed();
+        // New closing segment new[3] -> new[0] = v0 -> v3, the reverse of
+        // the original closing segment (bulge -0.3) => bulge 0.3.
+        assert!(
+            (rev.vertices[3].bulge - 0.3).abs() < 1e-12,
+            "closing arc survives"
+        );
+        // Reversal is an involution on closed rings.
+        let back = rev.reversed();
+        for (a, b) in back.vertices.iter().zip(&pline.vertices) {
+            assert!((a.x - b.x).abs() < 1e-12 && (a.y - b.y).abs() < 1e-12);
+            assert!(
+                (a.bulge - b.bulge).abs() < 1e-12,
+                "{} vs {}",
+                a.bulge,
+                b.bulge
+            );
+        }
     }
 
     #[test]

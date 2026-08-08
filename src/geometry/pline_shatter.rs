@@ -14,6 +14,7 @@
 //! read off the true end / start tangents rather than the chord.
 
 use crate::error::{GeometryError, Result};
+use crate::math::arc_2d::sub_arc_bulge;
 use crate::math::Vector3;
 
 use super::pline::{Pline, PlineVertex};
@@ -24,21 +25,6 @@ const STATION_EPS: f64 = 1e-9;
 
 /// Fraction tolerance for treating a sub-segment as empty.
 const FRACTION_EPS: f64 = 1e-12;
-
-/// Bulge magnitude below which a segment is treated as straight.
-const BULGE_EPS: f64 = 1e-12;
-
-/// The bulge of the `f0..f1` sub-arc of a segment whose bulge is `bulge`.
-///
-/// `bulge = tan(sweep / 4)`, and a circular arc's arc-length fraction is
-/// its angle fraction, so the sub-arc sweeps `(f1 - f0) * sweep`.
-fn sub_bulge(bulge: f64, f0: f64, f1: f64) -> f64 {
-    if bulge.abs() < BULGE_EPS {
-        return 0.0;
-    }
-    let sweep = 4.0 * bulge.atan();
-    ((f1 - f0) * sweep / 4.0).tan()
-}
 
 /// Signed angle (radians, CCW positive) from `from` to `to` in the XY
 /// plane. Returns `0.0` when either vector is degenerate.
@@ -199,7 +185,7 @@ impl Pline {
             vertices.push(PlineVertex::new(
                 point.0,
                 point.1,
-                sub_bulge(self.vertices[edge].bulge, fraction, 1.0),
+                sub_arc_bulge(self.vertices[edge].bulge, fraction, 1.0),
             ));
             edge = (edge + 1) % segments;
             fraction = 0.0;
@@ -210,7 +196,7 @@ impl Pline {
             vertices.push(PlineVertex::new(
                 point.0,
                 point.1,
-                sub_bulge(self.vertices[edge].bulge, fraction, to.edge_fraction),
+                sub_arc_bulge(self.vertices[edge].bulge, fraction, to.edge_fraction),
             ));
         }
         vertices.push(PlineVertex::line(to.point.x, to.point.y));
