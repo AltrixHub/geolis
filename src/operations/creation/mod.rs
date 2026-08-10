@@ -14,6 +14,7 @@ pub use make_cone::MakeCone;
 pub use make_cylinder::MakeCylinder;
 pub use make_face::MakeFace;
 pub use make_nurbs_face::MakeNurbsFace;
+pub(crate) use make_nurbs_solid::bind_created_face;
 pub use make_nurbs_solid::{
     MakeCurvedSlab, MakeCurvedWall, MakeNurbsPrism, MakeNurbsTube, MakeRevolvedSolid,
 };

@@ -23,6 +23,31 @@
 //! referenced by exactly two faces. Interior cap diagonals are created
 //! once and shared by the two triangles that name them, and the ring
 //! edges are shared with the side walls.
+//!
+//! # Faces carry the surface they are a piece OF
+//!
+//! Almost every face this op creates is a fragment of a larger surface
+//! the caller actually designed, and the split is the BUILDER's choice,
+//! not the design's:
+//!
+//! | Face | Is a piece of | Who chose the split |
+//! |---|---|---|
+//! | A cap triangle | that whole cap, one ruled surface | [`triangulate_polygon_xy`]'s ear order |
+//! | A side triangle | the vertical quad over ring segment `i` | this op, splitting the quad on `b_i → t_j` |
+//! | Side quad `i` itself | the source curve the caller's [`Self::with_segment_tags`] names | the caller's chord sampling |
+//!
+//! An edge whose existence and position an ALGORITHM picked can never be
+//! a feature edge of the model, so every such face is bound as
+//! [`FaceRole::Tagged`]`("{source}:p{ordinal}")` — one shared source
+//! string per surface, one dense ordinal per piece to keep the names
+//! unique. A consumer that strips the trailing `:p{ordinal}` recovers
+//! the surface, which is how a wireframe extractor drops the interior
+//! seams and keeps only the boundaries between genuinely different
+//! surfaces.
+//!
+//! Naming is opt-in through [`Self::with_op_id`], exactly as
+//! [`MakeSegmentedPrism`](crate::operations::creation::MakeSegmentedPrism)
+//! does it: geolis never invents identity.
 
 use std::collections::HashMap;
 
@@ -30,12 +55,29 @@ use crate::error::{OperationError, Result};
 use crate::math::polygon_2d::{signed_area_2d, triangulate_polygon_xy};
 use crate::math::{Point3, TOLERANCE};
 use crate::operations::boolean_2d::WALL_EPS;
+use crate::operations::creation::bind_created_face;
 use crate::operations::creation::{MakeFace, MakeSolid};
 use crate::topology::{
-    EdgeId, FaceId, OrientedEdge, ShellData, SolidId, TopologyStore, VertexData, VertexId,
+    EdgeId, FaceId, FaceRole, OpId, OrientedEdge, SegmentTag, ShellData, SolidId, TopologyStore,
+    VertexData, VertexId,
 };
 
 use super::extrude::{create_closed_wire, create_line_edge, create_loop_edges};
+
+/// Source string the BOTTOM cap's triangles share.
+///
+/// Namespaced under `loft:` so it cannot alias a caller segment tag —
+/// see [`MakeRuledLoft::with_segment_tags`].
+const BOTTOM_CAP_SOURCE: &str = "loft:cap:bottom";
+/// Source string the TOP cap's triangles share.
+const TOP_CAP_SOURCE: &str = "loft:cap:top";
+
+/// The source string an UNTAGGED side quad's two triangles share: the
+/// quad is still one planar surface the op split on a diagonal, even
+/// when the caller cannot say which curve the quad came from.
+fn untagged_side_source(segment: usize) -> String {
+    format!("loft:side:{segment}")
+}
 
 /// Lofts two index-matched rings that share a plan projection into a
 /// faceted solid with vertical sides and ruled (possibly non-planar)
@@ -46,6 +88,8 @@ use super::extrude::{create_closed_wire, create_line_edge, create_loop_edges};
 pub struct MakeRuledLoft {
     bottom: Vec<Point3>,
     top: Vec<Point3>,
+    op_id: Option<OpId>,
+    segment_tags: Option<Vec<SegmentTag>>,
 }
 
 impl MakeRuledLoft {
@@ -54,7 +98,45 @@ impl MakeRuledLoft {
     /// [`Self::execute`].
     #[must_use]
     pub fn new(bottom: Vec<Point3>, top: Vec<Point3>) -> Self {
-        Self { bottom, top }
+        Self {
+            bottom,
+            top,
+            op_id: None,
+            segment_tags: None,
+        }
+    }
+
+    /// Binds persistent [`FaceName::Created`](crate::topology::FaceName)
+    /// names under `op`. Without it the solid carries no names at all —
+    /// geolis never invents identity.
+    #[must_use]
+    pub fn with_op_id(mut self, op: OpId) -> Self {
+        self.op_id = Some(op);
+        self
+    }
+
+    /// Names the SOURCE CURVE behind each ring segment: `tags[i]` covers
+    /// the segment from ring vertex `i` to vertex `i + 1`, so the list is
+    /// exactly as long as either ring.
+    ///
+    /// Consecutive segments that chord ONE source curve must repeat one
+    /// tag — that repetition is the whole point. The two triangles of
+    /// every quad those segments raise then share a source string, and a
+    /// wireframe extractor drops both the quad diagonals and the chord
+    /// seams BETWEEN the quads, leaving only the boundary where the tag
+    /// actually changes. Without tags each quad is its own surface and
+    /// every chord seam survives as an edge.
+    ///
+    /// Tags are namespaced away from this op's intrinsic sources by the
+    /// `loft:` prefix it reserves ([`BOTTOM_CAP_SOURCE`],
+    /// [`TOP_CAP_SOURCE`], [`untagged_side_source`]); a caller tag that
+    /// collides with one of those strings would merge unrelated faces.
+    ///
+    /// The length is validated in [`Self::execute`].
+    #[must_use]
+    pub fn with_segment_tags(mut self, tags: Vec<SegmentTag>) -> Self {
+        self.segment_tags = Some(tags);
+        self
     }
 
     /// Executes the loft, creating a closed solid in the topology store.
@@ -70,8 +152,9 @@ impl MakeRuledLoft {
     /// [`triangulate_polygon_xy`] when the plan projection is not a
     /// simple polygon, and any error raised while building the faces.
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {
-        let (bottom, top) = self.validated_rings()?;
+        let (bottom, top, reversed) = self.validated_rings()?;
         let n = bottom.len();
+        let segment_tags = self.validated_segment_tags(n, reversed)?;
 
         // Triangulated before any store mutation, so a ring the ear
         // clipper rejects leaves no partial topology behind. One
@@ -112,22 +195,18 @@ impl MakeRuledLoft {
         }
 
         let mut faces = Vec::with_capacity(4 * n - 4);
-        faces.extend(build_cap(
+        let bottom_cap = build_cap(
             store,
             &triangles,
             &bottom_verts,
             &bottom,
             &bottom_ring,
             Facing::Down,
-        )?);
-        faces.extend(build_cap(
-            store,
-            &triangles,
-            &top_verts,
-            &top,
-            &top_ring,
-            Facing::Up,
-        )?);
+        )?;
+        let top_cap = build_cap(store, &triangles, &top_verts, &top, &top_ring, Facing::Up)?;
+        let cap_faces = bottom_cap.len();
+        faces.extend(bottom_cap);
+        faces.extend(top_cap);
 
         // Side triangles: quad (b_i, b_j, t_j, t_i) split along b_i → t_j,
         // outward because the rings wind counter-clockwise in plan.
@@ -154,6 +233,8 @@ impl MakeRuledLoft {
             faces.push(MakeFace::new(upper, vec![]).execute(store)?);
         }
 
+        self.bind_names(store, &faces, cap_faces, segment_tags.as_deref());
+
         let shell = store.add_shell(ShellData {
             faces,
             is_closed: true,
@@ -161,9 +242,86 @@ impl MakeRuledLoft {
         MakeSolid::new(shell, vec![]).execute(store)
     }
 
+    /// Binds one [`FaceRole::Tagged`] name per face, grouping the pieces
+    /// of each surface under a shared source string (see the module
+    /// docs). `faces` is `[bottom cap.., top cap.., side pairs..]` with
+    /// `cap_faces` triangles in each cap; side quad `i` owns
+    /// `faces[2 * cap_faces + 2 * i]` and the face after it.
+    fn bind_names(
+        &self,
+        store: &mut TopologyStore,
+        faces: &[FaceId],
+        cap_faces: usize,
+        segment_tags: Option<&[SegmentTag]>,
+    ) {
+        let Some(op) = &self.op_id else {
+            return;
+        };
+        // One dense ordinal per source, so the names stay unique while
+        // the shared prefix keeps saying which surface each piece is of.
+        let mut pieces: HashMap<String, usize> = HashMap::new();
+        let mut bind = |store: &mut TopologyStore, face: FaceId, source: &str| {
+            let ordinal = pieces.entry(source.to_string()).or_default();
+            let tag = SegmentTag::new(format!("{source}:p{ordinal}"));
+            *ordinal += 1;
+            bind_created_face(store, face, op, FaceRole::Tagged(tag));
+        };
+
+        let sides = &faces[2 * cap_faces..];
+        for &face in &faces[..cap_faces] {
+            bind(store, face, BOTTOM_CAP_SOURCE);
+        }
+        for &face in &faces[cap_faces..2 * cap_faces] {
+            bind(store, face, TOP_CAP_SOURCE);
+        }
+        for (segment, pair) in sides.chunks(2).enumerate() {
+            let source = segment_tags.map_or_else(
+                || untagged_side_source(segment),
+                |tags| tags[segment].as_str().to_string(),
+            );
+            for &face in pair {
+                bind(store, face, &source);
+            }
+        }
+    }
+
+    /// The caller's segment tags, re-indexed onto the ring
+    /// [`Self::validated_rings`] actually built.
+    ///
+    /// A clockwise ring is reversed there to put the side normals
+    /// outward, which renumbers its segments: reversed segment `k` runs
+    /// between the same two vertices as original segment `n − 2 − k`
+    /// (mod `n`), so the tags must follow or every side would name the
+    /// wrong curve.
+    ///
+    /// # Errors
+    ///
+    /// The tag list length does not match the ring's.
+    fn validated_segment_tags(&self, n: usize, reversed: bool) -> Result<Option<Vec<SegmentTag>>> {
+        let Some(tags) = &self.segment_tags else {
+            return Ok(None);
+        };
+        if tags.len() != n {
+            return Err(OperationError::InvalidInput(format!(
+                "ruled loft has {n} ring segments but {} segment tags — one tag \
+                 names one segment",
+                tags.len()
+            ))
+            .into());
+        }
+        if !reversed {
+            return Ok(Some(tags.clone()));
+        }
+        Ok(Some(
+            (0..n).map(|k| tags[(n + n - 2 - k) % n].clone()).collect(),
+        ))
+    }
+
     /// Validates every invariant and returns the two rings normalized to
-    /// a counter-clockwise plan winding, index correspondence intact.
-    fn validated_rings(&self) -> Result<(Vec<Point3>, Vec<Point3>)> {
+    /// a counter-clockwise plan winding, index correspondence intact,
+    /// plus whether normalizing REVERSED them (which renumbers the ring
+    /// segments — see [`Self::validated_segment_tags`]).
+    fn validated_rings(&self) -> Result<(Vec<Point3>, Vec<Point3>, bool)> {
         let n = self.bottom.len();
         if n < 3 || self.top.len() != n {
             return Err(OperationError::InvalidInput(format!(
@@ -218,11 +376,12 @@ impl MakeRuledLoft {
         // Counter-clockwise in plan puts the side normals outward and the
         // cap triangles' own winding in agreement with the ring's.
         if area > 0.0 {
-            Ok((self.bottom.clone(), self.top.clone()))
+            Ok((self.bottom.clone(), self.top.clone(), false))
         } else {
             Ok((
                 self.bottom.iter().rev().copied().collect(),
                 self.top.iter().rev().copied().collect(),
+                true,
             ))
         }
     }
@@ -308,7 +467,7 @@ mod tests {
     use crate::operations::query::Volume;
     use crate::operations::shaping::MakeLoft;
     use crate::tessellation::{TessellateSolid, TessellationParams};
-    use crate::topology::FaceSurface;
+    use crate::topology::{FaceName, FaceSurface};
     use std::f64::consts::FRAC_PI_2;
 
     /// Chords per quarter turn of the curved test band.
@@ -710,6 +869,225 @@ mod tests {
         let mut store = TopologyStore::new();
         assert!(is_invalid_input(
             &MakeRuledLoft::new(bottom, top).execute(&mut store)
+        ));
+    }
+
+    // ── Face naming: every face says which surface it is a piece of ──
+
+    /// The source string a face's `Tagged` name carries, with the
+    /// trailing `:p{ordinal}` piece suffix stripped.
+    fn face_source(store: &TopologyStore, face: FaceId) -> String {
+        match store.names().name_of_face(face) {
+            Some(FaceName::Created {
+                role: FaceRole::Tagged(tag),
+                ..
+            }) => {
+                let tag = tag.as_str();
+                let Some(at) = tag.rfind(":p") else {
+                    panic!("`{tag}` carries no piece ordinal")
+                };
+                assert!(
+                    tag[at + 2..].chars().all(|c| c.is_ascii_digit()) && at + 2 < tag.len(),
+                    "`{tag}` must end in a numeric piece ordinal",
+                );
+                tag[..at].to_string()
+            }
+            other => panic!("face {face:?} carries no tagged name: {other:?}"),
+        }
+    }
+
+    /// Without an op id the solid stays anonymous — geolis never invents
+    /// identity, so an unnamed caller keeps the pre-naming behaviour.
+    #[test]
+    fn no_op_id_binds_no_names() {
+        let bottom = helical_band();
+        let top = lift(&bottom, THICKNESS);
+        let mut store = TopologyStore::new();
+        let solid = MakeRuledLoft::new(bottom, top).execute(&mut store).unwrap();
+        for face in shell_faces(&store, solid) {
+            assert!(
+                store.names().name_of_face(face).is_none(),
+                "face {face:?} was named without an op id",
+            );
+        }
+    }
+
+    /// Every face is a piece of some surface, and the pieces of one
+    /// surface share a source: the two caps take one source each, and an
+    /// untagged side quad's two triangles take one between them. Every
+    /// bound name is still unique.
+    #[test]
+    fn every_face_names_the_surface_it_is_a_piece_of() {
+        let bottom = helical_band();
+        let n = bottom.len();
+        let top = lift(&bottom, THICKNESS);
+        let mut store = TopologyStore::new();
+        let solid = MakeRuledLoft::new(bottom, top)
+            .with_op_id(OpId::new("ramp"))
+            .execute(&mut store)
+            .unwrap();
+
+        let faces = shell_faces(&store, solid);
+        let mut per_source: HashMap<String, usize> = HashMap::new();
+        let mut names: Vec<String> = Vec::new();
+        for &face in &faces {
+            *per_source.entry(face_source(&store, face)).or_default() += 1;
+            let Some(FaceName::Created {
+                role: FaceRole::Tagged(tag),
+                ..
+            }) = store.names().name_of_face(face)
+            else {
+                unreachable!("face_source already asserted the shape")
+            };
+            names.push(tag.as_str().to_string());
+        }
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(names.len(), unique, "piece ordinals must keep names unique");
+
+        // Each cap is `n - 2` triangles of one surface.
+        assert_eq!(per_source.get(BOTTOM_CAP_SOURCE), Some(&(n - 2)));
+        assert_eq!(per_source.get(TOP_CAP_SOURCE), Some(&(n - 2)));
+        // Each of the `n` side quads is two triangles of one surface.
+        for segment in 0..n {
+            assert_eq!(
+                per_source.get(&untagged_side_source(segment)),
+                Some(&2),
+                "side quad {segment} must own exactly its two triangles",
+            );
+        }
+        assert_eq!(per_source.len(), n + 2, "no other surface exists");
+    }
+
+    /// Consecutive ring segments that chord ONE source curve repeat one
+    /// tag, and every quad they raise then lands under that one source —
+    /// which is what lets a wireframe drop the chord seams between them.
+    #[test]
+    fn segments_sharing_a_tag_land_under_one_source() {
+        let bottom = helical_band();
+        let n = bottom.len();
+        let top = lift(&bottom, THICKNESS);
+        // The band is [outer arc, end cap, inner arc, start cap]: the two
+        // arcs are one curve each, the two caps one segment each.
+        let tags: Vec<SegmentTag> = (0..n)
+            .map(|i| {
+                SegmentTag::new(if i < CHORDS {
+                    "outer-arc"
+                } else if i == CHORDS {
+                    "end-cap"
+                } else if i < 2 * CHORDS + 1 {
+                    "inner-arc"
+                } else {
+                    "start-cap"
+                })
+            })
+            .collect();
+
+        let mut store = TopologyStore::new();
+        let solid = MakeRuledLoft::new(bottom, top)
+            .with_op_id(OpId::new("ramp"))
+            .with_segment_tags(tags)
+            .execute(&mut store)
+            .unwrap();
+
+        let mut per_source: HashMap<String, usize> = HashMap::new();
+        for face in shell_faces(&store, solid) {
+            *per_source.entry(face_source(&store, face)).or_default() += 1;
+        }
+        // Two triangles per quad, and each arc raises CHORDS quads.
+        assert_eq!(per_source.get("outer-arc"), Some(&(2 * CHORDS)));
+        assert_eq!(per_source.get("inner-arc"), Some(&(2 * CHORDS)));
+        assert_eq!(per_source.get("end-cap"), Some(&2));
+        assert_eq!(per_source.get("start-cap"), Some(&2));
+        assert_eq!(
+            per_source.len(),
+            6,
+            "four side sources plus the two caps: {per_source:?}",
+        );
+    }
+
+    /// Normalizing a CLOCKWISE ring reverses it, which renumbers the
+    /// segments. The tags must follow, so a face still names the curve
+    /// its own geometry came from — never the one that happens to sit at
+    /// its new index.
+    #[test]
+    fn a_clockwise_ring_keeps_every_tag_on_its_own_segment() {
+        // A trapezoid, so every side has a distinct plan direction.
+        let ccw = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(4.0, 0.0, 1.0),
+            Point3::new(3.0, 2.0, 1.0),
+            Point3::new(1.0, 2.0, 0.0),
+        ];
+        let tags: Vec<SegmentTag> = ["south", "east", "north", "west"]
+            .iter()
+            .map(|t| SegmentTag::new(*t))
+            .collect();
+
+        // The same four sides, wound the other way: segment (v_i, v_i+1)
+        // of the CCW ring is segment (n-2-k) of the reversed one.
+        let n = ccw.len();
+        let cw: Vec<Point3> = ccw.iter().rev().copied().collect();
+        let cw_tags: Vec<SegmentTag> = (0..n).map(|k| tags[(n + n - 2 - k) % n].clone()).collect();
+
+        // Each run maps "plan midpoint of a side quad" → its source.
+        let sides_by_midpoint = |ring: Vec<Point3>, tags: Vec<SegmentTag>| {
+            let top = lift(&ring, THICKNESS);
+            let mut store = TopologyStore::new();
+            let solid = MakeRuledLoft::new(ring, top)
+                .with_op_id(OpId::new("trapezoid"))
+                .with_segment_tags(tags)
+                .execute(&mut store)
+                .unwrap();
+            let mut out: Vec<(String, String)> = Vec::new();
+            for face in shell_faces(&store, solid) {
+                let source = face_source(&store, face);
+                if source.starts_with("loft:cap:") {
+                    continue;
+                }
+                // A side triangle spans exactly two plan positions.
+                let mut plan: Vec<(i64, i64)> = Vec::new();
+                let wire = store.face(face).unwrap().outer_wire;
+                for oe in &store.wire(wire).unwrap().edges {
+                    let edge = store.edge(oe.edge).unwrap();
+                    for v in [edge.start, edge.end] {
+                        let p = store.vertex(v).unwrap().point;
+                        #[allow(clippy::cast_possible_truncation)]
+                        let key = ((p.x * 1e6) as i64, (p.y * 1e6) as i64);
+                        if !plan.contains(&key) {
+                            plan.push(key);
+                        }
+                    }
+                }
+                plan.sort_unstable();
+                assert_eq!(plan.len(), 2, "a side triangle spans one plan segment");
+                out.push((source, format!("{plan:?}")));
+            }
+            out.sort();
+            out
+        };
+
+        assert_eq!(
+            sides_by_midpoint(ccw, tags),
+            sides_by_midpoint(cw, cw_tags),
+            "reversing the ring must carry each tag to the same geometry",
+        );
+    }
+
+    /// One tag names one segment: a list of any other length is refused
+    /// rather than silently shifting every later side onto the wrong
+    /// curve.
+    #[test]
+    fn a_tag_list_that_does_not_match_the_ring_is_refused() {
+        let bottom = sloped_rectangle();
+        let top = lift(&bottom, THICKNESS);
+        let mut store = TopologyStore::new();
+        assert!(is_invalid_input(
+            &MakeRuledLoft::new(bottom, top)
+                .with_op_id(OpId::new("short"))
+                .with_segment_tags(vec![SegmentTag::new("only-one")])
+                .execute(&mut store)
         ));
     }
 }
