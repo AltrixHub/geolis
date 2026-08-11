@@ -59,10 +59,15 @@ pub enum CapEnd {
 /// Where a footprint boundary segment originated in its source
 /// centerline polyline.
 ///
-/// There is no join variant: wall joins are miters, so a join
-/// contributes a single shared vertex to the stroke polygon, never a
-/// segment of its own. Every boundary segment is either a side offset
-/// or an end cap.
+/// There is no join variant. A join that miters contributes a single
+/// shared vertex to the stroke polygon and no segment of its own; a join
+/// sharp enough to run past the miter limit is truncated by a chamfer,
+/// and that chamfer is reported as `Side` on the centerline edge LEAVING
+/// the join (see `build_edge_sources`). So every boundary segment is a
+/// side offset or an end cap here, at the cost of a chamfer reading as
+/// its segment's side — widening this enum is a breaking change for
+/// every consumer that matches it, and is warranted only once one of
+/// them has to tell the two apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SegmentOrigin {
     /// Offset of centerline edge `edge` (connecting centerline vertex
@@ -125,9 +130,13 @@ impl FootprintProvenance {
 pub(super) struct EdgeSource {
     pub pline: usize,
     pub origin: SegmentOrigin,
-    /// Ordinal of the tessellated stroke segment this edge offsets
-    /// (identity for line edges; chord index for arc edges). Used only
-    /// to order fragments of one source along the source.
+    /// Ordinal of the tessellated stroke segment this edge belongs to
+    /// (identity for line edges; chord index for arc edges). A `Side`
+    /// edge offsets that segment; a bevelled `Join`'s chamfer cuts
+    /// ACROSS the corner instead (see `stroke::StrokeOrigin::Join`) and
+    /// takes the ordinal of the segment LEAVING the join, which keeps
+    /// the two adjacent in the ordering. Used only to order fragments
+    /// of one source along the source.
     pub tess_ord: usize,
     /// Supporting stroke-polygon edge geometry, for ordering fragments
     /// by their parameter along the source.
@@ -910,10 +919,13 @@ mod tests {
         let ring = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (2.0, -2.0)];
         let result = run(vec![closed_pline(&ring)], 0.09);
         assert_every_segment_carries_material(&result, &ring);
-        // Swept area = perimeter · thickness, less the crossing overlap.
+        // Swept area = perimeter · thickness, less the crossing overlap,
+        // less the corner at (4, 4). Its legs meet at 18.4°, so its miter
+        // reached 0.5625 — past `MITER_LIMIT * 0.09 = 0.36` — and the
+        // corner bevels: the 0.0486 spike triangle it used to add is gone.
         let area = band_area(&result);
         assert!(
-            (area - 3.053_384).abs() < 1e-4,
+            (area - 3.004_751).abs() < 1e-4,
             "crossing loop band area={area}"
         );
         // Both lobes of the crossing are enclosed voids, not material.

@@ -604,6 +604,21 @@ impl CurveBand2D {
 /// source: the union always drops it, and an output edge that resolves
 /// to `None` is reported as broken topology by
 /// [`footprint_provenances`].
+///
+/// # Bevelled joins fold into their segment
+///
+/// A join whose miter ran past the limit is truncated by a chamfer
+/// ([`StrokeOrigin::Join`]), and that chamfer is attributed to the
+/// centerline segment leaving the join — the segment `seg` names. It is
+/// the CORNER'S OWN TRUNCATION, not a face standing at the width
+/// distance the way a [`SegmentOrigin::Side`] face does, so the public
+/// vocabulary loses that distinction here on purpose: `SegmentOrigin` is
+/// matched exhaustively by consumers across the crate boundary, and a
+/// new variant is a breaking change to all of them. A consumer that has
+/// to tell a chamfer apart from a side face — measuring a face's
+/// distance to its centerline, naming the face, quantifying it — is the
+/// trigger to widen `SegmentOrigin` with a join variant, not a reason to
+/// re-derive the corner geometrically here.
 fn build_edge_sources(
     pline: usize,
     ring: &[(f64, f64)],
@@ -619,16 +634,22 @@ fn build_edge_sources(
                 let a = ring[e];
                 let b = ring[(e + 1) % ring.len()];
                 match *o {
-                    StrokeOrigin::Side { seg, side } => Some(EdgeSource {
-                        pline,
-                        origin: SegmentOrigin::Side {
-                            edge: seg_src[seg],
-                            side,
-                        },
-                        tess_ord: seg,
-                        a,
-                        b,
-                    }),
+                    // A bevelled join's chamfer maps to the SAME source as
+                    // the side offset leaving it (see the fn docs), and
+                    // keeps the same `tess_ord`, so the two stay adjacent
+                    // in the fragment ordering along that source.
+                    StrokeOrigin::Side { seg, side } | StrokeOrigin::Join { seg, side } => {
+                        Some(EdgeSource {
+                            pline,
+                            origin: SegmentOrigin::Side {
+                                edge: seg_src[seg],
+                                side,
+                            },
+                            tess_ord: seg,
+                            a,
+                            b,
+                        })
+                    }
                     StrokeOrigin::Cap { end } => Some(EdgeSource {
                         pline,
                         origin: SegmentOrigin::Cap { end },

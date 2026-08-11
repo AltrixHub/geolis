@@ -23,7 +23,10 @@ use super::pline::{Pline, PlineVertex};
 /// polyline end) as the same position.
 const STATION_EPS: f64 = 1e-9;
 
-/// Fraction tolerance for treating a sub-segment as empty.
+/// Fraction tolerance along one edge, used at both of its ends: a
+/// sub-segment shorter than it is empty, and a station within it of an
+/// edge's far end sits ON the joint rather than inside the edge (which
+/// is where a piece opening there is re-seated onto the next edge).
 const FRACTION_EPS: f64 = 1e-12;
 
 /// Signed angle (radians, CCW positive) from `from` to `to` in the XY
@@ -167,9 +170,21 @@ impl Pline {
     fn piece(&self, start: f64, end: f64, total: f64) -> Result<PlineSpan> {
         let wrapped = end > total + STATION_EPS;
         let end_along = if wrapped { end - total } else { end };
-        let from = self.sample_at_length(start)?;
+        let mut from = self.sample_at_length(start)?;
         let to = self.sample_at_length(end_along)?;
         let segments = self.segment_count();
+
+        // A station that lands exactly ON a joint is reported as the END
+        // of the edge arriving at it. A piece OPENING there walks the
+        // edge that LEAVES it, so re-seat the sample on that edge: the
+        // point is the same one, and the piece would otherwise open with
+        // a zero-length first segment — a vertex duplicated at the joint,
+        // which every consumer that measures per-edge geometry then reads
+        // as a degenerate edge.
+        if from.edge_fraction > 1.0 - FRACTION_EPS {
+            from.edge_index = (from.edge_index + 1) % segments;
+            from.edge_fraction = 0.0;
+        }
 
         let mut steps = (to.edge_index + segments - from.edge_index) % segments;
         if steps == 0 && (wrapped || to.edge_fraction + FRACTION_EPS < from.edge_fraction) {
@@ -435,6 +450,42 @@ mod tests {
         let (start, end) = ends(&pieces[1]);
         assert!((start.0 - 4.0).abs() < TOL && (start.1 - 4.0).abs() < TOL);
         assert!((end.0 - 2.0).abs() < TOL && end.1.abs() < TOL);
+    }
+
+    /// A station that lands exactly ON a joint cuts there and NOTHING
+    /// else: the piece that opens at the joint starts on the edge that
+    /// leaves it, not with a duplicate of the joint vertex.
+    ///
+    /// The duplicate is invisible in XY — the piece traces the same path
+    /// either way — and lethal to every consumer that measures per edge:
+    /// a leading zero-length edge is a segment whose direction, length
+    /// and parameterisation are all undefined.
+    #[test]
+    fn a_station_on_a_joint_opens_the_next_piece_on_the_edge_that_leaves_it() {
+        // The L's joint is at station 4; cut a hair either side of it too,
+        // so the same walk is read with the joint interior to a piece.
+        for stations in [vec![4.0], vec![3.5, 4.0, 4.5]] {
+            let pieces = l_path(false).shatter_at_lengths(&stations).unwrap();
+            assert_eq!(pieces.len(), stations.len() + 1, "{stations:?}");
+            for piece in &pieces {
+                for (index, pair) in piece.pline.vertices.windows(2).enumerate() {
+                    let (dx, dy) = (pair[1].x - pair[0].x, pair[1].y - pair[0].y);
+                    assert!(
+                        dx.hypot(dy) > TOL,
+                        "{stations:?}: edge {index} of {:?} has no length",
+                        piece.pline.vertices,
+                    );
+                }
+            }
+        }
+        // …and the cut is still exactly at the joint, on both sides.
+        let pieces = l_path(false).shatter_at_lengths(&[4.0]).unwrap();
+        let lengths = lengths(&pieces);
+        assert!((lengths[0] - 4.0).abs() < TOL && (lengths[1] - 3.0).abs() < TOL);
+        let (_, first_end) = ends(&pieces[0]);
+        let (second_start, _) = ends(&pieces[1]);
+        assert!((first_end.0 - 4.0).abs() < TOL && first_end.1.abs() < TOL);
+        assert!((second_start.0 - 4.0).abs() < TOL && second_start.1.abs() < TOL);
     }
 
     #[test]
