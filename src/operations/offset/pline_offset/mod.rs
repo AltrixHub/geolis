@@ -108,19 +108,26 @@ impl PlineOffset2D {
 
         // Step 2: Find all self-intersections.
         let intersections = self_intersect::find_all(&raw);
-        if intersections.is_empty() {
-            return Ok(vec![raw]);
-        }
+        let stitched = if intersections.is_empty() {
+            vec![raw]
+        } else {
+            // Step 3: Slice at intersection points.
+            let seg_count = raw.segment_count();
+            let slices = slice::build(&raw.vertices, seg_count, &intersections);
 
-        // Step 3: Slice at intersection points.
-        let seg_count = raw.segment_count();
-        let slices = slice::build(&raw.vertices, seg_count, &intersections);
+            // Step 4: Filter slices by distance to original.
+            let valid = filter::apply(&slices, &self.pline, self.distance);
 
-        // Step 4: Filter slices by distance to original.
-        let valid = filter::apply(&slices, &self.pline, self.distance);
+            // Step 5: Stitch valid slices into result polylines.
+            stitch::connect(&valid, false)
+        };
 
-        // Step 5: Stitch valid slices into result polylines.
-        let result = stitch::connect(&valid, false);
+        // Step 6: Discard the paths that are not offsets of the source —
+        // phantoms that crossed its medial axis, and runaways whose arc
+        // came back with the complementary sweep (see `validity`). The
+        // non-self-intersecting branch above reaches this too, which is
+        // exactly where a runaway hides: it never crosses itself.
+        let result = validity::keep_valid_open(stitched, &self.pline, self.distance);
 
         if result.is_empty() {
             return Err(OperationError::Failed("offset collapsed completely".to_owned()).into());
@@ -503,6 +510,66 @@ mod tests {
         let xs: Vec<f64> = result[0].vertices.iter().map(|v| v.x).collect();
         assert!(xs.iter().any(|x| (x - 1.0).abs() < 1e-9));
         assert!(xs.iter().any(|x| (x - 9.0).abs() < 1e-9));
+    }
+
+    /// An OPEN chain offset past what its own legs can carry publishes
+    /// nothing rather than a line that ran away.
+    ///
+    /// Four 1.2 m arc legs, each turning 90° into the next, offset
+    /// 0.73 m to the inside: the raw offset does not self-intersect, so
+    /// nothing sliced or filtered it, and one of its arcs came back with
+    /// the complementary sweep — a segment whose two ends are 0.1 m apart
+    /// bulged the long way round, swinging 3.8 m clear of a source it is
+    /// meant to hug at 0.73 m. A consumer that lays stations out along
+    /// "the offset" then measures on a line the chain never had.
+    #[test]
+    fn an_open_offset_that_ran_away_from_its_source_is_not_published() {
+        let mut at = (0.0_f64, 0.0_f64);
+        let mut heading = 0.0_f64;
+        let mut vertices = Vec::new();
+        for (chord, bulge, turn) in [
+            (1.2_f64, 0.2_f64, 90.0_f64),
+            (1.2, -0.2, 90.0),
+            (1.2, 0.2, 90.0),
+            (1.2, -0.2, 0.0),
+        ] {
+            vertices.push(PlineVertex::new(at.0, at.1, bulge));
+            let sweep = 4.0 * bulge.atan();
+            let chord_heading = sweep.mul_add(0.5, heading);
+            at = (
+                chord.mul_add(chord_heading.cos(), at.0),
+                chord.mul_add(chord_heading.sin(), at.1),
+            );
+            heading += sweep + turn.to_radians();
+        }
+        vertices.push(PlineVertex::line(at.0, at.1));
+        let source = Pline {
+            vertices,
+            closed: false,
+        };
+
+        let inside = PlineOffset2D::new(source.clone(), 0.73).execute();
+        assert!(
+            inside.is_err(),
+            "an offset with nothing valid left in it collapses; got {inside:?}",
+        );
+
+        // …and the side that IS well formed still comes back, held to the
+        // same criterion: every point of it between the offset distance
+        // and the miter a join is allowed.
+        let Ok(outside) = PlineOffset2D::new(source.clone(), -0.73).execute() else {
+            panic!("the outer offset is a line the source really has")
+        };
+        let furthest = outside
+            .iter()
+            .flat_map(|path| path.to_points(1e-4))
+            .map(|p| super::filter::min_dist_to_pline(p.x, p.y, &source))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            furthest <= RawOffset::MITER_LIMIT * 0.73,
+            "no point of an offset is further from its source than a join may miter; \
+             got {furthest}",
+        );
     }
 
     #[test]
