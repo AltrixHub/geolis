@@ -23,7 +23,10 @@ use super::pline::{Pline, PlineVertex};
 /// polyline end) as the same position.
 const STATION_EPS: f64 = 1e-9;
 
-/// Fraction tolerance for treating a sub-segment as empty.
+/// Fraction tolerance along one edge, used at both of its ends: a
+/// sub-segment shorter than it is empty, and a station within it of an
+/// edge's far end sits ON the joint rather than inside the edge (which
+/// is where a piece opening there is re-seated onto the next edge).
 const FRACTION_EPS: f64 = 1e-12;
 
 /// Signed angle (radians, CCW positive) from `from` to `to` in the XY

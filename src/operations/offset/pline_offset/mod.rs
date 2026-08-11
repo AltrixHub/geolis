@@ -17,13 +17,18 @@ use crate::geometry::pline::Pline;
 /// For open polylines: positive distance = left side, negative = right side.
 /// Returns offset curve(s) without endpoint caps.
 ///
-/// # Closed-ring validity
+/// # Result validity
 ///
-/// Every closed-ring result is checked against the offset's defining
-/// property — no point of an offset by `d` lies closer than `|d|` to the
-/// source ring — and a loop that violates it is discarded as a phantom
-/// (see [`validity`]). An offset that consumes its own ring therefore
-/// reports the collapse instead of returning an inside-out loop.
+/// Every result — closed ring or open path — is held to the offset's
+/// defining distance from BOTH sides (see [`validity`]), and each side
+/// names a different artifact. Too CLOSE: a point nearer than `|d|` to
+/// the source ring is a phantom, the loop a mitred join makes once it
+/// crosses the medial axis — a claim about a bounded region, so it is
+/// asked of closed rings only. Too FAR: a point beyond
+/// [`RawOffset::MITER_LIMIT`] · `|d|` is a runaway, further than any
+/// join is allowed to miter. A result that violates either bound is
+/// discarded, so an offset that consumes its own ring reports the
+/// collapse instead of returning an inside-out loop.
 #[derive(Debug)]
 pub struct PlineOffset2D {
     pline: Pline,
@@ -84,8 +89,9 @@ impl PlineOffset2D {
             stitch::connect(&valid, true)
         };
 
-        // Step 6: Discard phantom loops — a ring closer to the source than
-        // the offset distance is not an offset of it (see `validity`). This
+        // Step 6: Discard the rings that are not offsets of the source —
+        // phantoms that crossed its medial axis, and runaways whose arc
+        // came back with the complementary sweep (see `validity`). This
         // also covers the non-self-intersecting path above, where nothing
         // else inspects the raw offset.
         let result = validity::keep_valid(result, &self.pline, self.distance);
@@ -511,6 +517,8 @@ mod tests {
         assert!(xs.iter().any(|x| (x - 1.0).abs() < 1e-9));
         assert!(xs.iter().any(|x| (x - 9.0).abs() < 1e-9));
     }
+
+    // ── Open-path validity (runaway rejection) ──
 
     /// An OPEN chain offset past what its own legs can carry publishes
     /// nothing rather than a line that ran away.

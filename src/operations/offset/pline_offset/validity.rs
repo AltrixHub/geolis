@@ -66,7 +66,9 @@ fn tolerance(abs_d: f64) -> f64 {
 }
 
 /// The shared criterion: every probe point of a candidate lies between
-/// `nearest` and the miter its own join is allowed of the source.
+/// `nearest` and ONE bound shared by the whole candidate — the furthest
+/// any join is allowed to miter, [`RawOffset::MITER_LIMIT`] · `|distance|`
+/// plus slack. Both are measured from the source.
 fn keep_within(
     candidates: Vec<Pline>,
     original: &Pline,
@@ -88,16 +90,19 @@ fn keep_within(
         .collect()
 }
 
-/// The points a loop is measured at: every vertex plus every segment's
-/// midpoint (the arc midpoint for a bulge-carrying segment, which bows
-/// away from its chord and is where an arc join lands closest to the
-/// source).
-fn probe_points(ring: &Pline) -> impl Iterator<Item = (f64, f64)> + '_ {
-    let n = ring.vertices.len();
-    let vertices = ring.vertices.iter().map(|v| (v.x, v.y));
-    let midpoints = (0..ring.segment_count()).map(move |i| {
-        let v0 = &ring.vertices[i];
-        let v1 = &ring.vertices[(i + 1) % n];
+/// The points a candidate is measured at — a closed loop or an open
+/// path alike: every vertex plus every segment's midpoint (the arc
+/// midpoint for a bulge-carrying segment, which bows away from its
+/// chord and is where an arc join lands closest to the source).
+///
+/// An open path has one segment fewer than it has vertices, so the
+/// wrap-around below only ever fires for a loop.
+fn probe_points(path: &Pline) -> impl Iterator<Item = (f64, f64)> + '_ {
+    let n = path.vertices.len();
+    let vertices = path.vertices.iter().map(|v| (v.x, v.y));
+    let midpoints = (0..path.segment_count()).map(move |i| {
+        let v0 = &path.vertices[i];
+        let v1 = &path.vertices[(i + 1) % n];
         if v0.bulge.abs() < 1e-12 {
             ((v0.x + v1.x) * 0.5, (v0.y + v1.y) * 0.5)
         } else {

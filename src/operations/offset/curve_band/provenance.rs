@@ -130,9 +130,13 @@ impl FootprintProvenance {
 pub(super) struct EdgeSource {
     pub pline: usize,
     pub origin: SegmentOrigin,
-    /// Ordinal of the tessellated stroke segment this edge offsets
-    /// (identity for line edges; chord index for arc edges). Used only
-    /// to order fragments of one source along the source.
+    /// Ordinal of the tessellated stroke segment this edge belongs to
+    /// (identity for line edges; chord index for arc edges). A `Side`
+    /// edge offsets that segment; a bevelled `Join`'s chamfer cuts
+    /// ACROSS the corner instead (see `stroke::StrokeOrigin::Join`) and
+    /// takes the ordinal of the segment LEAVING the join, which keeps
+    /// the two adjacent in the ordering. Used only to order fragments
+    /// of one source along the source.
     pub tess_ord: usize,
     /// Supporting stroke-polygon edge geometry, for ordering fragments
     /// by their parameter along the source.

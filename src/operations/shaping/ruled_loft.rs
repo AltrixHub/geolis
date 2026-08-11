@@ -18,11 +18,14 @@
 //! planar faces. The two caps share a triangulation, which is what keeps
 //! a constant-thickness band's volume exactly `thickness × plan area`.
 //!
-//! Topology matches `MakeLoft`'s: `2n` side triangles (each vertical
-//! quad split along a diagonal), `n − 2` triangles per cap, every edge
-//! referenced by exactly two faces. Interior cap diagonals are created
-//! once and shared by the two triangles that name them, and the ring
-//! edges are shared with the side walls.
+//! The SIDES carry `MakeLoft`'s topology unchanged: `2n` triangles,
+//! each vertical quad split along a diagonal. The CAPS are the
+//! deliberate difference — `n − 2` triangles apiece, where `MakeLoft`
+//! lays down the one face it can validate as planar. Either way the
+//! solid closes with every edge referenced by exactly two faces:
+//! interior cap diagonals are created once and shared by the two
+//! triangles that name them, and the ring edges are shared with the
+//! side walls.
 //!
 //! # Faces carry the surface they are a piece OF
 //!
@@ -148,7 +151,9 @@ impl MakeRuledLoft {
     /// coordinate, disagree in plan at any index (the sides are vertical
     /// by construction), lack strictly positive vertical separation at
     /// any index, repeat a vertex consecutively, or enclose no area in
-    /// plan. Propagates [`OperationError::Failed`] from
+    /// plan — and when a [`Self::with_segment_tags`] list is not exactly
+    /// as long as the ring, which is checked before any face is built.
+    /// Propagates [`OperationError::Failed`] from
     /// [`triangulate_polygon_xy`] when the plan projection is not a
     /// simple polygon, and any error raised while building the faces.
     pub fn execute(&self, store: &mut TopologyStore) -> Result<SolidId> {

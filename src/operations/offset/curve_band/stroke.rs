@@ -340,8 +340,10 @@ struct JoinResult {
 /// Computes offset vertices at a single interior join.
 ///
 /// For a CCW polyline, `left_normal` points inward, so:
-///   - left side = inner boundary (shrinks at convex corners, spikes at concave)
-///   - right side = outer boundary (spikes at convex corners, shrinks at concave)
+///   - left side = inner boundary (shrinks at convex corners, reaches out at
+///     concave — spiking only for as long as the miter holds)
+///   - right side = outer boundary (reaches out at convex corners — spiking
+///     only for as long as the miter holds — shrinks at concave)
 ///
 /// `cross = dir_in × dir_out`:
 ///   - `> 0`: left turn → convex for CCW → outer side is `right`, inner is `left`
